@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .cscan import CUnit, external_calls, scan_c
+from .cscan import external_calls, scan_c
 from .errors import Code, MtmError
 
 #: Stable requirement id shape used by the fixture SDDs, e.g. ``SAT-001``.
