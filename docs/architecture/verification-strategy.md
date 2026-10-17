@@ -10,7 +10,12 @@ flowchart TD
   T --> P["GCC/Clang + ABI/optimization profiles"]
   F["Separate property/fuzz harness"] --> Z["libFuzzer + sanitizers"]
   T --> V["Valgrind on selected host scenarios"]
-  C & S & M & P & Z & V --> E["Evidence, limitations and report"]
+  C --> E["Evidence, limitations and report"]
+  S --> E
+  M --> E
+  P --> E
+  Z --> E
+  V --> E
 ```
 
 | Campaign | Test objectives consolidated | Toolchain | What the evidence establishes | Important limitations |
