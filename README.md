@@ -41,6 +41,8 @@ flowchart LR
 - [Architecture and product requirements](docs/architecture/architecture.md)
 - [Verification strategy and tool selection](docs/architecture/verification-strategy.md)
 - [Workflow-engine comparison and decision](docs/architecture/workflow-engines.md)
+- [Data contracts and evidence model](docs/architecture/data-contracts.md)
+- [LLM autonomy and human review](docs/architecture/automation-policy.md)
 - [Qualification requirements and fixture catalog](docs/qualification/qualification.md)
 - [CI and manual product test plan](docs/qualification/ci-and-manual-tests.md)
 - [Step-by-step construction plan](docs/plan/implementation.md)
