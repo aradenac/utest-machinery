@@ -4,7 +4,7 @@ This is a **black-box user guide** defining intended behavior; command examples 
 
 ## First use
 
-\`\`\`mermaid
+```mermaid
 sequenceDiagram
   actor User as Engineer
   participant CLI as mtm
@@ -28,7 +28,7 @@ sequenceDiagram
   User->>CLI: interpret
   CLI->>Agent: Explain existing evidence
   Agent-->>Bench: Actionable recommendations
-\`\`\`
+```
 
 ## Core CLI contract
 
@@ -38,7 +38,6 @@ sequenceDiagram
 | `mtm doctor` | Diagnose Docker, mounts, credentials and image | Diagnostic report |
 | `mtm init` | Establish one bench for workspace | Versioned project config |
 | `mtm scope list/add/remove` | Manage selected code, specs and requirements | Versioned scope, invalidation record |
-| `mtm assess` | Discover feasible host-executable units | Feasibility assessment with blockers |
 | `mtm plan` | View planned scenarios, generated tests, gaps, assumptions and their relationships | Read-only; the plan itself is versioned by generation |
 | `mtm generate` | Create/update generated tests and mocks | Reviewable diffs and stable IDs |
 | `mtm verify` | Deterministic run of frozen bench | Immutable campaign directory |
