@@ -117,6 +117,11 @@ Requirements below express **observable behavior**; schemas are specified in [da
 | SYS-030 | The CLI SHALL report live stage/status/failures and permit inspection of plan, results and audit evidence. |
 | SYS-031 | The tool SHALL publish a navigable HTML report and machine-readable results referencing immutable campaigns. |
 | SYS-032 | CI and qualification SHALL exercise user workflows, failure/recovery paths, security boundaries and semantic C/SDD samples, disclosing untested scope. |
+| SYS-033 | A frozen re-execution SHALL reject unavailable or hash-mismatched original selected inputs; historical viewing SHALL remain available. |
+| SYS-034 | Mutations SHALL preserve an operator configuration, per-mutant identity/status and native reports; invalid/equivalent mutants SHALL be accounted for separately. |
+| SYS-035 | Fuzz campaigns SHALL record corpus, seeds, budgets, properties and replayable reproductions for reported failures. |
+| SYS-036 | LLM model/provider selection SHALL reside in user-level configuration; only model calls use user credentials. |
+| SYS-037 | All bundled testing/workflow tools SHALL be free to use internally, with reproducible versions and recorded license information. |
 
 ## Technical boundaries
 
