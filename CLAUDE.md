@@ -11,6 +11,8 @@ Claude Code loads this file automatically. Start by reading [README](README.md),
 
 ## Working rules
 
+- Review relevant entries in the [risk register](docs/project/risks.md) when making a design choice or preparing a PR. **Complexity watch (R20):** before adding nontrivial glue, wrappers, custom tooling or another data model, check whether a selected tool already does the job, a simpler integration exists, or the requirement could be achieved with a smaller design. Compare maintenance/debug cost with the actual feature value. If disproportionate, **raise a concise finding with alternatives and a recommendation in the PR or to the user before proceeding**; do not silently drop or change agreed requirements. Update risk actions only for work actually done and evidenced.
+
 - Work inside the repository and local virtual environments/container. Ask before installing anything outside the project or modifying host system settings.
 - Input C, headers, SDDs and other selected artifacts are immutable. Product-specific files are in one external test-bench directory; do not modify application source or silently adjust an SDD-derived oracle.
 - Run **all relevant tests locally first**; CI is the short independent reproducibility gate, **not your debugging environment**. Record local heavy/full campaign results in the PR.
