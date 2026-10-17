@@ -22,9 +22,9 @@ flowchart TD
 | Step | Build | Completion gate |
 | --- | --- | --- |
 | **1 — Contracts** | Define IDs/schema for input manifest, requirements, unit inventory, oracle, plan, campaign, evidence, findings, action recommendations and stage journal; version schema. | Example JSON/YAML validates, trace links complete, no undocumented verdict |
-| **2 — CLI & bootstrap** | Standalone Linux CLI, `install/init/doctor`, Docker detection, image pinning, user vs project configuration, secrets policy, read-only mounts. | Fresh WSL setup; clean container reinstall preserves bench state and original hashes |
+| **2 — CLI & bootstrap** | Standalone Linux CLI, `install/init/doctor/scope/plan/status`, Docker detection, image pinning, user vs project configuration, secrets policy, read-only mounts. | Fresh WSL setup; clean container reinstall preserves bench state and original hashes |
 | **3 — Workflows** | Dagu text DAGs, headless CLI integration, stdout progress, immutable stage records, retries/checkpoints and optional visual audit. Evaluate alternative if Dagu fails gates. | Kill/resume test; optional UI; no project state only inside container |
-| **4 — Discovery and host feasibility** | Source glob/explicit paths, multi-repo mapping, C preprocessing/compile diagnostics, symbol discovery, target-feature classification and shims on copy/overlay. | Ready/Adapted/Blocked justified on fixtures |
+| **4 — Discovery and host feasibility** | Explicitly selected roots only (no unrelated workspace scanning), multi-repo mapping, C preprocessing/compile diagnostics, symbol discovery, target-feature classification and shims on copy/overlay. | Automatic feasibility on scope change; Ready/Adapted/Blocked justified on fixtures |
 | **5 — Embedded LLM harness** | Configurable provider, constrained tool interface, prompt templates, model metadata, requirements extraction, ambiguity and evidence provenance, planning approval policy. | Correctly identifies missing/conflicting specifications with no fabricated oracles |
 | **6 — Test generation** | Ceedling project in bench, Unity/CMock generated tests and mocks, fault scenarios, controlled test IDs, compilable host harness, no original source changes. | Nominal/defective/mocked fixtures execute; generated diff reviewable |
 | **7 — Deterministic verify** | Rebuild frozen suite without LLM, independent functional/robustness campaign, retry/error semantics and archived native results. | No LLM API calls; repeatable test verdicts |
@@ -32,7 +32,7 @@ flowchart TD
 | **9 — Mutation and fuzz** | Validate compatible Mull/LLVM runner, manifest generated mutants, distinguish statuses; libFuzzer harness and stable corpus/seed/reproducer. | Known mutants killed/survive as expected, induced parser bug reproduced |
 | **10 — Evidence and reports** | Deterministic normalization/joins, HTML navigation, requirement/implementation/SDD gap classifications, embedded LLM evidence interpretation and actionable recommendations. | Every claim traceable and independent reinterpretation preserves raw evidence |
 | **11 — Lifecycle** | Scope add/remove, SDD/code change detection, invalidation graph, approved oracle locks, stable IDs, Git-friendly checkpoints, merging and collaboration. | Two developers independently replay; scope changes do not erase history |
-| **12 — Qualification & delivery** | Complete fixture catalog, failure injection, malicious inputs, time/resource profiles, docs, workflow visualization, release/upgrade/rollback guidance. | Meet qualification requirements QD-001–012; no unjustified compliance claims |
+| **12 — Qualification & delivery** | Implement and execute [CI/manual product checks](../qualification/ci-and-manual-tests.md); complete fixture catalog, failure injection, malicious inputs, time/resource profiles, docs, workflow visualization, release/upgrade/rollback guidance. | Meet qualification requirements QD-001–012; no unjustified compliance claims |
 
 ## Agent implementation instructions
 
