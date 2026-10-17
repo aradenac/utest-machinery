@@ -95,7 +95,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Vérification d'efficacité à venir :** les prochaines PR franchissant Docker/LLM/compilateur doivent démontrer le vrai parcours utilisateur sur l'environnement prévu. **L'action est appliquée au processus, pas encore validée sur la chaîne complète de PR 2** : l'essai avec le modèle réel reste une preuve manuelle autorisée requise avant la soumission de cette feature, pas une condition de démarrage.
 
-**Statut :** **En attente de confirmation** — règle appliquée aux consignes et au plan ; efficacité à examiner dès la PR 2.
+**Statut :** **En attente de confirmation** — règle appliquée aux consignes et au plan via la [PR #11](https://github.com/aradenac/utest-machinery/pull/11) ; efficacité à examiner dès la PR 2.
 
 ### AP-03 — Tests d'invariants et de cycle de vie
 
@@ -115,7 +115,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Vérification d'efficacité à venir :** dans les prochaines PR, retrouver les décisions dans Beads, reconstruire l'historique dans `worklog/` et confirmer l'intégration des règles les plus récentes de `main`.
 
-**Statut :** **En attente de confirmation** — règle appliquée ; efficacité à évaluer à la revue des prochaines features.
+**Statut :** **En attente de confirmation** — règle appliquée via la [PR #11](https://github.com/aradenac/utest-machinery/pull/11) ; efficacité à évaluer à la revue des prochaines features.
 
 ### AP-05 — Vérification légère avant publication
 
@@ -125,7 +125,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Vérification d'efficacité à venir :** contrôler les PR futures, spécialement l'intégration CCR/DeepSeek de PR 2, pour prévenir toute divulgation accidentelle ou inutile. La confidentialité résiduelle acceptée dans R18 reste inchangée.
 
-**Statut :** **En attente de confirmation** — règle appliquée ; efficacité à examiner à la prochaine revue.
+**Statut :** **En attente de confirmation** — règle appliquée via la [PR #11](https://github.com/aradenac/utest-machinery/pull/11) ; efficacité à examiner à la prochaine revue.
 
 ### Revue et mesure d'efficacité
 
