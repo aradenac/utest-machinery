@@ -4,32 +4,30 @@
 
 ## Component topology
 
-```mermaid
+\`\`\`mermaid
 flowchart TB
-  U["Engineer / mtm standalone CLI"] --> C["Project configuration + one bench directory"]
-  U --> D
-  I["Explicitly selected C and SDD inputs (read-only)"] --> D
-  C <--> D
-  S["Per-user credentials outside repos"] -->|runtime-only, least privilege| D
-  subgraph D["Generic Docker runtime"]
-    W["Dagu (candidate) / headless DAG"]
-    L["Embedded LLM harness"]
-    A["Native feasibility + compiler adapters"]
-    T["Ceedling / LLVM / Mull / libFuzzer / Valgrind"]
-    R["Evidence aggregator + HTML generator"]
-    W --> L
-    W --> A
-    W --> T
-    W --> R
+  U["Engineer / standalone mtm CLI"] --> RUNNER
+  IN["Selected source and SDD roots"] -->|read-only| RUNNER
+  BENCH["Single versioned project bench on host"] <-->|scoped persistence| RUNNER
+  USER["Per-user config and secrets"] -->|ephemeral for LLM only| AGENT
+  subgraph CONTAINER["Reusable generic Docker image"]
+    RUNNER["Core API and workflow runner"]
+    DAG["Headless Dagu candidate"]
+    AGENT["LLM harness"]
+    TEST["Native C test engines"]
+    REPORT["Evidence and report engine"]
+    RUNNER --> DAG
+    DAG --> AGENT
+    DAG --> TEST
+    DAG --> REPORT
   end
-  D --> O["Tests, manifests, stage journal, evidence, reports in host bench"]
-```
+\`\`\`
 
 Only generic product code, tool installations and workflow templates reside in the image. **All project-specific state** is host-mounted. Persistent data include configurations, scenario IDs, plan, generated code, adaptations, hashes, findings, decisions and interpretable evidence.
 
 ## Host layout and mount policy
 
-No automatic discovery outside explicitly configured source and specification roots is permitted. Feasibility assessment runs implicitly on scope changes and before generation; its results are exposed through plan/status and execution diagnostics, not a dedicated user-facing command. One workspace has exactly **one owned bench root**, either in an owning repository or in a dedicated repository for multi-repo workspaces. Inputs may be anywhere in the accessible workspace and are referenced, not moved. Resolve and reject path escapes, dangling references, undocumented external roots and overlapping ownership. A possible layout (not a rigid internal API):
+No automatic discovery outside explicitly configured source and specification roots is permitted. Feasibility assessment runs implicitly on scope changes and before generation; its results are exposed through plan/status and execution diagnostics, not a dedicated user-facing command. One workspace has exactly **one owned bench root**, either in an owning repository or in a dedicated repository for multi-repo workspaces. Inputs may reside in separate explicitly selected repositories and are referenced, not moved. When reproducing a historical campaign, the recorded Git revisions (including dirty-worktree content if applicable) must remain available; if bytes are missing or hashes mismatch, verification must refuse rather than silently rebuilding a different input. A content-addressed optional snapshot inside the bench may preserve selected input bytes without modifying the originals. Resolve and reject path escapes, dangling references, undocumented external roots and overlapping ownership. A possible layout (not a rigid internal API):
 
 ```text
 test-machinery/
@@ -120,6 +118,13 @@ Requirements below express **observable behavior**; schemas are specified in [da
 | SYS-031 | The tool SHALL publish a navigable HTML report and machine-readable results referencing immutable campaigns. |
 | SYS-032 | CI and qualification SHALL exercise user workflows, failure/recovery paths, security boundaries and semantic C/SDD samples, disclosing untested scope. |
 
+## Technical boundaries
+
+- Native execution uses original C translation units when feasible; if isolated extraction is unavoidable, retain hashes, transformations and fidelity assumptions. Hardware-dependent units may remain BLOCKED, never omitted from selected-scope statistics.
+- Generated oracles carry exact SDD anchors and review state; the LLM may propose a correction to code or specification but may not silently modify either.
+- Only the generic engine and tool installations live in Docker. Every project configuration, source mapping, tests, journal, campaign and report belongs to the single host bench. Git-version essential configurations, generated tests, stable states and accepted reports; budget large fuzz/raw artifacts explicitly with Git LFS or content-addressed archives, without silent deletion.
+- Distinguish historical **record replay** (read preserved evidence), **re-execution** (requires original selected input content and locked toolchain) and **reinterpretation** (new LLM explanation from immutable evidence).
+
 ## Execution semantics and security
 
 The workflow engine invokes a small stable core API; LLM outputs are schema-validated proposals, not arbitrary commands. Treat test input and compiled C as untrusted. Use non-root containers, scoped mounts, CPU/memory/time limits, disabled network for deterministic runs, no privileged Docker socket access and explicit access control for credentials. Container isolation alone is not a complete security boundary. Write temporary outputs and publish atomically, preserving interrupted-step diagnostics. Stage cache keys include input hashes, toolchain digest, flags, mocks, harness and workflow revision. Unexpected test failure is evidence; runner crash is infrastructure failure.
@@ -127,6 +132,13 @@ The workflow engine invokes a small stable core API; LLM outputs are schema-vali
 ## Findings and verdicts
 
 A testcase assertion PASS has meaning only under its documented oracle. For underspecified requirements retain `UNDETERMINED` irrespective of a green test. Never edit the tested production source or quietly repair expected values. Recommendations can propose patch sketches but are not applied automatically. Require explicit rationale for exclusions and waived gaps.
+
+## Contractual interfaces
+
+- The public CLI is defined in [user workflows](../user-guide/workflows.md); no manual tool setup or mandatory GUI.
+- [Data contracts](data-contracts.md) define files and statuses; [LLM policy](automation-policy.md) defines trusted operations and approvals.
+- [Verification strategy](verification-strategy.md) specifies six complementary campaigns; [workflow choice](workflow-engines.md) retains candidate alternatives.
+- [PR gates](../plan/implementation.md) and [CI/manual checks](../qualification/ci-and-manual-tests.md) determine implementation readiness.
 
 ## Future architecture boundary
 
