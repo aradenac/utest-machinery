@@ -42,6 +42,7 @@ flowchart LR
 - [Verification strategy and tool selection](docs/architecture/verification-strategy.md)
 - [Workflow-engine comparison and decision](docs/architecture/workflow-engines.md)
 - [Qualification requirements and fixture catalog](docs/qualification/qualification.md)
+- [CI and manual product test plan](docs/qualification/ci-and-manual-tests.md)
 - [Step-by-step construction plan](docs/plan/implementation.md)
 
 **Status:** design/specification baseline. The documented CLI and product runtime are **proposed interfaces**, not implemented commands. The repository contains reference demonstration inputs; generated verification results must not be presented as observed until the machinery executes them.
