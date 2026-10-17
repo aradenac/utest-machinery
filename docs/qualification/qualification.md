@@ -64,4 +64,4 @@ Report per fixture: selected inputs, discovered units, host feasibility, generat
 - [Mocked sensor SDD](../../examples/mocked-sensor/sdd.md) and [source](../../examples/mocked-sensor/sensor.c)
 - [Underspecified SDD](../../examples/underspecified/sdd.md) and [source](../../examples/underspecified/mode.c)
 
-These are **initial seeds**, not the complete set required above. The construction plan requires the remainder before the product is declared qualified.
+Additional seeds: [state-machine](../../examples/state-machine/sdd.md), [frame-parser](../../examples/frame-parser/sdd.md); [independent reference outcomes](../../examples/expected-outcomes.md) must be withheld from generation. These remain an incomplete fixture catalog until the other Q scenarios exist. The construction plan requires the remainder before the product is declared qualified.
