@@ -1,6 +1,6 @@
-# Registre des risques — uTest Machinery
+# Risques et impacts amplifiés — uTest Machinery
 
-**Objet :** suivre les risques qui menacent la pertinence des tests, la faisabilité native, le coût d'exploitation ou la réalisation du produit. Ce registre **consigne les orientations acceptées** lors de la revue du 17 octobre 2026 ; **il ne prétend pas que les mitigations sont déjà implémentées**. Les décisions techniques détaillées devront, si elles sont retenues, être intégrées ultérieurement aux [spécifications](../architecture/architecture.md), au [plan de développement](../plan/implementation.md) et aux critères de qualification.
+**Objet :** suivre les **risques** (événements à prévenir) et les **impacts constatés en revue** (RETEX), leurs causes possibles, les extrapolations systémiques et les actions préventives proposées. Les deux suivis coexistent sur cette même page sans confondre risques potentiels et anomalies de PR. Ce registre **consigne les orientations acceptées** lors de la revue du 17 octobre 2026 ; **il ne prétend pas que les mitigations sont déjà implémentées**. Les décisions techniques détaillées devront, si elles sont retenues, être intégrées ultérieurement aux [spécifications](../architecture/architecture.md), au [plan de développement](../plan/implementation.md) et aux critères de qualification.
 
 **Notation indicative :** probabilité P et impact I de 1 (faible) à 5 (très élevé), score **S = P × I** ; `20–25` critique, `12–19` important, `1–11` moindre. Cette cotation sert à ordonner les discussions et ne représente pas une fréquence mesurée. **Statuts :** `À traiter` (mitigation à définir ou décider), `À étudier` (choix technique ouvert), `À mettre en œuvre` (plan validé, application non démontrée), `En attente de confirmation` (application documentée, efficacité à revoir), `Maîtrisé` (efficacité confirmée par preuves), `Accepté` (limitation assumée), `Différé` (renforcement non prioritaire). **Le registre est mis à jour exclusivement lors de la revue indépendante des risques, pas par l'agent de développement.** L'agent documente ses choix et preuves dans Beads ; l'examen du code et des PR permet de décider d'un éventuel changement de statut ou de cotation.
 
@@ -47,3 +47,86 @@
 Le statut d'un risque ne passe à `En attente de confirmation` qu'après une application observable, puis à `Maîtrisé` seulement si une **revue indépendante** confirme son efficacité sur des preuves (code, tests, tickets Beads et PR). **Seul le responsable de la revue des risques** ajuste cette page et les scores ; Claude Code ne la modifie pas. La colonne « Actions / suivi » doit rester concise : décision, preuve/référence éventuelle et prochain examen, sans recopier les tickets Beads. Le [modèle de PR](../../.github/PULL_REQUEST_TEMPLATE.md) référence les tickets Beads pour retrouver les justifications.
 
 **État initial :** arbitrages et mitigations consignés ; **aucune mitigation technique n'est déclarée implémentée dans cette mise à jour**. Les scores doivent être réévalués après les premiers résultats sur du C/SDD réel, les coûts mesurés et les revues d'efficacité de suites générées.
+
+---
+
+## RETEX 01 — Impacts identifiés lors de la revue de la PR #5
+
+**Source :** [PR #5 — première feature, bootstrap et contrôle](https://github.com/aradenac/utest-machinery/pull/5), revue du 17 octobre 2026. Les constats proviennent de l'inspection du code, des tests et des preuves GitHub. **Ils n'impliquent pas que les défaillances aient eu lieu en production, ni que tous les scénarios aient été reproduits dans WSL.** La revue a intercepté ces défauts et risques de défaut *avant fusion*. La colonne « Cause probable » présente une **hypothèse à confirmer** et non une cause racine démontrée.
+
+Les actions de correction de la **PR #5** sont suivies **dans cette PR** et dans Beads, **pas dans ce RETEX**. Ici, les actions AP sont exclusivement des **préventions pour les futures features**. Leur inscription dans ce registre est validée, **mais aucune n'est encore décidée pour mise en œuvre ni exécutée**.
+
+### Matrice des impacts et généralisation
+
+| ID | Impact identifié en revue | Cause probable (hypothèse) | Généralisation de la cause et conséquences possibles | Actions préventives liées | Suivi |
+| --- | --- | --- | --- | --- | --- |
+| **IMP-01** | CLI dépendante de Dagu installé sur l'hôte, malgré l'autonomie Docker prévue. | Composants testés isolément, sans reproduire le parcours utilisateur complet. | **Systémique probable :** d'autres intégrations (LLM, compilateur C, couverture, mutation) peuvent être vertes individuellement mais inutilisables ensemble ; produit livré incomplet malgré des tests réussis. | [AP-01](#ap-01--preuve-par-critère-dacceptation), [AP-02](#ap-02--qualification-dans-lenvironnement-réel) | Impact identifié ; prévention à décider. |
+| **IMP-02** | La consultation de `mtm status` peut remplacer le dernier diagnostic persistant. | Tests de commandes isolées, sans vérification des séquences et transitions d'état. | **Systémique probable :** perte ou altération d'historique, checkpoints, plans, tests approuvés ou preuves lors de consultations, réinitialisations et reprises ; fiabilité d'audit compromise. | [AP-01](#ap-01--preuve-par-critère-dacceptation), [AP-03](#ap-03--tests-dinvariants-et-de-cycle-de-vie) | Impact identifié ; prévention à décider. |
+| **IMP-03** | Diagnostics de workflow incomplets dans la sortie utilisateur et les enregistrements. | Vérification du code de retour sans contrôle de tous les champs du contrat fonctionnel. | **Systémique probable :** une fonctionnalité pourrait être considérée achevée sur une preuve partielle ; erreurs inexpliquées et rétablissement coûteux pour d'autres étapes du workflow. | [AP-01](#ap-01--preuve-par-critère-dacceptation), [AP-03](#ap-03--tests-dinvariants-et-de-cycle-de-vie) | Impact identifié ; prévention à décider. |
+| **IMP-04** | `init --force` peut faire perdre des sélections de périmètre existantes. | Invariant de préservation des données non couvert lors d'une opération de réinitialisation. | **Systémique probable :** pertes silencieuses de scénarios, oracles validés, états et preuves lors des évolutions incrémentales ou migrations. | [AP-03](#ap-03--tests-dinvariants-et-de-cycle-de-vie) | Impact identifié ; prévention à décider. |
+| **IMP-05** | Écriture de fichiers potentiellement root-owned ou changement récursif de propriétaire sur le banc monté. | Vérification côté conteneur sans examen systématique des effets sur le système hôte. | **Systémique probable :** permissions, chemins, volumes ou variables d'environnement supposés présents ; fonctionnement limité au poste de développement, effets indésirables sur des sources utilisateur. | [AP-02](#ap-02--qualification-dans-lenvironnement-réel) | Impact potentiel identifié dans le code ; prévention à décider. |
+| **IMP-06** | Une CLI installée depuis un wheel peut ne plus disposer de ses schémas de validation. | Tests exécutés dans le checkout source et non sur l'artefact installé indépendamment. | **Systémique probable :** omission de schémas, scripts, modèles, ressources ou chemins requis ; CI réussie mais installation distribuée défaillante. | [AP-02](#ap-02--qualification-dans-lenvironnement-réel) | Impact potentiel identifié dans le code ; prévention à décider. |
+| **IMP-07** | Un identifiant de scope invalide au regard du schéma peut être écrit. | Validation en lecture/chargement, mais pas de garantie équivalente avant chaque écriture. | **Systémique probable :** création progressive d'états incompatibles, impossibles à relire, maintenir ou migrer ; erreurs tardives difficiles à diagnostiquer. | [AP-03](#ap-03--tests-dinvariants-et-de-cycle-de-vie) | Impact identifié ; prévention à décider. |
+| **IMP-08** | Répartition des justifications et historiques entre `worklog/`, Beads et PR insuffisamment explicite. | Finalité de chaque support documentaire non formalisée. | **Structurel et évitable :** duplication des informations, sources de vérité concurrentes et coût accru de maintenance/tokenisation. **Le `worklog` lui-même est utile** comme mémoire persistante de l'agent ; le problème est l'absence de séparation claire. | [AP-04](#ap-04--mémoire-de-travail-et-instructions-à-jour) | Clarification de gouvernance à décider. |
+| **IMP-09** | La branche de feature ne contient pas toutes les dernières règles de `CLAUDE.md` de `main`. | Branche longue et instructions évoluant parallèlement, sans réconciliation finale systématique. | **Récurrent possible :** futurs agents appliquant des politiques obsolètes, omettant des contraintes récentes ou livrant des PR divergentes ; le décalage peut résulter du calendrier, sans faute intrinsèque de l'agent. | [AP-04](#ap-04--mémoire-de-travail-et-instructions-à-jour) | Impact identifié ; prévention à décider. |
+| **IMP-10** | Détails de route LLM interne et de profil hôte consignés dans un dépôt GitHub public. | Transcription fidèle de l'environnement réel sans distinction suffisante entre documentation utile et information destinée à publication. | **Conditionnel et généralisable :** propagation de topologies internes, chemins, données d'environnement ou configurations sensibles dans les traces versionnées ; **aucune fuite de token n'a été établie par cette revue**. | [AP-05](#ap-05--vérification-légère-avant-publication) | Exposition documentaire identifiée ; prévention à décider. |
+
+### Actions préventives systémiques proposées
+
+Ces **cinq propositions ont été acceptées pour inscription et discussion**. **Statut initial commun : `À décider`** ; ni modification d'instructions, ni ajout de tests, ni modification de CI ou du plan de développement dans cette PR documentaire. Éviter de créer de nouveaux outils, sous-agents ou procédures systématiques coûteuses pour les appliquer.
+
+#### AP-01 — Preuve par critère d'acceptation
+
+**Cible :** IMP-01, IMP-02 et IMP-03 ; couvre également la faiblesse transversale des « CI vertes mais comportement utilisateur non prouvé » (R14).
+
+**Action concrète envisagée :** compléter `CLAUDE.md` et les conditions de passage du [plan de développement](../plan/implementation.md) : **avant ouverture d'une PR**, l'agent associe chaque critère d'acceptation à une commande/test effectivement exécuté et à une preuve, ou le marque explicitement non démontré, dans le **ticket Beads de la feature**. La PR référence le ticket et les résultats, sans reproduire la matrice.
+
+**Vérification future :** aucune capacité annoncée comme terminée sans preuve appropriée ; les critères non prouvés restent visibles lors de la revue.
+
+**Statut :** À décider — aucune mise en œuvre.
+
+#### AP-02 — Qualification dans l'environnement réel
+
+**Cible :** IMP-01, IMP-05 et IMP-06 ; en lien avec R13 et R14.
+
+**Action concrète envisagée :** exiger **un essai d'intégration local représentatif lorsqu'une feature traverse un outil ou une frontière d'environnement** : vraie commande publique, artefact installé si pertinent (wheel/image), dépendances minimales sur l'hôte, volumes et permissions. Ne pas imposer ce coût à chaque test unitaire ; enregistrer la commande et le résultat dans Beads/PR.
+
+**Vérification future :** démontrer que l'usage promis fonctionne depuis l'interface et l'environnement prévus, sans dépendance cachée au checkout ou au poste de développement.
+
+**Statut :** À décider — aucune mise en œuvre.
+
+#### AP-03 — Tests d'invariants et de cycle de vie
+
+**Cible :** IMP-02, IMP-03, IMP-04 et IMP-07 ; en lien avec R12, R13 et R16.
+
+**Action concrète envisagée :** ajouter à `CLAUDE.md` une règle : lorsqu'une feature **crée, lit, modifie, restaure ou supprime** un état, identifier les invariants critiques et tester des **séquences d'usage** (écrire → relire, échouer → consulter, interrompre → reprendre, modifier → conserver l'historique). Valider les schémas aux frontières d'écriture **et** de lecture, sans framework dédié.
+
+**Vérification future :** chaque feature manipulant un état persistant possède au moins les tests de transition nécessaires à ses invariants principaux, y compris les effets indésirables après échec.
+
+**Statut :** À décider — aucune mise en œuvre.
+
+#### AP-04 — Mémoire de travail et instructions à jour
+
+**Cible :** IMP-08 et IMP-09 ; en lien avec R20.
+
+**Action concrète envisagée :** préciser dans `CLAUDE.md` : **`worklog/` = mémoire détaillée et chronologique de l'agent** (recherches, tentatives, erreurs, observations et hypothèses) ; **Beads = synthèse des décisions finales, alternatives et preuves de revue** ; **PR = livrables, résultats et références Beads** ; **`docs/` = référentiel normatif produit**. Avant soumission d'une PR, confronter la branche aux changements de règles applicables intervenus sur `main` depuis sa création, sans imposer un second backlog.
+
+**Vérification future :** décisions retrouvables via Beads, cheminement reconstructible via `worklog/`, aucune règle récente applicable oubliée.
+
+**Statut :** À décider — aucune mise en œuvre.
+
+#### AP-05 — Vérification légère avant publication
+
+**Cible :** IMP-10 ; en lien avec R18, tout en conservant son acceptation du risque résiduel.
+
+**Action concrète envisagée :** ajouter une consigne simple de prépublication dans `CLAUDE.md` : examiner les nouveaux fichiers versionnés pour repérer secrets, identifiants personnels, chemins privés et détails d'infrastructure non nécessaires au produit ; préférer les variables configurables et exemples assainis. Réutiliser les contrôles existants, **sans nouvel outil de gouvernance**.
+
+**Vérification future :** pas de divulgation nouvelle, accidentelle ou inutile, dans les PR futures.
+
+**Statut :** À décider — aucune mise en œuvre.
+
+### Revue et mesure d'efficacité
+
+Les impacts **IMP-01 à IMP-10** sont des événements ou défauts *identifiés lors de la revue* ; ils ne sont pas « corrigés » simplement parce qu'une action préventive est proposée. Les hypothèses de cause sont à confirmer à partir des preuves `worklog/`, Beads et des prochaines campagnes de qualification. **La correction ponctuelle de la PR #5 n'est pas suivie dans cette section.**
+
+À une prochaine revue, suivre trois indicateurs qualitatifs : **(1)** réapparition des mêmes familles de défauts, **(2)** détection autonome par l'agent avant PR, **(3)** charge des nouveaux contrôles au regard de leur valeur. Ne déclarer une action « appliquée » qu'avec une preuve ; ne conclure à l'efficacité qu'après plusieurs PR. L'analyse et la mise à jour de cette page restent indépendantes de l'agent de développement.
