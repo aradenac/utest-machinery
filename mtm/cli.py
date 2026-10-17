@@ -34,8 +34,6 @@ from .commands import (
 from .errors import EXIT_INVALID_INPUT, EXIT_TOOL_FAILURE, MtmError
 from .paths import find_bench_root, write_last_operation
 
-DEFAULT_CONTEXT = Path(__file__).resolve().parents[1]
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -45,8 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"mtm {__version__} ({MILESTONE})")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--bench", help="bench root (defaults to discovery from the current directory)")
-    parser.add_argument("--context", default=str(DEFAULT_CONTEXT),
-                        help="path to the uTest Machinery source tree (image, workflows)")
     parser.add_argument("--image-tag", default="1.0.0", help="generic image tag")
     parser.add_argument("--backend", default="docker", choices=["docker", "host"],
                         help="workflow execution backend (default: docker; 'host' needs host Dagu)")
@@ -174,7 +170,6 @@ def main(argv: list[str] | None = None) -> int:
         os.chdir(bench)
 
     ctx = Context(
-        context=args.context,
         image_tag=args.image_tag,
         backend=args.backend,
         host_dagu=args.host_dagu,

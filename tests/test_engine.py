@@ -109,8 +109,43 @@ def test_category_hint_is_strongest_reported(tmp_path: Path):
         {"name": "boom", "failed": True, "category": ""},
         {"name": "check", "failed": True, "category": "TEST_FINDING"},
     ])
-    assert status.category_hint == "TEST_FINDING"
+    # A crashed tool (untyped => TOOL) coexisting with a test finding must win:
+    # the tool failure is more severe and must not be hidden.
+    assert status.category_hint == "TOOL"
     assert "check" in status.cause or "boom" in status.cause
+
+
+def test_mixed_failures_promote_tool_over_finding(tmp_path: Path):
+    from mtm.engine import RunStatus
+
+    status = RunStatus(dag_run_id="r", status=FAILED, step_evidence=[
+        {"name": "check", "failed": True, "category": "TEST_FINDING"},
+        {"name": "crash", "failed": True, "category": ""},
+    ])
+    outcome = status.dominant_outcome
+    assert outcome is not None
+    assert outcome[2] == 30  # tool failure dominates a finding
+
+
+def test_finding_alone_is_a_finding(tmp_path: Path):
+    from mtm.engine import RunStatus
+
+    status = RunStatus(dag_run_id="r", status=FAILED, step_evidence=[
+        {"name": "check", "failed": True, "category": "TEST_FINDING"},
+    ])
+    assert status.category_hint == "TEST_FINDING"
+    assert status.dominant_outcome[2] == 10
+
+
+def test_aborted_dependent_steps_are_not_counted(tmp_path: Path):
+    from mtm.engine import RunStatus
+
+    # A step marked aborted (upstream failed) is not itself a failure.
+    status = RunStatus(dag_run_id="r", status=FAILED, step_evidence=[
+        {"name": "check", "failed": True, "category": "TEST_FINDING"},
+        {"name": "after", "failed": False, "aborted": True, "category": ""},
+    ])
+    assert status.category_hint == "TEST_FINDING"
 
 
 def test_unknown_category_marker_is_ignored(tmp_path: Path):
@@ -157,11 +192,16 @@ def test_docker_runner_never_chowns(tmp_path: Path):
     assert "chown" not in argv
 
 
-def test_docker_run_arg_carries_owner_label(tmp_path: Path):
+def test_docker_run_arg_carries_bench_scoped_owner_label(tmp_path: Path):
     (tmp_path / ".mtm").mkdir()
     runner = DockerRunner("img:1", tmp_path, user="1000:1000", run_label="run-x")
     argv = runner.container_argv(["dagu", "start"])
-    assert "mtm.run-id=run-x" in argv
+    # The label is bench-scoped: another bench reusing run id "run-x" must not
+    # collide with this one.
+    assert any(a.startswith("mtm.owner=") for a in argv), argv
+    label = next(a for a in argv if a.startswith("mtm.owner="))
+    assert label.endswith("__run-x")
+    assert "run-x" in label
 
 
 def test_make_adapter_unknown_backend(tmp_path: Path):

@@ -6,6 +6,12 @@
 # Valgrind) in PR 3. No project-specific state, no secrets, and no credentials
 # ever live in this image.
 #
+# Build context: this Dockerfile expects a context containing
+#   image/  (this file, entrypoint.sh, toolchain.lock, SBOM.md)
+#   mtm/    (the mtm Python package)
+# The CLI assembles that context from the installed package, so `mtm install`
+# works from a wheel as well as from the source tree. See mtm/docker.py.
+#
 # Base is digest-pinned for reproducibility (see image/toolchain.lock).
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
@@ -43,12 +49,10 @@ RUN set -eux; \
 # Bench and runtime layout inside the container. All real state is host-mounted.
 RUN mkdir -p /bench /usr/share/utest-machinery /opt/mtm
 COPY image/SBOM.md /usr/share/utest-machinery/SBOM.md
-COPY pyproject.toml /opt/mtm/pyproject.toml
 COPY mtm /opt/mtm/mtm
 COPY image/entrypoint.sh /usr/local/bin/mtm-entrypoint
 
-# A usable mtm launcher for in-container use. Source-tree install (no pip build
-# step / no network needed at build time).
+# A usable mtm launcher for in-container use (source layout, no pip step).
 RUN printf '#!/bin/sh\nexport PYTHONPATH=/opt/mtm\nexec python3 -m mtm.cli "$@"\n' \
       > /usr/local/bin/mtm && chmod 0755 /usr/local/bin/mtm
 

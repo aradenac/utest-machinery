@@ -192,16 +192,38 @@ class RunStatus:
         return self.status in (SUCCEEDED, FAILED, INTERRUPTED, BLOCKED, SKIPPED)
 
     @property
-    def category_hint(self) -> str:
-        """Strongest typed category a failed step declared, or '' if none.
+    def failed_steps(self) -> list[dict]:
+        return [s for s in self.step_evidence if s.get("failed")]
 
-        A verification tool types its own outcome by emitting a ``MTM_CATEGORY``
-        output (see :data:`CATEGORY_MARKER`); anything else is untyped. The
-        taxonomy must never invent a test finding from a generic shell failure.
+    @property
+    def dominant_outcome(self) -> tuple[str, str, int] | None:
+        """Most operation-blocking typed outcome across **all** failed steps.
+
+        Each failed step contributes an outcome: its reported ``MTM_CATEGORY`` (if
+        recognised) or the untyped **TOOL** failure. The most severe wins, so a
+        single crashed tool is never hidden behind a co-occurring test finding —
+        the same "most severe wins, all findings retained" rule as
+        :func:`mtm.errors.most_severe`. Returns ``None`` when nothing failed.
         """
-        for step in self.step_evidence:
-            if step.get("failed") and step.get("category"):
-                return str(step["category"])
+        from .errors import SEVERITY
+
+        candidates: list[tuple[str, str, int]] = []
+        for step in self.failed_steps:
+            reported = step.get("category") or "TOOL"
+            candidates.append(REPORTED_CATEGORIES.get(reported, REPORTED_CATEGORIES["TOOL"]))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: SEVERITY.get(c[2], 0))
+
+    @property
+    def category_hint(self) -> str:
+        """The dominant failed step's reported category, or '' when none failed."""
+        outcome = self.dominant_outcome
+        if outcome is None:
+            return ""
+        for name, value in REPORTED_CATEGORIES.items():
+            if value == outcome:
+                return name
         return ""
 
     @property
@@ -249,9 +271,18 @@ class DockerRunner(CommandRunner):
         self.bench = bench
         self.extra_mounts = extra_mounts or []
         self.user = user if user is not None else _invoking_user()
-        #: Set by the adapter for an owner run, so liveness can be probed later
-        #: with ``docker ps --filter label=mtm.run-id=<id>``.
-        self.run_label = run_label
+        #: Set by the adapter for an owner run, so liveness can be probed later.
+        #: The value is ``<bench-id>__<run-id>`` — the bench identity is included
+        #: so a *different* bench that reuses the same deterministic run id cannot
+        #: make this bench's dead owner look alive.
+        self.run_label: str | None = None
+        self._bench_label = bench_identity(bench)
+        if run_label is not None:
+            self.run_label = self.owner_label(run_label)
+
+    def owner_label(self, run_id: str) -> str:
+        """The owner-container label value for *run_id* in this bench."""
+        return f"{self._bench_label}__{run_id}"
 
     def container_argv(self, inner: list[str], *, user: str | None = None,
                        run_label: str | None = None) -> list[str]:
@@ -274,21 +305,24 @@ class DockerRunner(CommandRunner):
         return argv
 
     def owner_alive(self, run_id: str) -> tuple[bool | None, str]:
-        """Whether an owner container for *run_id* is still running.
+        """Whether this bench's owner container for *run_id* is still running.
 
-        Returns ``(alive, evidence)``. Evidence is the container id, or an
-        explanation when liveness is undeterminable (Docker unreachable).
+        The lookup filters on the **bench-scoped** label value, so another
+        bench's identically-named run is never mistaken for this one. Returns
+        ``(alive, evidence)``; ``None`` means liveness is undeterminable.
         """
+        label_value = self.owner_label(run_id)
         proc = subprocess.run(
-            ["docker", "ps", "--quiet", "--filter", f"label={OWNER_LABEL}={run_id}"],
+            ["docker", "ps", "--quiet",
+             "--filter", f"label={OWNER_LABEL}={label_value}"],
             capture_output=True, text=True, check=False,
         )
         if proc.returncode != 0:
             return None, "docker ps failed; liveness not determinable"
         ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
         if ids:
-            return True, f"owner container {ids[0][:12]} running"
-        return False, f"no running container labelled {OWNER_LABEL}={run_id}"
+            return True, f"owner container {ids[0][:12]} running ({label_value})"
+        return False, f"no running container labelled {OWNER_LABEL}={label_value}"
 
     def run(self, argv: list[str], *, timeout: int | None = None, user: str | None = None) -> subprocess.CompletedProcess:
         if argv and argv[0] == "dagu":
@@ -307,7 +341,19 @@ def _invoking_user() -> str | None:
 
 
 #: Docker label used to find the owner container of a run for liveness checks.
-OWNER_LABEL = "mtm.run-id"
+#: The value is ``<bench-id>__<run-id>`` so lookups are bench-scoped.
+OWNER_LABEL = "mtm.owner"
+
+
+def bench_identity(bench: Path) -> str:
+    """A stable, filesystem-safe identity for a bench, for owner labelling.
+
+    Derived from the resolved absolute path so two benches never share it.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(str(bench.resolve()).encode("utf-8")).hexdigest()[:16]
+    return f"bench-{digest}"
 
 
 @dataclass
@@ -445,9 +491,9 @@ class DaguBackend(EngineAdapter):
 
     def run(self, dag_path: Path, run_id: str) -> RunStatus:
         if isinstance(self.backend, DockerRunner):
-            # Label the owner container so a later status query can positively
-            # confirm whether this run is still alive (vs. a killed run).
-            self.backend.run_label = run_id
+            # Label the owner container (bench-scoped) so a later status query
+            # can positively confirm whether THIS run is still alive.
+            self.backend.run_label = self.backend.owner_label(run_id)
         proc = self.backend.run(
             [self.dagu_bin, "start", "--run-id", run_id, self._dag_arg(dag_path)]
         )
@@ -469,7 +515,7 @@ class DaguBackend(EngineAdapter):
         """Determine whether the run's owner is still alive, with evidence.
 
         Host backend: the OS PID from the run state. Docker backend: the owner
-        container found by its ``mtm.run-id`` label. If neither can be
+        container found by its bench-scoped ``mtm.owner`` label. If neither can be
         determined, returns ``(None, reason)`` so the run is *not* reconciled.
         """
         if isinstance(self.backend, DockerRunner):

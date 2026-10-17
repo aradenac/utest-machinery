@@ -74,36 +74,61 @@ def image_digest(ref: str | None = None) -> str:
     return proc.stdout.strip()
 
 
-def build_image(context: Path, tag: str = IMAGE_TAG) -> str:
-    """Build the generic image. Raises :class:`MtmError` on failure.
+#: The image build context lives **inside the installed package**, so `mtm
+#: install` works from a wheel as well as from a source checkout. It holds the
+#: Dockerfile, entrypoint, licence/SBOM and toolchain lock.
+PACKAGE_IMAGE_DIR = Path(__file__).resolve().parent / "image"
 
-    The image build context is the **source tree** (``image/Dockerfile`` plus the
-    ``mtm`` sources it copies), not the installed package: a wheel install ships
-    the control CLI and its data, not a Docker context. Point ``--context`` at a
-    source checkout to build.
+
+def image_context_dir() -> Path:
+    """Directory holding the packaged image build context (``mtm/image``)."""
+    return PACKAGE_IMAGE_DIR
+
+
+def image_context_files() -> list[str]:
+    """The packaged build-context files, as docker-context-relative paths."""
+    return sorted(p.name for p in PACKAGE_IMAGE_DIR.iterdir() if p.is_file())
+
+
+def build_image(tag: str = IMAGE_TAG) -> str:
+    """Build the generic image from the packaged context. Raises MtmError.
+
+    The context is assembled in a fresh temporary directory from the installed
+    package (``mtm/image`` plus the ``mtm`` package source the Dockerfile
+    copies), so the CLI can build the image autonomously — with no source
+    checkout and no dependence on the current working directory. The Dockerfile
+    ships in the package as ``mtm/image/Dockerfile`` and is copied into the
+    assembled context as ``image/Dockerfile``.
     """
-    if not (context / "image" / "Dockerfile").is_file():
+    import shutil
+    import tempfile
+
+    if not (PACKAGE_IMAGE_DIR / "Dockerfile").is_file():
         raise MtmError(
             code=Code.CONFIG_INVALID,
-            message=f"No image/Dockerfile found under the build context {context}.",
-            action=("Building the generic image requires the uTest Machinery source tree. "
-                    "Run 'mtm install --context <source-dir>' (or run mtm from the checkout). "
-                    "An installed wheel provides the control commands, not a Docker context."),
+            message="Internal error: the packaged image build context is missing.",
+            action="Reinstall uTest Machinery; the package data is incomplete.",
             stage="image-build",
-            input_reference=str(context),
         )
-    proc = subprocess.run(
-        ["docker", "build", "-f", "image/Dockerfile", "-t", image_ref(tag), "."],
-        cwd=context,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    package_root = PACKAGE_IMAGE_DIR.parent  # .../mtm
+    with tempfile.TemporaryDirectory(prefix="mtm-image-") as tmp:
+        ctx = Path(tmp)
+        shutil.copytree(PACKAGE_IMAGE_DIR, ctx / "image")
+        # The Dockerfile COPYs `mtm` into the image, so the package source must
+        # be part of the context too (as `mtm/`, the package directory itself).
+        shutil.copytree(package_root, ctx / "mtm")
+        proc = subprocess.run(
+            ["docker", "build", "-f", "image/Dockerfile", "-t", image_ref(tag), "."],
+            cwd=ctx,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     if proc.returncode != 0:
         raise MtmError(
             code=Code.TOOL_FAILED,
             message="Docker image build failed.",
-            action="Inspect the build output; fix the Dockerfile or network access.",
+            action="Inspect the build output; fix the network access or Dockerfile.",
             stage="image-build",
             cause=proc.stderr.strip()[-2000:],
             tool_name="docker",
@@ -112,7 +137,11 @@ def build_image(context: Path, tag: str = IMAGE_TAG) -> str:
     return image_ref(tag)
 
 
-def base_image_digest(lock_file: Path) -> str:
-    """Read the pinned base-image digest from ``image/toolchain.lock``."""
-    data = yaml.safe_load(lock_file.read_text(encoding="utf-8")) or {}
+def base_image_digest(lock_file: Path | None = None) -> str:
+    """Read the pinned base-image digest from the packaged ``toolchain.lock``."""
+    lock_file = lock_file or (PACKAGE_IMAGE_DIR / "toolchain.lock")
+    try:
+        data = yaml.safe_load(lock_file.read_text(encoding="utf-8")) or {}
+    except OSError:
+        return ""
     return str(data.get("image", {}).get("base_digest", ""))

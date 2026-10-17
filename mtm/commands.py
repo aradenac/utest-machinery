@@ -21,6 +21,7 @@ from .docker import (
     base_image_digest,
     build_image,
     docker_available,
+    image_context_dir,
     image_digest,
     image_exists,
     image_ref,
@@ -29,6 +30,8 @@ from .engine import (
     REPORTED_CATEGORIES,
     FAILED,
     INTERRUPTED,
+    PENDING,
+    RUNNING,
     SUCCEEDED,
     DaguBackend,
     RunStatus,
@@ -445,15 +448,16 @@ def cmd_install(args: Any, ctx: "Context") -> dict[str, Any]:
             stage="install",
             tool_name="docker",
         )
-    context = Path(ctx.context).resolve()
-    ref = build_image(context, ctx.image_tag)
+    # The build context is assembled from the installed package, so this works
+    # from a wheel with no source checkout.
+    ref = build_image(ctx.image_tag)
     digest = image_digest(ref)
-    lock = context / "image" / "toolchain.lock"
     return _record(
         op, "install", "SUCCEEDED",
         image=ref,
         image_digest=digest,
-        base_digest=base_image_digest(lock) if lock.is_file() else "",
+        build_context=str(image_context_dir()),
+        base_digest=base_image_digest(),
     )
 
 
@@ -528,6 +532,8 @@ def cmd_workflow_run(args: Any, ctx: "Context") -> dict[str, Any]:
         dag=str(dag), run_id=run_id, backend=ctx.backend, engine=adapter.name,
         raw_status=status.raw_status, pid=status.pid,
         reconciled=status.reconciled,
+        owner_alive=status.owner_alive, liveness_evidence=status.liveness_evidence,
+        step_evidence=status.step_evidence,
         dagu_home=str(root / ".mtm" / "dagu"),
         exit_code=exit_code,
     )
@@ -557,15 +563,26 @@ def cmd_workflow_status(args: Any, ctx: "Context") -> dict[str, Any]:
 def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str) -> None:
     """Attach the full error contract for non-success engine outcomes.
 
-    The taxonomy is driven by the **typed evidence a step reported**, not by
-    Dagu's generic ``FAILED`` status: a step that declares
-    ``MTM_CATEGORY=TEST_FINDING`` is a domain finding (exit 10); a step that
-    declares ``TOOL``/``INPUT_LIMITATION`` maps accordingly; and a step that
-    declares nothing — a crashed tool, a missing executable, a bad shell
-    command — is a **workflow/tool failure** (exit 30), never invented as a C
-    test assertion. An interruption maps to WORKFLOW_INTERRUPTED/exit 130.
+    The taxonomy is driven by the **typed evidence the failed steps reported**,
+    aggregated most-severe-first: a crashed tool is never hidden behind a
+    co-occurring test finding. An untyped failure — a missing executable, a bad
+    shell command — is a workflow/tool failure (exit 30), never invented as a C
+    test assertion. A non-terminal status (PENDING/RUNNING) is not a finished
+    failure at all and is reported as such. Interruption → exit 130.
     """
     if status.status == SUCCEEDED:
+        return
+    if status.status in (PENDING, RUNNING):
+        # A live/queued run is NOT a finished failure. Represent it accurately so
+        # a status consultation of an active run is not read as a failed run.
+        record.update(
+            category=Category.WORKFLOW,
+            code=Code.OPERATION_RUNNING,
+            message=f"The workflow is still {status.status.lower()}; it has not finished.",
+            cause=status.liveness_evidence or "",
+            action="Query again later with 'mtm workflow status', or wait for the run to finish.",
+            retryable=False,
+        )
         return
     if status.status == INTERRUPTED:
         record.update(
@@ -578,31 +595,38 @@ def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str
         )
         return
     if status.status == FAILED:
-        reported = status.category_hint
-        if reported in REPORTED_CATEGORIES:
-            category, code, _ = REPORTED_CATEGORIES[reported]
+        dominant = status.dominant_outcome
+        if dominant is not None:
+            category, code, _ = dominant
+            reported = status.category_hint
+            if reported and reported != "TOOL":
+                message = f"A step reported a {reported.replace('_', ' ').lower()} outcome."
+                action = "Inspect the failing step and its logs; fix the failure and re-run."
+            else:
+                message = "The workflow failed without a typed test outcome."
+                action = ("Inspect the failing step's command and logs. A step that verifies "
+                          "code must report its outcome via a MTM_CATEGORY output.")
+                record["tool_name"] = "dagu"
             record.update(
                 category=category,
                 code=code,
-                message=f"A step reported a {reported.replace('_', ' ').lower()} outcome.",
+                message=message,
                 cause=status.cause,
-                action="Inspect the failing step and its logs; fix the failure and re-run.",
+                action=action,
                 retryable=False,
             )
         else:
-            # Untyped failure: the tool/workflow failed. NOT a test finding.
             record.update(
                 category=Category.TOOL,
                 code=Code.TOOL_FAILED,
-                message="The workflow failed without a typed test outcome.",
+                message="The workflow failed without step evidence.",
                 cause=status.cause,
-                action=("Inspect the failing step's command and logs. A step that verifies "
-                        "code must report its outcome via a MTM_CATEGORY output."),
+                action="Inspect the failing step's command and logs.",
                 retryable=False,
             )
             record["tool_name"] = "dagu"
         return
-    # BLOCKED / SKIPPED / PENDING / UNKNOWN
+    # BLOCKED / SKIPPED / UNKNOWN
     record.update(
         category=Category.WORKFLOW,
         code=Code.OPERATION_FAILED,
@@ -616,6 +640,8 @@ def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str
 def _exit_for_engine_status(status: str, *, reported_category: str = "") -> int:
     if status == "FAILED" and reported_category in REPORTED_CATEGORIES:
         return REPORTED_CATEGORIES[reported_category][2]
+    if status in ("PENDING", "RUNNING"):
+        return EXIT_OK  # not finished -> not a failure exit code
     return {
         "SUCCEEDED": EXIT_OK,
         "FAILED": EXIT_TOOL_FAILURE,  # untyped failure -> tool/workflow failure
@@ -673,9 +699,11 @@ def cmd_not_implemented(args: Any, ctx: "Context") -> dict[str, Any]:
 class Context:
     """Invocation context resolved by the CLI wrapper."""
 
-    context: str
     image_tag: str
     backend: str = "docker"
     host_dagu: str | None = None
     json_output: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Retained for callers that still pass it; the image build context is now
+    #: assembled from the package, not from this value.
+    context: str = ""

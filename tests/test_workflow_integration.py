@@ -22,6 +22,8 @@ import pytest
 
 from conftest import REPO, dagu_dir, run_mtm_json
 
+from mtm.engine import DockerRunner
+
 IMAGE = "utest-machinery/mtm:1.0.0"
 
 
@@ -80,6 +82,24 @@ class TestDockerBackend:
         assert record["code"] == "TEST_ASSERTION"
         assert record["category"] == "TEST_FINDING"
 
+    def test_mixed_failures_report_the_tool_failure(self, bench: Path):
+        """A crashed tool alongside a typed finding must dominate (exit 30).
+
+        The finding must not conceal the more severe tool failure.
+        """
+        _write_dag(
+            bench,
+            "steps:\n"
+            "  - name: check\n    command: |\n"
+            "      echo MTM_CATEGORY=TEST_FINDING\n      exit 1\n"
+            "    output: MTM_CATEGORY\n"
+            "  - name: crash\n    command: 'exit 7'\n",
+        )
+        record, code = run_mtm_json("workflow", "run", "--run-id", "d-mixed", cwd=bench)
+        assert code == 30, record
+        assert record["category"] == "TOOL"
+        assert record["code"] == "TOOL_FAILED"
+
     def test_state_files_are_owned_by_the_invoking_user(self, bench: Path):
         _write_dag(bench, "steps:\n  - name: ok\n    command: echo ok\n")
         run_mtm_json("workflow", "run", "--run-id", "d-own", cwd=bench)
@@ -96,13 +116,14 @@ class TestDockerBackend:
         assert code == 0
         assert record["status"] == "SUCCEEDED"
 
-    def _wait_for_owner(self, run_id: str, timeout: float = 20.0) -> bool:
+    def _wait_for_owner(self, run_id: str, bench: Path, timeout: float = 25.0) -> bool:
         import time
 
         deadline = time.time() + timeout
         while time.time() < deadline:
             found = subprocess.run(
-                ["docker", "ps", "-q", "--filter", f"label=mtm.run-id={run_id}"],
+                ["docker", "ps", "-q",
+                 "--filter", f"label=mtm.owner={self._owner_label(run_id, bench)}"],
                 capture_output=True, text=True,
             ).stdout.strip()
             if found:
@@ -110,16 +131,18 @@ class TestDockerBackend:
             time.sleep(0.5)
         return False
 
-    def test_running_docker_run_is_not_reported_interrupted(self, bench: Path):
-        """A genuinely running container must read as RUNNING, not INTERRUPTED.
+    @staticmethod
+    def _owner_label(run_id: str, bench: Path | None = None) -> str:
+        from mtm.engine import bench_identity
 
-        Regression for the docker liveness path: the owner container is found by
-        its mtm.run-id label while it runs, and only a killed owner (no running
-        container) reconciles to INTERRUPTED.
-        """
+        return f"{bench_identity(bench)}__{run_id}"
+
+    def test_running_docker_run_is_not_reported_interrupted(self, bench: Path):
+        """A genuinely running container must read as RUNNING, not INTERRUPTED,
+        and its status response must not look like a finished failure."""
         import subprocess
 
-        _write_dag(bench, "steps:\n  - name: slow\n    command: 'sleep 8'\n")
+        _write_dag(bench, "steps:\n  - name: slow\n    command: 'sleep 10'\n")
         proc = subprocess.Popen(
             [sys.executable, "-m", "mtm.cli", "--json", "workflow", "run", "--run-id", "d-live"],
             cwd=str(bench),
@@ -127,11 +150,16 @@ class TestDockerBackend:
             env={**os.environ, "PYTHONPATH": str(REPO)},
         )
         try:
-            assert self._wait_for_owner("d-live"), "owner container never appeared"
+            assert self._wait_for_owner("d-live", bench), "owner container never appeared"
             record, code = run_mtm_json("workflow", "status", "--run-id", "d-live", cwd=bench)
             assert record["status"] == "RUNNING", record
             assert record["owner_alive"] is True, record
             assert record["liveness_evidence"]
+            # A live run is not a finished failure.
+            assert code == 0, record
+            assert record["exit_code"] == 0, record
+            assert record["code"] == "OPERATION_RUNNING", record
+            assert "not finished" in record["message"].lower()
         finally:
             proc.wait(timeout=30)
 
@@ -147,9 +175,9 @@ class TestDockerBackend:
             env={**os.environ, "PYTHONPATH": str(REPO)},
         )
         try:
-            assert self._wait_for_owner("d-kill"), "owner container never appeared"
+            assert self._wait_for_owner("d-kill", bench), "owner container never appeared"
             ids = subprocess.run(
-                ["docker", "ps", "-q", "--filter", "label=mtm.run-id=d-kill"],
+                ["docker", "ps", "-q", "--filter", f"label=mtm.owner={self._owner_label('d-kill', bench)}"],
                 capture_output=True, text=True,
             ).stdout.split()
             assert ids, "no owner container to kill"
@@ -161,13 +189,43 @@ class TestDockerBackend:
         assert record["owner_alive"] is False, record
         assert code == 130
 
+    def test_bench_scoped_label_avoids_cross_bench_collision(self, bench: Path, tmp_path: Path):
+        """A same-named run in another bench must not make this one look alive."""
+        from mtm.engine import bench_identity
+
+        other = tmp_path / "other-bench"
+        other.mkdir()
+        run_mtm_json("init", str(other))
+        assert bench_identity(bench) != bench_identity(other)
+        # Bench A has no run "shared"; bench B has one. A's lookup must be False.
+        runner_a = DockerRunner("img:1", bench, user="1000:1000")
+        alive, evidence = runner_a.owner_alive("shared")
+        assert alive is False, evidence
+        assert bench_identity(bench) in evidence
+        assert bench_identity(other) not in evidence
+
     def test_run_cannot_write_a_selected_source(self, bench: Path):
-        """The bench is mounted read-only: a step cannot tamper with inputs."""
+        """The bench is mounted read-only: a step cannot tamper with inputs.
+
+        The tampering step must actually run and fail *because* the input mount
+        is read-only — not because of an unrelated startup/validation error.
+        """
         src = bench / "selected.c"
         src.write_text("int f(void){return 0;}\n")
         before = src.read_text()
-        _write_dag(bench, "steps:\n  - name: tamper\n    command: 'echo hacked > /bench/selected.c'\n")
-        run_mtm_json("workflow", "run", "--run-id", "d-ro", cwd=bench)
+        _write_dag(
+            bench,
+            "steps:\n  - name: tamper\n    command: 'echo hacked > /bench/selected.c'\n",
+        )
+        record, code = run_mtm_json("workflow", "run", "--run-id", "d-ro", cwd=bench)
+        # The step ran and failed (untyped shell failure -> exit 30).
+        assert code == 30, record
+        assert record["status"] == "FAILED", record
+        assert any(s.get("name") == "tamper" and s.get("failed")
+                   for s in record.get("step_evidence", [])), record
+        # ...and the failure is the read-only mount, not a startup error.
+        cause = record.get("cause", "").lower()
+        assert "read-only" in cause or "read only" in cause, record
         assert src.read_text() == before, "a step modified a selected input"
 
 
