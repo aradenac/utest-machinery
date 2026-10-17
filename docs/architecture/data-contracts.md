@@ -32,7 +32,7 @@ erDiagram
 | **Evidence** | Raw tool artifact path/hash, format/version, parsed metric/status, applicability denominator, source locations, interpretation-independent provenance. |
 | **Finding** | Stable ID, category `IMPLEMENTATION_DEFECT/SDD_GAP/SDD_CONFLICT/INSUFFICIENT_EVIDENCE/TOOL_FAILURE`, severity, evidence IDs, SDD/code anchors, confidence, unresolved assumptions. |
 | **Recommendation** | Finding ID, cause and justification, proposed precise edit or clarification with location, before/after behavior, risk/impact, verification command and expected acceptance, human disposition. |
-| **StageJournal** | DAG and stage version, dependency fingerprints, input/output hashes, status `PENDING/RUNNING/SUCCEEDED/FAILED/BLOCKED/SKIPPED/INTERRUPTED`, attempts, diagnostic and resume token. |
+| **StageJournal** | DAG/stage version, dependency and output fingerprints, status `PENDING/RUNNING/SUCCEEDED/FAILED/BLOCKED/SKIPPED/INTERRUPTED`, attempt counter and latest [error record](workflow-failures.md) with repair/retry action. |
 
 ## Rules
 
@@ -46,6 +46,10 @@ erDiagram
 - `toolchain.lock` records container digest, compiler versions and compatibility, Ceedling plugins, mutation operators, fuzz parameters and workflow engine version.
 - A scope removal invalidates active links but retains history. On snapshot change, cache invalidation uses both source dependencies and test/oracle relationships.
 - Re-execution requires the frozen suite, **the same original source/SDD bytes**, scope snapshot, build flags, seeds/time bounds, toolchain and staged mocks. If changed files cannot be restored from Git or an optional content-addressed bench snapshot, return STALE_INPUT and do not claim replay. Archived evidence may still be inspected and reinterpreted. Real LLM generation is **traceable**, not assumed bit-reproducible.
+
+## Error and result interchange
+
+The CLI, workflow steps and HTML report read **one machine-readable result format** with operation/run ID, stage, affected unit, status, error code/category, cause, user action, retryability and log path. The canonical list of categories, stop criteria and exit codes is [workflow failures](workflow-failures.md); do not define a second error taxonomy here. Generated scenarios can pass while requirement-level verdict is UNDETERMINED; store these as separate fields.
 
 ## Stable operation outputs
 
