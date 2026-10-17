@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utest-machinery/schemas/project.schema.json",
+  "title": "ProjectConfig",
+  "description": "A bench project configuration (project.yaml). Paths resolve within explicitly selected mounts; secrets are never stored here.",
+  "type": "object",
+  "required": ["schema_version", "bench_id"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "bench_id": { "type": "string", "minLength": 1 },
+    "released_milestone": { "type": "string" },
+    "source_roots": { "type": "array", "items": { "type": "string" } },
+    "spec_roots": { "type": "array", "items": { "type": "string" } },
+    "selectors": { "type": "object" },
+    "scopes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "kind"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string", "pattern": "^scope-[0-9a-f]+$" },
+          "path": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["source", "spec", "include", "build-context"] },
+          "added_at": { "type": "string" },
+          "sha256": { "type": "string" }
+        }
+      }
+    }
+  }
+}

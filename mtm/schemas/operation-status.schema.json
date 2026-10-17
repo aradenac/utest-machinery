@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utest-machinery/schemas/operation-status.schema.json",
+  "title": "OperationStatus",
+  "description": "The machine-readable record written to .mtm/state/last-operation.json and emitted by 'mtm status --json'. Mirrors the minimum error object in docs/architecture/workflow-failures.md.",
+  "type": "object",
+  "required": ["operation_id", "stage", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "operation_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string" },
+    "stage": { "type": "string" },
+    "scope_id": { "type": "string" },
+    "status": { "type": "string" },
+    "category": { "type": "string" },
+    "code": { "type": "string" },
+    "message": { "type": "string" },
+    "cause": { "type": "string" },
+    "action": { "type": "string" },
+    "retryable": { "type": "boolean" },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "log_path": { "type": "string" },
+    "input_reference": { "type": "string" },
+    "tool_name": { "type": "string" },
+    "tool_version": { "type": "string" },
+    "exit_code": {
+      "type": "integer",
+      "enum": [0, 10, 20, 30, 40, 130]
+    }
+  }
+}

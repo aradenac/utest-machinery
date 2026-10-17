@@ -1,0 +1,26 @@
+# Local bench / build state — never committed.
+.mtm/state/
+build/
+dist/
+*.egg-info/
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# Beads local database and Dolt working state (JSONL export and Dolt refs are
+# versioned; the local DB is not).
+.beads/*.db
+.beads/dolt/
+.beads/embeddeddolt/
+.beads/*.sqlite*
+
+# Secrets must never be tracked.
+credentials.env
+*.env.local
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*

@@ -9,6 +9,16 @@ Claude Code loads this file automatically. Start by reading [README](README.md),
 3. Select **only the next approved feature milestone**. Complete its implementation, tests and local verification; update Beads status; open **one PR** with evidence. **STOP after opening the PR. Do not merge, start another milestone or continue automatically.** Wait for review and an explicit instruction before proceeding.
 4. On a subsequent session, inspect PR review comments, fix findings in the same PR, rerun local checks and update Beads; stop again. Only after an externally merged PR and a new user instruction may you start the next milestone.
 
+## Working record (`worklog/`) — mandatory
+
+Maintain a versioned working record under [`worklog/`](worklog/README.md). This is the agent's own log, **not** product documentation; do not add or restructure content under `docs/`, and if a note ever contradicts a `docs/` page, `docs/` wins.
+
+- **Log every session** in `worklog/log/YYYY-MM-DD.md` (suffix if a second session the same day): what was inspected, what was done, what was observed, actions taken, files touched, results, and what is next.
+- **Trace every decision** as a numbered record in `worklog/decisions/NNNN-slug.md` (context, options considered, decision, status, consequences, references). Once decided, supersede rather than rewrite and cross-link the superseding ID.
+- **Record risks, limitations, arbitration and history** as they arise: open questions and arbitrations in `worklog/questions.md`, answered ones moved to the dated log with the resolution and date; residual risks and limitations in the relevant decision record or log entry.
+- **Update before stopping**, in the same PR/branch as the work: a session, a decision, a failure or a result that is not in `worklog/` did not happen as far as review is concerned.
+- Distinguish **observed facts** from **inferences/claims**; pin exact versions/tags/digests; never write a secret — reference a variable name and do presence checks only.
+
 ## Working rules
 
 - Read the [risk register](docs/project/risks.md) as context, **but never edit it** (including risk scores, statuses or mitigation actions). Risk reassessment belongs to an independent review.

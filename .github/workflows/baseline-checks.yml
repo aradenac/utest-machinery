@@ -11,6 +11,30 @@ permissions:
 jobs:
   baseline:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']  # floor and a newer interpreter
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Validate documentation, requirements and C example syntax
+        run: python3 scripts/validate_baseline.py
+      - name: Install CLI dependencies
+        run: python3 -m pip install --quiet PyYAML jsonschema pytest
+      - name: CLI unit and contract tests
+        run: python3 -m pytest tests -q
+
+  # Fast offline smoke: build the generic image and run the workflow THROUGH THE
+  # CLI (the user-facing path, not 'docker run dagu' directly). Proves the CLI
+  # drives the container, the bench state persists on the host, and no host Dagu
+  # is required. No credentials, no LLM.
+  image-smoke:
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -18,5 +42,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Validate documentation, requirements and C example syntax
-        run: python3 scripts/validate_baseline.py
+      - name: Install CLI dependencies
+        run: python3 -m pip install --quiet PyYAML jsonschema
+      - name: Build the generic image
+        run: python3 -m mtm.cli install
+      - name: Init a bench and run the workflow through the CLI
+        run: |
+          REPO="$PWD"
+          mkdir -p /tmp/bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli init /tmp/bench
+          cd /tmp/bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli workflow run --run-id ci-smoke
+      - name: Verify bench-local state persisted on the host
+        run: test -d /tmp/bench/.mtm/dagu/data/dag-runs
+      - name: A selected source in the bench is read-only to the run
+        run: |
+          REPO="$GITHUB_WORKSPACE"
+          printf 'int f(void){return 0;}\n' > /tmp/bench/selected.c
+          printf 'steps:\n  - name: tamper\n    command: "echo x > /bench/selected.c"\n' \
+            > /tmp/bench/workflows/sample.yaml
+          cd /tmp/bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli workflow run --run-id ci-ro || true
+          grep -q 'return 0' /tmp/bench/selected.c
