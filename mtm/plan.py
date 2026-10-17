@@ -206,7 +206,13 @@ class Plan:
             "scenarios": [s.to_dict() for s in self.scenarios],
             "omitted": self.omitted,
             "validation": self.validation,
-            "shim_headers": sorted(self.shim_headers),
+            # Persist the shim contents, not just their names: the plan alone must
+            # be enough to inspect (and re-materialise) the private interface it
+            # assumed, without re-calling the model.
+            "shim_headers": dict(sorted(self.shim_headers.items())),
+            # The model's raw (parsed) response, so a rejected or downgraded
+            # answer stays inspectable as evidence, not just its accepted subset.
+            "raw_response": self.raw_response,
         }
 
 
@@ -300,14 +306,19 @@ def parse_plan(text: str, inventory: Inventory, identity: LLMIdentity) -> Plan:
             for c in raw.get("cases", []) or []
             if isinstance(c, dict)
         ]
-        # An UNDETERMINED scenario must not carry a normative expected value; that
-        # would be inventing an oracle. Strip any that slipped through.
-        if kind == UNDETERMINED and any(c.expected is not None for c in cases):
+        # An UNDETERMINED scenario must not carry ANY normative expected value —
+        # not a return value, an out-parameter outcome, nor a call count. Each
+        # would be inventing an oracle the SDD does not state, and any of them
+        # could turn an ungrounded expectation into a failing test reported as an
+        # implementation defect (B4). Strip them all, not just `expected`.
+        if kind == UNDETERMINED and _has_normative_expectation(cases):
             downgraded.append({
                 "scenario": raw.get("id", "?"), "from": kind, "to": kind,
-                "why": "stripped expected values from an UNDETERMINED scenario",
+                "why": "stripped ungrounded expected values/outcomes/call-counts "
+                       "from an UNDETERMINED scenario",
             })
-            cases = [TestCase(args=c.args, expected=None, note=c.note) for c in cases]
+            cases = [TestCase(args=c.args, expected=None, note=c.note,
+                              mocks=c.mocks) for c in cases]
         mock_declarations = {
             str(k): str(v) for k, v in (raw.get("mock_declarations", {}) or {}).items()
         }
@@ -356,6 +367,19 @@ def parse_plan(text: str, inventory: Inventory, identity: LLMIdentity) -> Plan:
         validation=validation,
         raw_response=payload,
         shim_headers=shim_headers,
+    )
+
+
+def _has_normative_expectation(cases: list["TestCase"]) -> bool:
+    """True when a case asserts an outcome the SDD would have to state.
+
+    A return value, an ``expect_out`` outcome or an ``expect_calls`` count is a
+    normative claim; an UNDETERMINED scenario may carry none of them. ``args``
+    and ``mocks`` are *stimulus*, not claims, so they are not counted.
+    """
+    return any(
+        c.expected is not None or c.expect_out or c.expect_calls
+        for c in cases
     )
 
 

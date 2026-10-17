@@ -167,11 +167,13 @@ def make_provider(name: str, *, image_ref: str, credentials_file: Path | None = 
                   recordings_dir: Path | None = None) -> LLMProvider:
     """Build the generation provider.
 
-    ``mock`` returns a recorded response (offline, token-free) — used by fast PR
-    CI and the unit tests. ``claude-code`` runs the in-image harness. ``auto``
-    prefers the real harness when an image and credentials are available, and
-    falls back to the recorded provider otherwise, so the same command works in
-    both environments without a flag.
+    ``mock`` returns a **recorded** response (offline, token-free) — used by fast
+    PR CI and the unit tests, and only ever on an **explicit** request: a recorded
+    fixture response must never be silently substituted for a real model call
+    (B6). ``claude-code`` runs the in-image harness. ``auto`` prefers the real
+    harness and, when it is unavailable, **fails with a clear action** instead of
+    quietly returning recorded answers, so a user can never see a suite that
+    looks model-generated but came from a canned fixture.
     """
     credentials_file = credentials_file or (
         Path.home() / ".config" / "utest-machinery" / "credentials.env")
@@ -179,16 +181,22 @@ def make_provider(name: str, *, image_ref: str, credentials_file: Path | None = 
 
     if name == "mock":
         return MockProvider(recordings_dir)
-    if name == "auto":
-        if image_exists(image_ref) and credentials_file.is_file():
-            return _docker_provider(image_ref, credentials_file, model)
-        return MockProvider(recordings_dir)
-    if name == "claude-code":
+    if name in ("auto", "claude-code"):
+        if not image_exists(image_ref):
+            raise MtmError(
+                code=Code.LLM_CONFIG,
+                message=f"The generation image {image_ref!r} is not built, so the "
+                        "in-image model route is unavailable.",
+                action="Run 'mtm install' to build the image, or pass "
+                       "'--provider mock' to use a recorded response explicitly.",
+                stage="llm-init",
+            )
         if not credentials_file.is_file():
             raise MtmError(
                 code=Code.LLM_AUTH,
                 message=f"Credentials file not found: {credentials_file}",
-                action="Create it with SCW_BASE_URL and SCW_BEARER_TOKEN (mode 600), or use --provider mock.",
+                action="Create it with SCW_BASE_URL and SCW_BEARER_TOKEN (mode 600), "
+                       "or use --provider mock explicitly.",
                 stage="llm-init",
             )
         return _docker_provider(image_ref, credentials_file, model)

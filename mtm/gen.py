@@ -1,14 +1,16 @@
-"""Deterministic test-suite generation from an accepted plan.
+"""Deterministic Ceedling/CMock project generation from an accepted plan.
 
-Given a grounded :class:`~mtm.plan.Plan`, this module emits **compilable** Unity
-test files, private mocks for link-time externals and a runner — purely by
-rendering the plan. The model never writes C here, so it cannot weaken an oracle
-between the reviewed plan and the executed assertion (``automation-policy.md``:
-the plan is generated *before* the suite and the suite is a faithful
-materialisation of it).
+Given a grounded :class:`~mtm.plan.Plan`, this module emits a **standard
+Ceedling project** — ``project.yml``, the in-scope sources, a private interface
+header per mocked dependency, the plan's private shims and one Unity test file
+per unit — purely by rendering the plan. Ceedling then generates the CMock mocks
+and the runner, compiles, links and executes. The model never writes C here, so
+it cannot weaken an oracle between the reviewed plan and the executed assertion
+(``automation-policy.md``).
 
-Everything is emitted under the bench, never into the selected inputs: the
-original C/SDD bytes are untouched (SYS-004). A symbol the generator cannot mock
+Everything is written under ``<bench>/.mtm/gen`` (a fresh revision directory,
+rebuilt on every run), never into the selected inputs: the original C/SDD bytes
+are untouched (SYS-004). A symbol or case the generator cannot materialise
 faithfully is reported as a limitation, never silently stubbed into a passing
 test.
 """
@@ -16,11 +18,12 @@ test.
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .cscan import scan_prototypes
+from .ceedling import REVISION_DIRNAME
 from .inventory import Inventory
 from .plan import Plan, Scenario
 
@@ -29,6 +32,15 @@ _CTYPE_WORDS = (
     "unsigned", "signed", "long", "short", "int", "char", "float", "double",
     "bool", "_Bool",
 )
+
+#: Where the mocked dependencies' interface headers live, inside the revision.
+INTERFACE_DIRNAME = "interface"
+#: Where the plan's private shims live.
+SHIM_DIRNAME = "shim"
+#: Where the copied in-scope sources and headers live.
+SOURCE_DIRNAME = "src"
+#: Where the generated Unity test files live (Ceedling ``:paths: :test``).
+TEST_DIRNAME = "test"
 
 
 @dataclass
@@ -40,8 +52,9 @@ class CParam:
 
 @dataclass
 class Generated:
-    """The materialised suite manifest."""
+    """The materialised Ceedling project manifest."""
 
+    revision: Path | None = None
     files: dict[str, str] = field(default_factory=dict)  # relpath -> role
     test_functions: list[str] = field(default_factory=list)
     mocks: list[str] = field(default_factory=list)
@@ -49,6 +62,7 @@ class Generated:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "revision": str(self.revision) if self.revision else "",
             "files": self.files,
             "test_functions": self.test_functions,
             "mocks": self.mocks,
@@ -131,113 +145,7 @@ def _unit_header(unit) -> str:
     return f"{stem}.h" if stem else Path(unit.path).name
 
 
-# --- entry point ------------------------------------------------------------
-
-
-def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory) -> Generated:
-    """Write the generated suite under ``<bench>/tests`` and ``<bench>/mocks``."""
-    tests_dir = bench_root / "tests"
-    mocks_dir = bench_root / "mocks"
-    tests_dir.mkdir(parents=True, exist_ok=True)
-    mocks_dir.mkdir(parents=True, exist_ok=True)
-
-    units = {u.id: u for u in inventory.units}
-    signatures = {fn["name"]: fn["signature"] for u in inventory.units for fn in u.functions}
-
-    # Deterministically derive declarations for mocked symbols from the selected
-    # headers, so a mock never depends on the model restating an interface.
-    prototypes: dict[str, str] = {}
-    for entry in inventory.selected:
-        candidate = bench_root / str(entry.get("path", ""))
-        if candidate.suffix.lower() == ".h" and candidate.is_file():
-            for name, decl in scan_prototypes(candidate):
-                prototypes.setdefault(name, decl)
-
-    out = Generated()
-
-    # 0. Private shim headers for absent includes (proposed by the plan). Written
-    #    under the bench only; the source directory and the missing header are
-    #    never created or modified.
-    shims_dir = bench_root / "shims"
-    shim_names = sorted(Path(n).name for n in (plan.shim_headers or {}) if str(n).endswith(".h"))
-    for name, content in sorted((plan.shim_headers or {}).items()):
-        safe = Path(name).name
-        if not safe.endswith(".h"):
-            continue
-        shims_dir.mkdir(parents=True, exist_ok=True)
-        (shims_dir / safe).write_text(content, encoding="utf-8")
-        out.files[f"shims/{safe}"] = "shim"
-
-    # 1. Mocks: at most one file per external symbol, shared by scenarios.
-    declarations: dict[str, str] = {}
-    for scenario in plan.scenarios:
-        for symbol in scenario.mocks:
-            declared = scenario.mock_declarations.get(symbol) or prototypes.get(symbol, "")
-            declarations.setdefault(symbol, declared)
-    mock_headers: dict[str, str] = {}
-    for symbol, decl in sorted(declarations.items()):
-        rendered, header = _emit_mock(symbol, decl, shim_names)
-        if rendered is None:
-            out.limitations.append(
-                f"mocked symbol {symbol!r} has an interface this generator does not "
-                "support (or none was declared); its scenarios are not executed"
-            )
-            continue
-        (mocks_dir / f"mock_{symbol}.c").write_text(rendered, encoding="utf-8")
-        out.files[f"mocks/mock_{symbol}.c"] = "mock"
-        out.mocks.append(symbol)
-        mock_headers[symbol] = header
-
-    # 2. One test file per unit holding that unit's scenarios. Aggregate type
-    #    aliases are collected from every C text this suite compiles against, so a
-    #    pointer-to-aggregate parameter is never initialised from a bare scalar.
-    aggregates: set[str] = set()
-    for content in (plan.shim_headers or {}).values():
-        aggregates |= aggregate_aliases(content)
-    for entry in inventory.selected:
-        candidate = bench_root / str(entry.get("path", ""))
-        if candidate.suffix.lower() in (".h", ".c") and candidate.is_file():
-            aggregates |= aggregate_aliases(candidate.read_text(encoding="utf-8", errors="replace"))
-    for decl in declarations.values():
-        aggregates |= aggregate_aliases(decl)
-
-    by_unit: dict[str, list[Scenario]] = {}
-    for scenario in plan.scenarios:
-        by_unit.setdefault(scenario.unit_id, []).append(scenario)
-
-    test_names: list[str] = []
-    for unit_id, scenarios in sorted(by_unit.items()):
-        unit = units.get(unit_id)
-        if unit is None:
-            continue
-        code, names, skipped = _emit_test_file(
-            unit, scenarios, signatures, mock_headers, declarations, shim_names, aggregates)
-        path = tests_dir / f"{Path(unit.path).stem}_mtm_test.c"
-        path.write_text(code, encoding="utf-8")
-        out.files[f"tests/{path.name}"] = "test"
-        test_names.extend(names)
-        out.limitations.extend(skipped)
-
-    out.test_functions = test_names
-    runner_path = tests_dir / "mtm_runner.c"
-    runner_path.write_text(_emit_runner(test_names), encoding="utf-8")
-    out.files["tests/mtm_runner.c"] = "runner"
-
-    manifest = {
-        "files": out.files,
-        "test_functions": out.test_functions,
-        "mocks": out.mocks,
-        "limitations": out.limitations,
-    }
-    import json
-
-    (tests_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    out.files["tests/manifest.json"] = "manifest"
-    return out
-
-
-# --- mocks ------------------------------------------------------------------
+# --- declarations -----------------------------------------------------------
 
 
 def _strip_c_comments(text: str) -> str:
@@ -250,6 +158,29 @@ def _strip_c_comments(text: str) -> str:
     """
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
     return re.sub(r"//[^\n]*", " ", text)
+
+
+def split_declaration(decl: str) -> tuple[str, list[CParam]] | None:
+    """Split a C function declaration into ``(return_type, params)``.
+
+    ``None`` when the declaration has a shape this generator does not support
+    (variadics, a function-pointer/array parameter, or an unparseable header),
+    so the caller records a limitation instead of emitting wrong code.
+    """
+    decl = _strip_c_comments(decl or "").strip().rstrip(";")
+    if not decl:
+        return None
+    m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
+    if not m:
+        return None
+    ret = m.group("ret").strip()
+    if "*" in ret or "..." in m.group("params"):
+        return None
+    params = split_params(m.group("params"))
+    for p in params:
+        if not p.name or "(" in p.type:
+            return None
+    return ret, params
 
 
 _AGGREGATE_STRUCT_RE = re.compile(
@@ -274,30 +205,28 @@ def aggregate_aliases(text: str) -> set[str]:
     return aliases
 
 
+def _base_type(param: CParam) -> str:
+    return param.type.strip().rstrip("*").strip()
+
+
 def mock_controls(decl: str, symbol: str,
                   aggregates: set[str] | None = None) -> dict[str, Any] | None:
-    """The control surface :func:`_emit_mock` will expose for *symbol*.
+    """The control surface CMock will expose for *symbol*.
 
     ``{"return": bool, "out": [pointer names], "out_aggregate": {pointer names}}``.
     ``None`` when the declaration has a shape this generator refuses, so the
     caller records a limitation instead of emitting wrong code.
     """
-    decl = _strip_c_comments(decl or "").strip().rstrip(";")
-    if not decl:
+    split = split_declaration(decl)
+    if split is None:
         return None
-    m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
-    if not m or m.group("name") != symbol:
-        return None
-    ret = m.group("ret").strip()
-    if "*" in ret or "..." in m.group("params"):
-        return None
-    params = split_params(m.group("params"))
-    for p in params:
-        if not p.name or p.type.endswith("*") or "(" in p.type:
-            return None
-    return {"return": ret not in _VOID, "out": [p.name for p in params if p.pointer],
-            "out_aggregate": {p.name for p in params
-                              if p.pointer and p.type.strip().rstrip("*").strip() in (aggregates or set())}}
+    ret, params = split
+    return {
+        "return": ret not in _VOID,
+        "out": [p.name for p in params if p.pointer],
+        "out_aggregate": {p.name for p in params
+                          if p.pointer and _base_type(p) in (aggregates or set())},
+    }
 
 
 def _is_c_expression(value: Any) -> bool:
@@ -332,7 +261,7 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
                         "type; supply it as {\"expr\": \"<C initializer>\"} instead of a scalar")
     pointer_indices = {i for i, p in enumerate(params) if p.pointer}
     aggregate_params = {i for i, p in enumerate(params)
-                        if p.pointer and p.type.strip().rstrip("*").strip() in (aggregates or set())}
+                        if p.pointer and _base_type(p) in (aggregates or set())}
     for index in range(min(len(case.args), len(params))):
         if index in aggregate_params and not _is_c_expression(case.args[index]):
             return (f"argument {index} points at an aggregate type; supply its initial "
@@ -350,93 +279,7 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
     return None
 
 
-def _emit_mock(symbol: str, decl: str, shim_names: list[str] | None = None) -> tuple[str | None, str]:
-    """Emit a controllable mock for *symbol*.
-
-    Supported shapes: scalar (incl. enum/``_t``) return, scalar or pointer
-    parameters. Aggregates-by-value and variadics are refused (``None``) so a
-    caller records a limitation instead of generating wrong code.
-    """
-    decl = _strip_c_comments(decl or "").strip().rstrip(";")
-    if not decl:
-        return None, ""
-    m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
-    if not m or m.group("name") != symbol:
-        return None, ""
-    ret = m.group("ret").strip()
-    if "*" in ret or "..." in m.group("params"):
-        return None, ""
-    params = split_params(m.group("params"))
-    for p in params:
-        if not p.name or p.type.endswith("*") or "(" in p.type:
-            return None, ""
-
-    includes = _libc_includes_for([ret] + [p.type for p in params])
-    includes = [f'#include "{name}"' for name in (shim_names or [])] + includes
-    header_lines = [f"void mock_{symbol}_reset(void);", f"int mock_{symbol}_calls(void);"]
-    if ret not in _VOID:
-        header_lines.append(f"void mock_{symbol}_set_ret({ret} v);")
-    for p in params:
-        if p.pointer:
-            header_lines.append(f"void mock_{symbol}_set_{p.name}({p.type} v);")
-    header = "\n".join(header_lines)
-
-    lines: list[str] = [
-        f"/* Generated controllable mock for {symbol!r} — do not edit by hand. */",
-        *includes,
-        "",
-        f"extern {decl};",
-        "",
-        "static int mock_calls = 0;",
-    ]
-    if ret not in _VOID:
-        lines.append(f"static {ret} mock_ret;")
-    for p in params:
-        if p.pointer:
-            # Zero-initialised: `static` storage already zeroes scalars and
-            # aggregates alike, so a struct-typed pointee works too.
-            lines.append(f"static {p.type} mock_out_{p.name};")
-    lines += ["", f"void mock_{symbol}_reset(void) {{", "    mock_calls = 0;"]
-    if ret not in _VOID:
-        lines.append(f"    mock_ret = ({ret}){{0}};")
-    for p in params:
-        if p.pointer:
-            lines.append(f"    mock_out_{p.name} = ({p.type}){{0}};")
-    lines += ["}", ""]
-    if ret not in _VOID:
-        lines.append(f"void mock_{symbol}_set_ret({ret} v) {{ mock_ret = v; }}")
-    for p in params:
-        if p.pointer:
-            lines.append(f"void mock_{symbol}_set_{p.name}({p.type} v) {{ mock_out_{p.name} = v; }}")
-    lines += [f"int mock_{symbol}_calls(void) {{ return mock_calls; }}", ""]
-    call_args = ", ".join(f"{p.type} *{p.name}" if p.pointer else f"{p.type} {p.name}"
-                          for p in params) or "void"
-    lines.append(f"{ret} {symbol}({call_args}) {{")
-    lines.append("    mock_calls += 1;")
-    for p in params:
-        if p.pointer:
-            lines.append(f"    if ({p.name}) *{p.name} = mock_out_{p.name};")
-        else:
-            lines.append(f"    (void){p.name};")
-    if ret not in _VOID:
-        lines.append("    return mock_ret;")
-    lines.append("}")
-    return "\n".join(lines) + "\n", header
-
-
-def _libc_includes_for(types: list[str]) -> list[str]:
-    joined = " ".join(types)
-    need: set[str] = set()
-    if "uint" in joined or re.search(r"\bint\b", joined):
-        need.add("#include <stdint.h>")
-    if "size_t" in joined:
-        need.add("#include <stddef.h>")
-    if "bool" in joined:
-        need.add("#include <stdbool.h>")
-    return sorted(need)
-
-
-# --- tests ------------------------------------------------------------------
+# --- C value rendering ------------------------------------------------------
 
 
 def _literal(value: Any) -> str:
@@ -461,12 +304,268 @@ def _literal(value: Any) -> str:
     return f'"{escaped}"'
 
 
+def _expression(value: Any) -> str:
+    """Render a planned value that may use the ``{"expr": "..."}`` escape hatch."""
+    return value["expr"] if _is_c_expression(value) else _literal(value)
+
+
 def _cast(param: CParam, value: Any) -> str:
-    return f"({param.type}){_literal(value)}"
+    return f"({param.type}){_expression(value)}"
+
+
+# --- entry point ------------------------------------------------------------
+
+
+def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
+                   *, excluded_units: set[str] | None = None) -> Generated:
+    """Write a Ceedling project under ``<bench>/.mtm/gen`` from the plan.
+
+    *excluded_units* are feasibility-BLOCKED unit ids: they are left out of the
+    executable project (so they cannot fail the whole build) while remaining
+    visible in the feasibility report and denominator (R03).
+    """
+    excluded = excluded_units or set()
+    revision = Path(bench_root) / REVISION_DIRNAME
+    if revision.exists():
+        shutil.rmtree(revision)
+    src_dir = revision / SOURCE_DIRNAME
+    inc_dir = revision / "inc"
+    shim_dir = revision / SHIM_DIRNAME
+    iface_dir = revision / INTERFACE_DIRNAME
+    test_dir = revision / TEST_DIRNAME
+    for directory in (src_dir, inc_dir, shim_dir, iface_dir, test_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    out = Generated(revision=revision)
+    units = {u.id: u for u in inventory.units}
+    signatures = {fn["name"]: fn["signature"] for u in inventory.units for fn in u.functions}
+
+    # 1. Shims first (types a dependency header may need come from here).
+    shim_names: list[str] = []
+    for name, content in sorted((plan.shim_headers or {}).items()):
+        safe = Path(name).name
+        if not safe.endswith(".h"):
+            continue
+        (shim_dir / safe).write_text(content, encoding="utf-8")
+        out.files[f"{SHIM_DIRNAME}/{safe}"] = "shim"
+        shim_names.append(safe)
+    shim_includes = "".join(f'#include "{n}"\n' for n in shim_names)
+
+    # 2. Copy the executable scope (selected sources + headers, minus blocked
+    #    units) into the private source directory. The originals are never moved
+    #    or edited; a copy keeps Ceedling's write output far from the inputs and
+    #    makes each revision self-contained (no stale artefacts).
+    copied: set[str] = set()
+    blocked_headers: set[str] = set()
+    for unit in inventory.units:
+        if unit.id in excluded:
+            blocked_headers.add(Path(unit.path).stem)
+    for entry in inventory.selected:
+        candidate = bench_root / str(entry.get("path", ""))
+        if not candidate.is_file() or candidate.suffix.lower() not in (".c", ".h"):
+            continue
+        if candidate.suffix.lower() == ".c":
+            owner = next((u for u in inventory.units if Path(u.path).name == candidate.name), None)
+            if owner is not None and owner.id in excluded:
+                continue
+        if candidate.name in copied:
+            continue
+        copied.add(candidate.name)
+        shutil.copy2(candidate, src_dir / candidate.name)
+        out.files[f"{SOURCE_DIRNAME}/{candidate.name}"] = "source"
+
+    # 3. One interface header per mocked symbol: CMock generates the mock from
+    #    the header, so it declares only that symbol and the types it needs.
+    interfaces: dict[str, str] = {}
+    declarations: dict[str, str] = {}
+    for scenario in plan.scenarios:
+        if scenario.unit_id in excluded:
+            continue
+        for symbol in scenario.mocks:
+            declared = scenario.mock_declarations.get(symbol) or ""
+            if not declared:
+                declared = _prototype_for_symbol(bench_root, inventory, symbol)
+            declarations.setdefault(symbol, declared)
+    for symbol, decl in sorted(declarations.items()):
+        if not decl.strip():
+            out.limitations.append(
+                f"mocked symbol {symbol!r} has no declared interface; its "
+                "scenarios are not executed")
+            continue
+        header_name = f"mtm_dep_{symbol}.h"
+        interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
+        body = (
+            f"/* Private interface for the mocked dependency {symbol!r}.\n"
+            f" * Declared from the plan/SDD so CMock can generate a mock. This\n"
+            f" * header is NEVER written into the source directory. */\n"
+            f"#ifndef {interface_guard}\n#define {interface_guard}\n"
+            f"{shim_includes}#include <stdint.h>\n\n{decl.strip()}\n\n"
+            f"#endif /* {interface_guard} */\n"
+        )
+        (iface_dir / header_name).write_text(body, encoding="utf-8")
+        out.files[f"{INTERFACE_DIRNAME}/{header_name}"] = "interface"
+        out.mocks.append(symbol)
+        interfaces[symbol] = header_name
+
+    # Aggregate aliases from every C text the project compiles against.
+    aggregates: set[str] = set()
+    for content in (plan.shim_headers or {}).values():
+        aggregates |= aggregate_aliases(content)
+    for decl in declarations.values():
+        aggregates |= aggregate_aliases(decl)
+    for name in sorted(copied):
+        if name.endswith((".c", ".h")):
+            aggregates |= aggregate_aliases((src_dir / name).read_text(encoding="utf-8", errors="replace"))
+
+    # 4. One Unity test file per unit holding that unit's scenarios.
+    by_unit: dict[str, list[Scenario]] = {}
+    for scenario in plan.scenarios:
+        by_unit.setdefault(scenario.unit_id, []).append(scenario)
+
+    test_names: list[str] = []
+    # Every excluded unit is recorded, whether or not the plan mentioned it, so a
+    # blocked source is never silently dropped from the run (R03).
+    for unit in inventory.units:
+        if unit.id in excluded:
+            out.limitations.append(
+                f"unit {unit.id} ({unit.path}) is BLOCKED and was excluded from "
+                "the executable suite")
+    for unit_id, scenarios in sorted(by_unit.items()):
+        unit = units.get(unit_id)
+        if unit is None or unit_id in excluded:
+            continue
+        code, names, skipped = _emit_test_file(
+            unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates)
+        path = test_dir / f"test_{Path(unit.path).stem}.c"
+        path.write_text(code, encoding="utf-8")
+        out.files[f"{TEST_DIRNAME}/{path.name}"] = "test"
+        test_names.extend(names)
+        out.limitations.extend(skipped)
+
+    # 5. The Ceedling project file.
+    (revision / "project.yml").write_text(_project_yml(), encoding="utf-8")
+    out.files["project.yml"] = "project"
+
+    out.test_functions = test_names
+    return out
+
+
+def _ident(symbol: str) -> str:
+    return re.sub(r"\W", "_", symbol)
+
+
+def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -> str:
+    """Deterministically derive a dependency's prototype from the selected headers."""
+    from .cscan import scan_prototypes
+
+    for entry in inventory.selected:
+        candidate = bench_root / str(entry.get("path", ""))
+        if candidate.suffix.lower() == ".h" and candidate.is_file():
+            for name, decl in scan_prototypes(candidate):
+                if name == symbol:
+                    return decl
+    return ""
+
+
+def _project_yml() -> str:
+    """The Ceedling project file for a generated suite.
+
+    ``:enforce_strict_ordering: FALSE`` keeps a scenario's expectations in the
+    order written without demanding global ordering across mocks; the mock
+    plugins provide the expressiveness the plan uses (return values, out
+    parameters, unlimited coverage calls for UNDETERMINED cases).
+    """
+    return (
+        ":project:\n"
+        "  :use_exceptions: FALSE\n"
+        "  :use_mocks: TRUE\n"
+        "  :use_test_preprocessor: :none\n"
+        "  :build_root: build\n"
+        "  :test_file_prefix: test_\n"
+        "  :which_ceedling: gem\n"
+        ":paths:\n"
+        "  :source:\n"
+        f"    - {SOURCE_DIRNAME}/**\n"
+        "  :include:\n"
+        f"    - {SHIM_DIRNAME}/**\n"
+        f"    - {INTERFACE_DIRNAME}/**\n"
+        f"    - {SOURCE_DIRNAME}/**\n"
+        "  :test:\n"
+        f"    - {TEST_DIRNAME}/**\n"
+        ":cmock:\n"
+        "  :mock_prefix: mock_\n"
+        "  :when_no_prototypes: :warn\n"
+        "  :enforce_strict_ordering: FALSE\n"
+        "  :plugins:\n"
+        "    - :ignore\n"
+        "    - :expect_any_args\n"
+        "    - :return_thru_ptr\n"
+        "    - :ignore_arg\n"
+        "    - :callback\n"
+    )
+
+
+# --- test emission ----------------------------------------------------------
+
+
+def _mock_header_name(symbol: str, interfaces: dict[str, str]) -> str:
+    """The CMock-generated header a test includes for *symbol*."""
+    return f"mock_{interfaces[symbol]}"
+
+
+def _emit_mock_setup(symbol: str, config: dict[str, Any], control: dict[str, Any],
+                     case_index: int, determined: bool,
+                     lines: list[str]) -> dict[str, str]:
+    """Emit CMock expectation/ignore calls for one mock, one case.
+
+    Returns ``{param_name: variable}`` for the out-parameter values it declared.
+    A determined (SPECIFIED/ASSUMED) case sets an **exactly-N-call expectation**;
+    an UNDETERMINED case uses an *ignore* (unlimited calls, no assertion), so a
+    coverage-only scenario never produces a conformity verdict (B4).
+    """
+    config = config if isinstance(config, dict) else {}
+    out_vars: dict[str, str] = {}
+    # Declare a local for each out-parameter value the plan supplies, so the
+    # mock can copy it through the pointer on the call.
+    for name in control["out"]:
+        if name in config:
+            var = f"mock_{case_index}_{_ident(symbol)}_{name}"
+            ptype = control["out_types"].get(name, "int")
+            lines.append(f"    {ptype} {var} = {_expression(config[name])};")
+            out_vars[name] = var
+
+    count = 1
+    if determined:
+        raw = config.get("_calls")
+        count = int(raw) if isinstance(raw, int) and raw > 0 else 1
+
+    def emit_one_expectation() -> None:
+        if determined:
+            if control["return"]:
+                lines.append(f"    {symbol}_ExpectAnyArgsAndReturn({_expression(config.get('ret', 0))});")
+            else:
+                lines.append(f"    {symbol}_ExpectAnyArgs();")
+        else:
+            if control["return"]:
+                lines.append(f"    {symbol}_IgnoreAndReturn({_expression(config.get('ret', 0))});")
+            else:
+                lines.append(f"    {symbol}_Ignore();")
+        for name, var in out_vars.items():
+            lines.append(f"    {symbol}_ReturnThruPtr_{name}(&{var});")
+
+    if determined and count == 0:
+        # No expectation: CMock's strictness makes any unexpected call fail.
+        return out_vars
+    if determined:
+        for _ in range(count):
+            emit_one_expectation()
+    else:
+        emit_one_expectation()
+    return out_vars
 
 
 def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
-                    mock_headers: dict[str, str], mock_decls: dict[str, str],
+                    interfaces: dict[str, str], declarations: dict[str, str],
                     shim_names: list[str] | None = None,
                     aggregates: set[str] | None = None) -> tuple[str, list[str], list[str]]:
     unit_header = _unit_header(unit)
@@ -477,17 +576,11 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
         "#include <stdbool.h>",
         "#include <stddef.h>",
     ]
-    # Private shim headers first, so types a mock control function uses are known.
+    used_mocks = sorted({s for sc in scenarios for s in sc.mocks if s in interfaces})
+    # Private shim headers first, then the CMock mock headers, then the unit.
     lines += [f'#include "{name}"' for name in (shim_names or [])]
-    lines += [
-        f'#include "{unit_header}"',
-        "",
-    ]
-    used_mocks = sorted({s for sc in scenarios for s in sc.mocks if s in mock_headers})
-    for symbol in used_mocks:
-        lines.append(f"/* mock control: {symbol} */")
-        lines.append(mock_headers[symbol])
-    lines.append("")
+    lines += [f'#include "{_mock_header_name(s, interfaces)}"' for s in used_mocks]
+    lines += [f'#include "{unit_header}"', ""]
 
     names: list[str] = []
     skipped: list[str] = []
@@ -497,62 +590,54 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
         params = func_params(signature)
         void_ret = return_is_void(signature)
         test_name = f"test_{scenario.unit_id.replace('unit-', 'u')}_{scenario.id}".replace("-", "_")
-        controls = {
-            symbol: mock_controls(mock_decls.get(symbol, ""), symbol, aggregates)
-            for symbol in scenario.mocks
-        }
-        # A scenario the generator cannot materialise faithfully is reported as a
-        # limitation, never emitted as a test: it must not become a silent
-        # default-driven assertion that invents a defect.
-        problem = None
-        for symbol, control in controls.items():
+        controls: dict[str, dict[str, Any]] = {}
+        problem: str | None = None
+        for symbol in scenario.mocks:
+            control = mock_controls(declarations.get(symbol, ""), symbol, aggregates)
             if control is None:
                 problem = f"mock {symbol!r} has no usable declaration"
                 break
+            split = split_declaration(declarations.get(symbol, ""))
+            control["out_types"] = {p.name: _base_type(p) for p in split[1]} if split else {}
+            controls[symbol] = control
         if problem is None:
             for case in scenario.cases:
-                problem = _case_problem(case, controls, params, aggregates)
+                problem = _case_problem(case, {s: {k: v for k, v in c.items() if k != "out_types"}
+                                               for s, c in controls.items()}, params, aggregates)
                 if problem:
                     break
         if problem is not None:
             skipped.append(f"scenario {scenario.id} of {fn} not generated: {problem}")
             continue
+
+        determined = not scenario.oracle.is_undetermined
         names.append(test_name)
         lines.append(f"/* {scenario.id}: {scenario.title} — oracle {scenario.oracle.kind} */")
         lines.append(f"void {test_name}(void)")
         lines.append("{")
-        scenario_mocks = [s for s in used_mocks if s in (scenario.mocks or [])]
         for case_index, case in enumerate(scenario.cases):
-            # Reset every mock the scenario uses before each case: `expect_calls`
-            # is per case, and a case must not inherit the previous one's count.
-            for symbol in scenario_mocks:
-                lines.append(f"    mock_{symbol}_reset();")
-            for symbol, config in (case.mocks or {}).items():
-                config = config if isinstance(config, dict) else {}
-                if "ret" in config:
-                    lines.append(f"    mock_{symbol}_set_ret({_literal(config['ret'])});")
-                for key, value in config.items():
-                    if key == "ret":
-                        continue
-                    # A value of the form {"expr": "..."} is emitted verbatim as a
-                    # C expression (needed for aggregate pointees, e.g. a struct).
-                    expr = value["expr"] if isinstance(value, dict) and "expr" in value else _literal(value)
-                    lines.append(f"    mock_{symbol}_set_{key}({expr});")
+            # Declare the unit's own pointer arguments (one per case: they share a
+            # function scope). A planned `args` entry for a pointer parameter is
+            # its INITIAL pointed-to value, so a case can assert that a path
+            # preserves the previously accepted value.
             args: list[str] = []
             outs: dict[int, str] = {}
             for index, value in enumerate(case.args):
                 param = params[index] if index < len(params) else CParam("", "", False)
                 if param.pointer:
-                    # One variable per case: several cases share a function scope.
-                    # A planned `args` entry for a pointer parameter is its INITIAL
-                    # pointed-to value, so a case can assert that a path preserves
-                    # the previously accepted reading.
                     var = f"out{case_index}_{index}"
                     lines.append(f"    {param.type} {var} = {_cast(param, value)};")
                     args.append(f"&{var}")
                     outs[index] = var
                 else:
                     args.append(_cast(param, value))
+            # Mock expectations are set before the call they govern.
+            for symbol, config in (case.mocks or {}).items():
+                if symbol not in controls:
+                    continue
+                cfg = dict(config) if isinstance(config, dict) else {}
+                cfg["_calls"] = (case.expect_calls or {}).get(symbol)
+                _emit_mock_setup(symbol, cfg, controls[symbol], case_index, determined, lines)
             call = f"{fn}({', '.join(args)})"
             if case.expected is None:
                 lines.append("    /* UNDETERMINED: executed for coverage only, no conformity claim */")
@@ -565,19 +650,8 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                 var = outs.get(int(index_str))
                 if var is not None:
                     lines.append(f"    TEST_ASSERT_EQUAL({_literal(expected)}, {var});")
-            for symbol, count in (case.expect_calls or {}).items():
-                lines.append(f"    TEST_ASSERT_EQUAL_INT({_literal(count)}, mock_{symbol}_calls());")
         lines.append("}")
         lines.append("")
 
     lines += ["void setUp(void) {}", "void tearDown(void) {}"]
     return "\n".join(lines) + "\n", names, skipped
-
-
-def _emit_runner(test_names: list[str]) -> str:
-    lines = ["/* Generated Unity runner. */", '#include "unity.h"', ""]
-    lines += [f"void {name}(void);" for name in test_names]
-    lines += ["", "int main(void)", "{", "    UNITY_BEGIN();"]
-    lines += [f"    RUN_TEST({name});" for name in test_names]
-    lines += ["    return UNITY_END();", "}"]
-    return "\n".join(lines) + "\n"

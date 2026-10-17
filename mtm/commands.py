@@ -707,7 +707,8 @@ def cmd_generate(args: Any, ctx: "Context") -> dict[str, Any]:
         )
 
     result = run_generate(root, config.scopes, provider=provider,
-                          dry_run=getattr(args, "dry_run", False))
+                          dry_run=getattr(args, "dry_run", False),
+                          image=image_ref(ctx.image_tag))
     state = root / ".mtm" / "state" / "generate"
     record = _record(
         op, "generate", result.status,
@@ -718,6 +719,7 @@ def cmd_generate(args: Any, ctx: "Context") -> dict[str, Any]:
         inventory_path=str(state / INVENTORY_FILE),
         plan_path=str(state / PLAN_FILE) if result.plan else None,
         model=result.model,
+        provider=result.provider,
         suite=result.suite,
         smoke=result.smoke,
         findings=result.findings,
@@ -728,15 +730,38 @@ def cmd_generate(args: Any, ctx: "Context") -> dict[str, Any]:
         record.update(
             message="No selected unit is feasible for host compilation; nothing was generated.",
             action="Provide the missing headers/build context in scope, or accept the limitation.",
+            category=Category.INPUT_LIMITATION,
+            code=Code.HOST_UNSUPPORTED,
+        )
+    elif result.status == "INCOMPLETE":
+        record.update(
+            category=Category.TEST_FINDING,
+            code=Code.TEST_ASSERTION,
+            message="No planned scenario could be materialised into an executable test.",
+            action="Inspect the recorded limitations in suite.json; the plan is preserved.",
         )
     elif result.status == "TOOL_FAILURE":
         record.update(
             category=Category.TOOL,
             code=Code.TOOL_FAILED,
-            message="The generated suite could not be built.",
-            cause=(result.smoke.get("diagnostics", "") or "")[-800:],
-            action="Inspect the build diagnostics; the plan and generated files are preserved.",
-            tool_name="cc",
+            message="The generated suite could not be executed to a verified result.",
+            cause=(result.smoke.get("reason", "") or
+                   result.smoke.get("diagnostics", "") or "")[-800:],
+            action="Inspect the build/run diagnostics; the plan and generated files are preserved.",
+            tool_name="ceedling",
+        )
+    elif result.status == "PARTIAL":
+        # Blocked units and/or unmaterialised scenarios: verification is
+        # incomplete. Findings (if any) are still preserved in the record.
+        record.update(
+            category=Category.INPUT_LIMITATION,
+            code=Code.HOST_UNSUPPORTED,
+            message=("Verification is incomplete: "
+                     f"{result.counts.get('BLOCKED', 0)} blocked unit(s) and "
+                     f"{len(result.suite.get('limitations', []))} unmaterialised "
+                     "scenario limitation(s)."),
+            action="Review feasibility.json and suite.json; provide the missing "
+                   "context or accept the recorded limitations.",
         )
     elif result.findings:
         record.update(
@@ -781,6 +806,10 @@ def cmd_plan(args: Any, ctx: "Context") -> dict[str, Any]:
             "function": scenario.get("function"),
             "requirement_ids": scenario.get("requirement_ids", []),
             "oracle_kind": (scenario.get("oracle") or {}).get("kind"),
+            # The verbatim SDD statements per cited requirement. A requirement id
+            # is a *reference*, not proof that the requirement states this
+            # scenario's expected value, so the text is surfaced for review (R04).
+            "anchors": scenario.get("anchors", []),
             "generated": test_name in generated,
             "test": test_name,
         })

@@ -28,11 +28,23 @@ ARG DAGU_VERSION=2.20.1
 ARG DAGU_SHA256=0d5c1612cd842931fe6d4e598fc2e43fb912a94122e571c62a8f73691ea49837
 ARG CLAUDE_CODE_VERSION=2.1.302
 ARG CCR_VERSION=3.1.3
+ARG CEEDLING_VERSION=1.1.10
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl python3 python3-yaml python3-jsonschema git \
+      ruby ruby-dev gcc libc6-dev make \
  && rm -rf /var/lib/apt/lists/*
+
+# Ceedling + CMock drive the generated functional unit suite. Ruby and the C
+# toolchain live in the image so a user needs neither on the host. Ceedling
+# vendors its pinned Unity/CMock; the gem is the only extra dependency.
+RUN set -eux; \
+    gem install --no-document --version "${CEEDLING_VERSION}" ceedling; \
+    mkdir -p /usr/share/doc/ceedling; \
+    printf 'Ceedling is MIT-licensed. See https://github.com/ThrowTheSwitch/Ceedling\n' \
+      > /usr/share/doc/ceedling/LICENSE; \
+    ceedling version | head -3
 
 # Fetch and verify Dagu, keep the licence, drop the tarball.
 RUN set -eux; \

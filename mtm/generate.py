@@ -8,28 +8,35 @@ in-image Claude Code route.
 Stages (``docs/architecture/architecture.md`` logical workflow):
 
 1. ``inventory``   — deterministic scan of the selected inputs (no LLM).
-2. ``feasibility`` — READY/ADAPTED/BLOCKED from a real host compile (no LLM).
+2. ``feasibility`` — READY/ADAPTED/BLOCKED from a real **host** compile (no LLM).
 3. ``plan``        — LLM proposes; code grounds it against the inventory.
-4. ``generate``    — deterministic Unity tests + private mocks from the plan.
-5. ``smoke``       — compile/link/run the generated suite on the host.
+4. ``suite``       — deterministic Ceedling/CMock project from the plan.
+5. ``smoke``       — Ceedling compiles, links and executes the suite **in the
+   product image** (the C toolchain and Ruby live there, not on the host).
 
-Result statuses: ``SUCCEEDED`` (suite builds and runs), ``FINDINGS`` (it builds
-and runs but a generated assertion contradicts the SDD - a finding, exit 10),
-``BLOCKED`` (nothing feasible), or a raised :class:`MtmError` for a config/tool
-failure. Nothing here modifies the selected inputs.
+Result statuses: ``SUCCEEDED`` (the suite builds, runs and every planned
+scenario materialised), ``FINDINGS`` (it ran, but a generated assertion
+contradicts the SDD — a finding, exit 10 — or a planned scenario could not be
+materialised, which is a coverage shortfall), ``INCOMPLETE`` (no scenario could
+be executed to a verdict, exit 20), ``BLOCKED`` (nothing feasible, exit 20), or a
+raised :class:`~mtm.errors.MtmError` for a config/authorization failure (raised by
+the provider/runner, not here). A **tool fault**
+(timeout, crash, or a run with no Unity summary) is always ``TOOL_FAILURE``
+(exit 30) and is never promoted to an implementation defect.
+
+Nothing here modifies the selected inputs: the generated project lives under
+``<bench>/.mtm/gen`` and is rebuilt on every run.
 """
 
 from __future__ import annotations
 
-import json
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .ccompile import HostCompiler
-from .errors import Code, MtmError
-from .feasibility import assess_inventory, summarize
+from .ceedling import CeedlingRun, run_ceedling
+from .feasibility import BLOCKED, assess_inventory, summarize
 from .gen import generate_suite
 from .inventory import build_inventory
 from .llm import LLMProvider, MockProvider
@@ -56,6 +63,8 @@ class GenerateResult:
     counts: dict[str, int] = field(default_factory=dict)
     findings: list[dict[str, Any]] = field(default_factory=list)
     model: dict[str, Any] = field(default_factory=dict)
+    #: Which provider actually ran, and how it was selected (never a secret).
+    provider: dict[str, Any] = field(default_factory=dict)
     dry_run: bool = False
 
 
@@ -72,8 +81,14 @@ def run_generate(
     provider: LLMProvider | None = None,
     compiler: HostCompiler | None = None,
     dry_run: bool = False,
+    image: str = "utest-machinery/mtm:1.0.0",
+    runner=run_ceedling,
 ) -> GenerateResult:
-    """Run the full generation pipeline for a bench."""
+    """Run the full generation pipeline for a bench.
+
+    *runner* is the Ceedling executor (injectable so tests can drive the
+    classification logic without Docker); it defaults to the real in-image run.
+    """
     state = _state_dir(bench_root)
     inventory = build_inventory(bench_root, selected)
     inventory_path = write_json_atomic(state / INVENTORY_FILE, inventory.to_dict())
@@ -86,16 +101,18 @@ def run_generate(
     )
 
     counts = summarize(verdicts)
-    if counts.get("BLOCKED", 0) and not (counts.get("READY", 0) or counts.get("ADAPTED", 0)):
+    feasibility = [v.to_dict() for v in verdicts]
+    if counts.get(BLOCKED, 0) and not (counts.get("READY", 0) or counts.get("ADAPTED", 0)):
         return GenerateResult(
             status="BLOCKED", exit_code=20, inventory=inventory_path,
-            feasibility=[v.to_dict() for v in verdicts], counts=counts,
+            feasibility=feasibility, counts=counts,
         )
 
     if dry_run:
         return GenerateResult(
             status="PLANNED", exit_code=0, inventory=inventory_path,
-            feasibility=[v.to_dict() for v in verdicts], counts=counts, dry_run=True,
+            feasibility=feasibility, counts=counts, dry_run=True,
+            provider={"name": "none", "mode": "dry-run", "called": False},
         )
 
     provider = provider or MockProvider()
@@ -104,182 +121,138 @@ def run_generate(
     plan: Plan = parse_plan(response, inventory, provider.identity)
     plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
 
-    if not compiler.available:
-        raise MtmError(
-            code=Code.TOOL_FAILED,
-            message="No host C compiler is available to build the generated suite.",
-            action="Install a C compiler (the in-image toolchain arrives in PR 3).",
-            stage="generate-smoke",
-            tool_name="cc",
-        )
+    provider_record = _provider_record(provider)
 
-    generated = generate_suite(bench_root, plan, inventory)
+    # B3: a BLOCKED unit is excluded from the executable project so it cannot
+    # break the build of the independent, feasible units. It stays visible in
+    # the feasibility report and the denominator (R03).
+    excluded = {v.unit_id for v in verdicts if v.status == BLOCKED}
+    generated = generate_suite(bench_root, plan, inventory, excluded_units=excluded)
     suite_manifest = generated.to_dict()
     suite_path = write_json_atomic(state / SUITE_FILE, suite_manifest)
 
-    smoke = _compile_and_run(bench_root, plan, inventory, compiler, generated)
+    limitations = suite_manifest.get("limitations", [])
+    if not generated.test_functions:
+        # No scenario could be materialised faithfully. Running an empty project
+        # would report a vacuous success, so stop here with the shortfall visible.
+        return GenerateResult(
+            status="INCOMPLETE", exit_code=20, inventory=inventory_path,
+            feasibility=feasibility, plan=plan_path, suite=suite_manifest,
+            smoke={"built": False, "ran": False,
+                   "reason": "no planned scenario could be materialised"},
+            counts=counts, model=plan.model, provider=provider_record,
+        )
+
+    smoke = _run_and_classify(bench_root, plan, generated, image=image, runner=runner)
     smoke_path = write_json_atomic(state / SMOKE_FILE, smoke)
 
     findings = smoke.get("findings", [])
-    limitations = suite_manifest.get("limitations", [])
-    if not smoke.get("built"):
+    blocked = counts.get(BLOCKED, 0)
+    partial = bool(limitations) or blocked > 0
+    if not smoke.get("ran"):
+        # A tool fault (timeout, crash, or a run without a Unity summary) is never
+        # a C implementation defect: report it as such, with its own evidence.
         status, exit_code = "TOOL_FAILURE", 30
+    elif partial:
+        # A blocked unit or a scenario that could not be materialised faithfully
+        # means verification is *incomplete*, not that the code passed or failed:
+        # exit 20 (partial), with any findings preserved alongside it
+        # (``workflow-failures.md``). Never report a clean SUCCEEDED when part of
+        # the selected scope went unverified.
+        status, exit_code = "PARTIAL", 20
     elif findings:
-        status, exit_code = "FINDINGS", 10
-    elif limitations:
-        # A planned scenario that could not be materialised faithfully is a
-        # coverage shortfall, not a clean success: the plan asked for more than
-        # the suite delivered, and the caller must see that.
         status, exit_code = "FINDINGS", 10
     else:
         status, exit_code = "SUCCEEDED", 0
 
     return GenerateResult(
         status=status, exit_code=exit_code, inventory=inventory_path,
-        feasibility=[v.to_dict() for v in verdicts], plan=plan_path,
+        feasibility=feasibility, plan=plan_path,
         suite=suite_manifest, smoke=smoke, counts=counts, findings=findings,
-        model=plan.model,
+        model=plan.model, provider=provider_record,
     )
 
 
-def _compile_and_run(bench_root: Path, plan: Plan, inventory, compiler: HostCompiler,
-                     generated) -> dict[str, Any]:
-    """Compile the original units, generated tests, mocks and Unity; run it."""
-    unity_dir = Path(__file__).resolve().parent / "vendor" / "unity"
-    build = Path(bench_root) / ".mtm" / "state" / "generate" / "build"
-    if build.exists():
-        shutil.rmtree(build)
-    build.mkdir(parents=True, exist_ok=True)
-
-    # Sources: original units (paths preserved), generated tests/mocks, the Unity
-    # framework and its runner. Inputs are never copied over or edited.
-    sources: list[Path] = []
-    include_dirs: list[Path] = []
-    for unit in inventory.units:
-        source = bench_root / unit.path
-        if source.is_file():
-            sources.append(source)
-            include_dirs.append(source.parent)
-    for entry in inventory.selected:
-        candidate = bench_root / str(entry.get("path", ""))
-        if candidate.is_dir():
-            include_dirs.append(candidate)
-        elif candidate.suffix.lower() == ".h" and candidate.parent.is_dir():
-            include_dirs.append(candidate.parent)
-
-    tests_dir = bench_root / "tests"
-    mocks_dir = bench_root / "mocks"
-    shims_dir = bench_root / "shims"
-    sources += sorted(p for p in tests_dir.glob("*.c"))
-    sources += sorted(p for p in mocks_dir.glob("*.c"))
-    sources.append(unity_dir / "unity.c")
-
-    include_dirs += [tests_dir, mocks_dir, unity_dir]
-    if shims_dir.is_dir():
-        # Shim headers take precedence for the missing-include case, so they come
-        # first; they declare only the documented interface.
-        include_dirs = [shims_dir, *include_dirs]
-    # De-duplicate include dirs, preserving order.
-    seen: set[str] = set()
-    unique_includes: list[Path] = []
-    for d in include_dirs:
-        key = str(d.resolve())
-        if key not in seen and d.is_dir():
-            seen.add(key)
-            unique_includes.append(d)
-
-    binary = build / "suite"
-    link = compiler.link(sources, binary, unique_includes)
-    if not link.ok:
-        return {
-            "built": False, "ran": False,
-            "compile_argv": link.argv, "diagnostics": link.diagnostics[-4000:],
-            "findings": [],
-        }
-
-    run = compiler.run(binary, cwd=build)
-    executed = _executed_tests(run.stdout + run.stderr)
-    total, passed, failed = _unity_summary(run.stdout)
-    findings: list[dict[str, Any]] = []
-    if run.returncode != 0:
-        findings = _failing_scenarios(run.stdout, run.stderr, plan)
-    return {
-        "built": True, "ran": True, "exit_code": run.returncode,
-        "stdout": run.stdout[-4000:], "stderr": run.stderr[-2000:],
-        "unity": {"total": total, "passed": passed, "failed": failed},
-        "executed": executed,
-        "findings": findings,
-    }
+def _provider_record(provider: LLMProvider) -> dict[str, Any]:
+    identity = provider.identity
+    mode = {
+        "mock": "recorded fixture (offline, token-free)",
+        "claude-code": "in-image Claude Code + CCR (live model)",
+    }.get(identity.provider, identity.provider)
+    return {"name": identity.provider, "model": identity.model, "mode": mode,
+            "prompt_version": identity.prompt_version, "called": True}
 
 
-def _unity_summary(stdout: str) -> tuple[int, int, int]:
-    import re
+def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
+                      image: str, runner) -> dict[str, Any]:
+    """Execute the generated project and classify the outcome (B2).
 
-    # Unity prints "-----------------------\nN Tests M Failures K Ignored".
-    m = re.search(r"(\d+)\s+Tests\s+(\d+)\s+Failures\s+(\d+)\s+Ignored", stdout)
-    if not m:
-        return 0, 0, 0
-    total = int(m.group(1))
-    failures = int(m.group(2))
-    return total, total - failures, failures
-
-
-def _parse_failures(stdout: str) -> list[tuple[str, str]]:
-    """Return ``(test_function, short_reason)`` for each Unity assertion failure.
-
-    Unity prints ``<path>:<line>:<test>:FAIL: <reason>`` (the path itself contains
-    ``:``), so the marker is split on the literal ``:FAIL`` token rather than on
-    the last colon.
+    The classification uses **two independent signals**: the runner's exit code
+    and a parseable Unity summary. Only a Unity summary proves the suite ran;
+    without one the run is a tool fault, whatever the exit code.
     """
-    import re
+    run: CeedlingRun = runner(bench_root, image_ref=image)
+    smoke: dict[str, Any] = {
+        "built": run.ran,
+        "ran": run.ran,
+        "exit_code": run.returncode,
+        "timed_out": run.timed_out,
+        "command": " ".join(run.argv),
+        "stdout": run.stdout[-6000:],
+        "stderr": run.stderr[-2000:],
+        "unity": {"total": run.total, "passed": run.passed, "failed": run.failed},
+        "findings": [],
+    }
+    if not run.ran:
+        # No Unity summary: the suite did not produce results. Never a defect.
+        smoke["reason"] = _tool_fault_reason(run)
+        smoke["diagnostics"] = run.diagnostics[-4000:]
+        return smoke
 
-    failures: list[tuple[str, str]] = []
-    for line in stdout.splitlines():
-        if ":FAIL" not in line or ":PASS" in line:
-            continue
-        head, _, tail = line.partition(":FAIL")
-        reason = tail.lstrip(": ").strip()
-        marker = re.search(r"([A-Za-z_]\w*)\s*$", head)
-        if not marker:
-            continue
-        failures.append((marker.group(1), reason))
-    return failures
+    if run.failed == 0 and run.returncode != 0:
+        # Unity reported no failures yet the process exited non-zero: something
+        # outside the assertions failed. Treat it as a tool fault, not success.
+        smoke["ran"] = False
+        smoke["reason"] = (f"Unity reported no test failures but the runner exited "
+                           f"{run.returncode}; not a verified result")
+        smoke["diagnostics"] = run.diagnostics[-4000:]
+        return smoke
+
+    smoke["findings"] = _findings(run, plan)
+    return smoke
 
 
-def _executed_tests(stdout: str) -> list[str]:
-    import re
+def _tool_fault_reason(run: CeedlingRun) -> str:
+    if run.timed_out:
+        return "the test run timed out before producing a Unity summary"
+    if run.returncode < 0:
+        return f"the test runner was killed by signal {-run.returncode}"
+    if run.returncode == 127:
+        return "the Ceedling runner could not be started"
+    if "BUILD FAILURE" in run.stdout:
+        return ("the generated project failed to build (no Unity summary was "
+                "produced); see the build diagnostics")
+    return f"the test run produced no Unity summary (exit {run.returncode})"
 
-    names: list[str] = []
-    for line in stdout.splitlines():
-        marker = re.search(r"(\w+?):(?:PASS|FAIL|IGNORE)", line)
-        if marker:
-            name = marker.group(1).split(":")[-1]
-            if name not in names:
-                names.append(name)
-    return names
 
-
-def _failing_scenarios(stdout: str, stderr: str, plan: Plan) -> list[dict[str, Any]]:
-    """Map Unity failures to the plan scenarios that produced them.
+def _findings(run: CeedlingRun, plan: Plan) -> list[dict[str, Any]]:
+    """Map Unity assertion failures to the plan scenarios that produced them.
 
     A generated test that fails means the **implementation contradicts the
     SDD-grounded oracle** — a finding (``IMPLEMENTATION_DEFECT``), preserved as
     evidence, never repaired by editing the oracle (R04).
     """
-    failing: list[dict[str, Any]] = []
-    for name, reason in _parse_failures(stdout):
+    findings: list[dict[str, Any]] = []
+    for name, reason in run.failures:
         scenario_id = _scenario_for_test(name)
-        failing.append({
+        findings.append({
             "test": name,
             "category": "IMPLEMENTATION_DEFECT",
             "scenario_id": scenario_id,
             "expected_behavior": _oracle_statement(plan, scenario_id),
             "observed": reason,
         })
-    if not failing and stderr.strip():
-        failing.append({"test": "<runner>", "category": "TOOL_FAILURE",
-                        "detail": stderr.strip()[-500:]})
-    return failing
+    return findings
 
 
 def _scenario_for_test(test_name: str) -> str:

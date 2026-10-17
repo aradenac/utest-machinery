@@ -174,7 +174,25 @@ def test_make_provider_mock_is_token_free():
     assert isinstance(make_provider("mock", image_ref="img:1"), MockProvider)
 
 
-def test_make_provider_claude_code_requires_credentials(tmp_path: Path):
+def test_make_provider_auto_does_not_silently_fall_back_to_recordings(tmp_path):
+    """B6: 'auto' must never substitute a recorded fixture for a real model call.
+
+    With no built image it fails with a clear action rather than quietly
+    returning canned answers that make a generated suite look model-authored.
+    """
+    with pytest.raises(MtmError) as exc:
+        make_provider("auto", image_ref="never-built:0",
+                      credentials_file=tmp_path / "absent.env")
+    assert exc.value.code == "LLM_CONFIG"
+    assert "mtm install" in (exc.value.action or "")
+
+
+def test_make_provider_claude_code_requires_credentials(tmp_path):
+    # With a nonexistent image, the image check fires first (LLM_CONFIG). To
+    # exercise the credential branch, point at an image that exists.
+    from mtm.docker import image_exists
+    if not image_exists("img:1"):
+        pytest.skip("no local image named img:1 to pass the image-existence check")
     with pytest.raises(MtmError) as exc:
         make_provider("claude-code", image_ref="img:1", credentials_file=tmp_path / "absent.env")
     assert exc.value.code == "LLM_AUTH"
@@ -251,3 +269,55 @@ def test_declaration_comments_are_stripped_before_parsing():
     decl = "/* ASSUMED: signature not documented */\nint f(uint16_t *p);"
     assert _strip_c_comments(decl).strip() == "int f(uint16_t *p);"
     assert mock_controls(decl, "f") is not None
+
+
+# --- B4: an UNDETERMINED scenario never asserts an ungrounded outcome --------
+
+
+def _undetermined_plan(payload: dict):
+    import json as _json
+    from mtm.llm import LLMIdentity
+    from mtm.inventory import build_inventory
+
+    inventory = build_inventory(EXAMPLES, _selected("mocked-sensor"))
+    return parse_plan(_json.dumps(payload), inventory,
+                      LLMIdentity(provider="test", model="hand-written"))
+
+
+def test_undetermined_strips_expect_out_so_it_cannot_assert():
+    """An UNDETERMINED case with a null `expected` but a grounded-looking
+    `expect_out` must not keep that outcome: it would assert a value the SDD
+    never states and report a false implementation defect (B4)."""
+    plan = _undetermined_plan({
+        "scenarios": [{
+            "id": "S1", "title": "t", "function": "sample_sensor",
+            "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+            "cases": [{"args": [1], "expected": None,
+                       "mocks": {"platform_read_sensor": {"ret": 0, "reading": 5}},
+                       "expect_out": {"0": 42}, "expect_calls": {"platform_read_sensor": 3}}],
+            "oracle": {"kind": "UNDETERMINED", "statement": "gap", "proposal": "specify"},
+        }],
+    })
+    case = plan.scenarios[0].cases[0]
+    assert case.expected is None
+    assert case.expect_out == {}
+    assert case.expect_calls == {}
+    assert plan.scenarios[0].oracle.kind == UNDETERMINED
+
+
+def test_specified_scenario_keeps_its_grounded_expectations():
+    """Contrast: a SPECIFIED oracle keeps its expectations (no over-stripping)."""
+    plan = _undetermined_plan({
+        "scenarios": [{
+            "id": "S1", "title": "t", "function": "sample_sensor",
+            "requirement_ids": ["SEN-002"], "mocks": ["platform_read_sensor"],
+            "cases": [{"args": [642], "expected": "SENSOR_ERROR",
+                       "mocks": {"platform_read_sensor": {"ret": 1, "reading": 55}},
+                       "expect_out": {"0": 642}, "expect_calls": {"platform_read_sensor": 1}}],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
+        }],
+    })
+    case = plan.scenarios[0].cases[0]
+    assert case.expected == "SENSOR_ERROR"
+    assert case.expect_out == {"0": 642}
+    assert case.expect_calls == {"platform_read_sensor": 1}

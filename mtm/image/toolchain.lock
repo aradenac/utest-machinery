@@ -31,7 +31,15 @@ tools:
   claude-code-router:
     version: "3.1.3"
     license: MIT
-  unity:
-    version: "2.6.0"
+  ruby:
+    version: "3.1 (distro package)"
+    license: "Ruby / BSD-2-Clause"
+    note: "Image runtime for Ceedling. Debian 'ruby' + 'ruby-dev'."
+  ceedling:
+    version: "1.1.10"
     license: MIT
-    note: "Vendored core (unity.c/unity.h/unity_internals.h) under mtm/vendor/unity; used to compile the generated suite."
+    note: "Runs in the image; drives the generated functional unit suite and vendors its own pinned Unity 2.7.2 + CMock 2.7.2."
+  gcc:
+    version: "distro package"
+    license: GPL-3.0-or-later (with GCC runtime exception)
+    note: "Host-arch C compiler used by Ceedling in the image (plus host feasibility/smoke in PR 2). The Clang/sanitizer/Mull toolchain arrives in PR 3/4."

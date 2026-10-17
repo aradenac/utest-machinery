@@ -1,8 +1,10 @@
 # Decision record 0010 — generated suite framework: vendored Unity, no Ceedling/Ruby
 
-- **Status:** accepted (agent decision under R20, 2026-10-18)
+- **Status:** superseded by [0012](0012-ceedling-cmock-adopted.md) (owner arbitration, 2026-10-18)
 - **Date:** 2026-10-18
 - **Supersedes:** none
+- **Superseded by:** [0012](0012-ceedling-cmock-adopted.md) — the owner did not validate this
+  agent-internal deviation; Ceedling + CMock were implemented instead.
 
 ## Context
 

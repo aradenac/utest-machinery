@@ -28,9 +28,11 @@ mtm = [
     "workflows/*.yaml",
     "image/*",
     "recordings/*.json",
-    "vendor/unity/*",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "docker: requires the built product image and a Docker daemon",
+]

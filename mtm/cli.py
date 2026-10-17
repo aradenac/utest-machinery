@@ -86,7 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate = sub.add_parser("generate", help="assess selected inputs, plan and generate a unit-test bench")
     generate.add_argument("--provider", default="auto", choices=["auto", "mock", "claude-code"],
-                          help="generation model provider (auto: real harness when available, else recorded)")
+                          help="generation model provider: 'auto'/'claude-code' run the in-image "
+                               "model (requires the image and credentials); 'mock' explicitly uses "
+                               "a recorded fixture response, offline and token-free — it is never "
+                               "selected implicitly")
     generate.add_argument("--model", default="scaleway/deepseek-v4.1-flash",
                           help="in-image model route")
     generate.add_argument("--dry-run", action="store_true",
@@ -155,6 +158,10 @@ def _print_human(record: dict[str, Any], command: str) -> None:
         oracle = scenario.get("oracle_kind", "?")
         print(f"  - {scenario.get('id')} {scenario.get('function')} "
               f"[{oracle}, {mark}] reqs={','.join(scenario.get('requirement_ids', []))}")
+        for anchor in scenario.get("anchors", []):
+            statement = (anchor.get("statement") or "").strip()
+            if statement:
+                print(f"      ↳ {anchor.get('requirement_id')}: {statement}")
     if record.get("planned") is not None:
         print(f"  planned={record.get('planned')} generated={record.get('generated')} "
               f"undetermined={record.get('undetermined')}")
@@ -166,6 +173,11 @@ def _print_human(record: dict[str, Any], command: str) -> None:
               f"{finding.get('observed', '')} (expected: {finding.get('expected_behavior', '')})")
     if record.get("feasibility_counts"):
         print(f"  feasibility: {record['feasibility_counts']}")
+    provider = record.get("provider")
+    if isinstance(provider, dict) and provider:
+        model = provider.get("model") or ""
+        print(f"  provider: {provider.get('name')} ({provider.get('mode')})"
+              + (f" model={model}" if model else ""))
     # A 'status' consultation must surface the last operation's diagnosis in
     # text too, not only in --json: otherwise the failure it exists to report is
     # invisible to a human.
