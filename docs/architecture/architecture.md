@@ -7,8 +7,8 @@
 ```mermaid
 flowchart TB
   U["Engineer / mtm standalone CLI"] --> C["Project configuration + one bench directory"]
-  U --> D["Reusable Docker image"]
-  I["Input code & SDDs (read-only, multi-repo)"] --> D
+  U --> D
+  I["Explicitly selected C and SDD inputs (read-only)"] --> D
   C <--> D
   S["Per-user credentials outside repos"] -->|runtime-only, least privilege| D
   subgraph D["Generic Docker runtime"]
@@ -29,7 +29,7 @@ Only generic product code, tool installations and workflow templates reside in t
 
 ## Host layout and mount policy
 
-One workspace has exactly **one owned bench root**, either in an owning repository or in a dedicated repository for multi-repo workspaces. Inputs may be anywhere in the accessible workspace and are referenced, not moved. Resolve and reject path escapes, dangling references, undocumented external roots and overlapping ownership. A possible layout (not a rigid internal API):
+No automatic discovery outside explicitly configured source and specification roots is permitted. Feasibility assessment runs implicitly on scope changes and before generation; its results are exposed through plan/status and execution diagnostics, not a dedicated user-facing command. One workspace has exactly **one owned bench root**, either in an owning repository or in a dedicated repository for multi-repo workspaces. Inputs may be anywhere in the accessible workspace and are referenced, not moved. Resolve and reject path escapes, dangling references, undocumented external roots and overlapping ownership. A possible layout (not a rigid internal API):
 
 ```text
 test-machinery/
@@ -111,6 +111,11 @@ Compilation and smoke runs are concrete evidence, **not proof of target equivale
 | SYS-024 | Source, SDD and generated input content SHALL be treated as untrusted data, not agent instructions. | Prompt-injection qualification |
 | SYS-025 | Every executed tool and generated artifact SHALL carry hashes/versions sufficient for auditing a frozen campaign. | Provenance replay |
 | SYS-026 | A campaign SHALL record not-selected, unsupported, blocked, attempted and completed checks separately. | Completeness matrix |
+| SYS-027 | Discovery SHALL inspect only selected input roots and SHALL run feasibility assessment automatically when scope or relevant inputs change. | Unselected-directory sentinel and scope-change test |
+| SYS-028 | The plan view SHALL show expected cases, generated cases, executed cases, evidence, gaps and applicability, without claiming test counts prove correctness. | Planned/generated/executed comparison fixture |
+| SYS-029 | The CLI SHALL expose distinct generate, offline verify, interpret and report operations; each SHALL respect read/write boundaries. | CLI behavioral integration tests |
+| SYS-030 | CI SHALL exercise all specified subsystem contracts, user workflows, security/failure modes and qualification examples, with explicit reporting of untested cases. | CI test plan and coverage matrix |
+| SYS-031 | Headless CI SHALL accept short-lived LLM credentials only from an external secret store and SHALL never print, archive or commit them; offline tests SHALL need none. | Secret-redaction and disconnected CI tests |
 
 ## Execution semantics and security
 
