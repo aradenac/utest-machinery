@@ -4,12 +4,15 @@ Two different proofs are needed: (1) **uTest Machinery behaves correctly as soft
 
 ```mermaid
 flowchart LR
-  L["Agent: full local checks"] --> P["Open feature PR"]
+  L["Agent: full local checks"] --> V["Independent subagent contract review"]
+  V --> P["Open feature PR"]
   P --> C["Fast offline PR CI"]
   C --> R["Human PR review"]
   H["Optional heavy CI / live-model"] --> R
   R -->|Accept and merge| N["Next feature only after new approval"]
 ```
+
+The pre-PR `/verify-feature` subagent checks the current milestone's contracts, relevant counterexamples and actual acceptance evidence after local testing. Its report returns directly to the developer, who resolves material findings and records proof in the existing Beads item. This is a **local developer preflight**, not a second CI job, an external approval or a substitute for the GitHub review; its effectiveness remains to be measured.
 
 ## CI policy
 
