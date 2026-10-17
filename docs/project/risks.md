@@ -85,7 +85,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Vérification d'efficacité à venir :** dès les prochaines PR de features et leurs éventuelles corrections, contrôler que chaque critère obligatoire dispose d'une preuve pertinente, que les cas voisins sont considérés après les findings et que les défauts détectables avant PR diminuent, sans surcharge documentaire.
 
-**Statut :** **En attente de confirmation** — mesure décidée et intégrée aux consignes/au plan ; **efficacité non encore démontrée** par les futures PR.
+**Statut :** **En attente de confirmation** — mesure appliquée aux consignes et au plan via la [PR #8](https://github.com/aradenac/utest-machinery/pull/8) (17 octobre 2026) ; **efficacité non encore démontrée**, à examiner lors des prochaines revues de features.
 
 ### AP-02 — Qualification dans l'environnement réel
 
