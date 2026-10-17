@@ -13,7 +13,7 @@ flowchart TB
   subgraph CONTAINER["Reusable generic Docker image"]
     RUNNER["Core API and workflow runner"]
     DAG["Headless Dagu candidate"]
-    AGENT["LLM harness"]
+    AGENT["Claude Code + CCR + DeepSeek V4.1 Flash"]
     TEST["Native C test engines"]
     REPORT["Evidence and report engine"]
     RUNNER --> DAG
@@ -106,21 +106,21 @@ Requirements below express **observable behavior**; schemas are specified in [da
 | SYS-019 | A requirement SHALL NOT be marked conforming solely because an assertion passed or a structural metric reached 100%. |
 | SYS-020 | Findings SHALL separate implementation defect, SDD gap, SDD conflict, insufficient evidence and tool/environment failure. |
 | SYS-021 | Each actionable recommendation SHALL identify evidence, precise location, rationale, proposed change, risks and post-change acceptance test. |
-| SYS-022 | Workflows SHALL be headless and text-versioned; optional diagrams/UI SHALL expose the same DAG and execution status. |
-| SYS-023 | A terminated workflow SHALL retain an external journal and support explicit safe resume or restart, without falsely successful stages. |
+| SYS-022 | Workflows SHALL execute without GUI and SHALL be human-readable text, with optional visual inspection of the same DAG/status. |
+| SYS-023 | A failed/interrupted workflow SHALL persist structured error, scope, stage, cause, user action and logs outside Docker and support safe retry/restart without false success. |
 | SYS-024 | Domain test failures SHALL be preserved as evidence and SHALL NOT prevent independent applicable campaigns from running. |
 | SYS-025 | LLM tools SHALL be allowlisted, logged and bounded; project inputs SHALL be treated as data rather than agent instructions. |
 | SYS-026 | User/CI credentials SHALL be supplied outside project data, image layers and archived logs, only to authorized LLM operations. |
 | SYS-027 | Generated C and its execution SHALL use scoped non-root container permissions, time/resource limits and restricted network access. |
 | SYS-028 | All project configuration, checkpoints, accepted decisions and generated test sources SHALL be Git-friendly and transferable between developers. |
 | SYS-029 | Reports SHALL distinguish observed host resource/ABI properties from unverified MCU behavior. |
-| SYS-030 | The CLI SHALL report live stage/status/failures and permit inspection of plan, results and audit evidence. |
+| SYS-030 | The CLI SHALL show stage progress and actionable diagnostics through `status` (text/JSON), `doctor` and `report` using the error contract. |
 | SYS-031 | The tool SHALL publish a navigable HTML report and machine-readable results referencing immutable campaigns. |
 | SYS-032 | CI and qualification SHALL exercise user workflows, failure/recovery paths, security boundaries and semantic C/SDD samples, disclosing untested scope. |
 | SYS-033 | A frozen re-execution SHALL reject unavailable or hash-mismatched original selected inputs; historical viewing SHALL remain available. |
 | SYS-034 | Mutations SHALL preserve an operator configuration, per-mutant identity/status and native reports; invalid/equivalent mutants SHALL be accounted for separately. |
 | SYS-035 | Fuzz campaigns SHALL record corpus, seeds, budgets, properties and replayable reproductions for reported failures. |
-| SYS-036 | LLM model/provider selection SHALL reside in user-level configuration; only model calls use user credentials. |
+| SYS-036 | The in-image harness SHALL initially run Claude Code through CCR to DeepSeek V4.1 Flash, matching the validated host route without copying user secrets into the image. |
 | SYS-037 | All bundled testing/workflow tools SHALL be free to use internally, with reproducible versions and recorded license information. |
 
 ## Technical boundaries
@@ -129,6 +129,10 @@ Requirements below express **observable behavior**; schemas are specified in [da
 - Generated oracles carry exact SDD anchors and review state; the LLM may propose a correction to code or specification but may not silently modify either.
 - Only the generic engine and tool installations live in Docker. Every project configuration, source mapping, tests, journal, campaign and report belongs to the single host bench. Git-version essential configurations, generated tests, stable states and accepted reports; budget large fuzz/raw artifacts explicitly with Git LFS or content-addressed archives, without silent deletion.
 - Distinguish historical **record replay** (read preserved evidence), **re-execution** (requires original selected input content and locked toolchain) and **reinterpretation** (new LLM explanation from immutable evidence).
+
+## Workflow outcomes
+
+The shared [error and stop policy](workflow-failures.md) defines input blockers, LLM errors, tool failures, test findings, safe retries, CLI exit codes and `mtm status --json`. A complete test campaign that detects an implementation defect is not a successful *product verification verdict* but is a valid executed workflow with preserved findings. A Dagu step must never hide tool failure under a green `continue_on` result.
 
 ## Execution semantics and security
 
@@ -142,7 +146,7 @@ A testcase assertion PASS has meaning only under its documented oracle. For unde
 
 - The public CLI is defined in [user workflows](../user-guide/workflows.md); no manual tool setup or mandatory GUI.
 - [Data contracts](data-contracts.md) define files and statuses; [LLM policy](automation-policy.md) defines trusted operations and approvals.
-- [Verification strategy](verification-strategy.md) specifies six complementary campaigns; [workflow choice](workflow-engines.md) retains candidate alternatives.
+- [Verification strategy](verification-strategy.md) specifies six complementary campaigns; [workflow choice](workflow-engines.md) retains candidate alternatives; [error handling](workflow-failures.md) defines the public stop/diagnostic contract.
 - [PR gates](../plan/implementation.md) and [CI/manual checks](../qualification/ci-and-manual-tests.md) determine implementation readiness.
 
 ## Future architecture boundary
