@@ -14,6 +14,10 @@ flowchart LR
   M["Manual WSL acceptance"] --> E
 ```
 
+## PR gates
+
+From stage 01, every implementation PR runs a growing offline CI suite plus its stage-specific acceptance checks in the [implementation plan](../plan/implementation.md). Dependent PRs wait for the preceding stage to pass and merge. An intentionally defective C fixture produces an **expected detection**, not a passing SUT. Archive native evidence and a compact status report. Mark missing capabilities NOT_IMPLEMENTED rather than skipping the stage's mandatory acceptance gate.
+
 ## Automated CI layers
 
 | Layer | Tests | Expected verdict |
@@ -59,6 +63,10 @@ sequenceDiagram
 ```
 
 Inject crash, compiler error, test failure, timed-out mutant, malformed LLM response, missing dependency, partial report write, invalid cache hash and inaccessible Docker daemon. Test failures must be recorded as evidence while independent checking proceeds; infrastructure failure must not be interpreted as a passing test.
+
+## Credentialed CI isolation
+
+Only approved trusted refs may receive model tokens from protected GitHub Environments/Secrets. Do not elevate forked PR workflows. Ordinary PR CI uses a simulated/recorded LLM; real-model semantic checks are separately triggered, budget-limited and clearly reported. An unavailable real-model run cannot be presented as completed semantic qualification.
 
 ## Manual WSL acceptance (when automation is insufficient)
 

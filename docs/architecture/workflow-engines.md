@@ -25,9 +25,9 @@ flowchart LR
 
 ## Provisional decision: Dagu
 
-Dagu is the preferred **separate executable** inside Docker: textual YAML DAGs, headless execution, stage dependencies, errors, retries and optional UI align with both machine autonomy and manual review. Internal-only use reduces distribution/licensing concerns, though license obligations still apply.
+Dagu is the preferred **separate executable** inside Docker: textual YAML DAGs, headless execution, stage dependencies, errors, retries and optional UI align with both machine autonomy and manual review. The tool is intended for internal use; respect the selected engine license and keep it as a separate executable.
 
-**Not yet final adoption.** Prove: (1) no server/UI required, (2) deterministic and explicit step failure policies, (3) resumability after container interruption, (4) workflow/state export/import with no hidden source of truth, (5) CLI progress and optional DAG display, (6) per-project state on host volume, (7) compatible image/license/version pinning. If any acceptance gate fails, reconsider Prefect or a deliberately small Python orchestrator. Keep this comparison and reasons in source control.
+**Not yet final adoption.** Validate the documented Dagu CLI version (including start/status/retry/dry commands) before relying on resume semantics; the [official CLI reference](https://docs.dagu.sh/getting-started/cli) is the starting point. Prove: (1) no server/UI required, (2) deterministic and explicit step failure policies, (3) resumability after container interruption, (4) workflow/state export/import with no hidden source of truth, (5) CLI progress and optional DAG display, (6) per-project state on host volume, (7) compatible image/license/version pinning. If any acceptance gate fails, reconsider Prefect or a deliberately small Python orchestrator. Keep this comparison and reasons in source control.
 
 ## Failure policy
 
@@ -38,7 +38,7 @@ Dagu is the preferred **separate executable** inside Docker: textual YAML DAGs, 
 - Replay only when step inputs/tool versions match its recorded fingerprint; otherwise invalidate downstream steps.
 - On interruption, the journal survives and a developer can inspect, resume or restart.
 - Human or LLM modifications to workflow definitions go through Git diff and validation.
-- Optional UI is for observation, **not authoring source of truth**.
+- Optional UI is for observation, **not authoring source of truth**. Ordinary execution must not require a server started by `start-all`; use a proven headless invocation.
 
 ## Visual workflow source
 

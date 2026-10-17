@@ -30,7 +30,7 @@ flowchart TD
 | Run newly generated untrusted C | Sandbox policy | Non-root, restricted mounts/network, CPU/memory/time limits |
 | Use personal credentials | LLM invocation only | Separate user config/secret channel; no log/export |
 
-The plan is generated before suite creation; `mtm plan` then displays both planned cases and their materialized implementations, runtime outcomes and evidence links. Review is **exception-driven**, not an approval dialog for every generated test. Failed assertions are never 'fixed' by changing the oracle to match production behavior.
+The automation SHALL preserve an explicit plan-to-test mapping, report weak/missing coverage and distinguish construction errors from implementation defects. A user may accept or reject LLM recommendations but rejected proposals remain auditable. The plan is generated before suite creation; `mtm plan` then displays both planned cases and their materialized implementations, runtime outcomes and evidence links. Review is **exception-driven**, not an approval dialog for every generated test. Failed assertions are never 'fixed' by changing the oracle to match production behavior.
 
 ## Audit trail and explanations
 

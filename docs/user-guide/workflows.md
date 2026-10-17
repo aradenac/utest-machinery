@@ -38,13 +38,13 @@ sequenceDiagram
 | `mtm doctor` | Diagnose Docker, mounts, credentials and image | Diagnostic report |
 | `mtm init` | Establish one bench for workspace | Versioned project config |
 | `mtm scope list/add/remove` | Manage selected code, specs and requirements | Versioned scope, invalidation record |
-| `mtm plan` | View planned scenarios, generated tests, gaps, assumptions and their relationships | Read-only; the plan itself is versioned by generation |
+| `mtm plan` | View the test strategy and planned vs generated, executed and evidenced tests | Read-only; the plan itself is versioned by generation |
 | `mtm generate` | Create/update generated tests and mocks | Reviewable diffs and stable IDs |
-| `mtm verify` | Deterministic run of frozen bench | Immutable campaign directory |
+| `mtm verify` | Rebuild and run the frozen suite on an input snapshot with matching hashes; no LLM | Immutable campaign directory |
 | `mtm interpret [run-id]` | Analyze existing evidence with embedded LLM | New, separately versioned interpretation |
 | `mtm report [run-id]` | Find/open summary and findings | No test changes |
 | `mtm status` | Progress, completed/failed steps and next actions | No changes |
-| `mtm workflow view` | Inspect textual DAG and optional graphical UI | No changes |
+| `mtm workflow view` | Show text DAG/diagram, optionally launch read-only graphical inspection | No changes |
 
 CLI must stream meaningful progress (stage, inputs, counts, failures, retries), support non-interactive CI, and never require a TUI. The UI for workflow inspection is **optional and disabled by default**.
 
@@ -68,9 +68,21 @@ flowchart TD
   T --> V
 ```
 
-### Why separate generate, verify and interpret?\n\n`generate` changes the proposed suite using the LLM; `verify` only compiles and executes the frozen suite, recreating evidence offline and without changing its assertions; `interpret` uses the LLM on a selected run and may be repeated without rerunning tests. `report` opens those results. The plan view must compare **planned → implemented → executed → evidenced** tests and flag missing or weak links; coverage statistics cannot by themselves guarantee SDD correctness.\n\n## Adding, removing and retiring scope
+### Why separate generate, verify and interpret?
+
+`generate` changes the proposed suite using the LLM; `verify` only compiles and executes the frozen suite, recreating evidence offline and without changing its assertions; `interpret` uses the LLM on a selected run and may be repeated without rerunning tests. `report` opens those results. The plan view must compare **planned → implemented → executed → evidenced** tests and flag missing or weak links; coverage statistics cannot by themselves guarantee SDD correctness.
+
+## Adding, removing and retiring scope
 
 Scope changes never delete historical evidence. Adding an input triggers discovery, impact analysis and proposed tests. Removing an input marks related scenarios out-of-scope or obsolete, shows the impact before applying it, and preserves historical IDs. Regeneration must be incremental; never overwrite previously validated oracles silently. A developer can review proposed edits and explicitly accept or reject them.
+
+## Routine and offline replay
+
+- First use: install → init → scope add → generate → plan → verify → interpret → report. Native feasibility is automatic, never a separate mandatory command.
+- Changed selected sources/SDDs: scope stays versioned; run generate for impacted cases, inspect `plan`, then verify. Unrelated files are not scanned.
+- Pure regression: `verify` with unchanged selected hashes; repeat without internet/model.
+- Reinterpret an existing run: `interpret <run-id>` (LLM), then `report <run-id>`; no test execution.
+- Remove requirements/tests: adjust scope or retire via the versioned plan; inspect affected scenario and coverage gaps. Nothing historical is silently deleted.
 
 ## Outputs and audit navigation
 
@@ -85,4 +97,4 @@ Each recommendation should state **why**, **exactly where**, **what change is su
 
 ## Constraints and user responsibilities
 
-Only explicitly selected roots are inspected; the tool SHALL NOT scan unrelated workspace files. Adding/removing scope triggers feasibility checks internally; Ready/Adapted/Blocked diagnostics appear in generate, plan and status rather than a dedicated assess command. The user provides accessible code and SDDs, selects scope, and resolves unresolved behavioral ambiguities. The engine can decline a unit when compilation, mocking or host fidelity cannot be justified. Docker does not establish target equivalence. SDD-derived oracles require provenance and controlled change. Credentials remain per-user outside the repository. Original inputs are mounted read-only.
+Only explicitly selected roots are inspected (including any explicitly selected dependencies or headers); the tool SHALL NOT scan unrelated workspace files. Adding/removing scope triggers feasibility checks internally; Ready/Adapted/Blocked diagnostics appear in generate, plan and status rather than a dedicated assess command. The user provides accessible code and SDDs, selects scope, and resolves unresolved behavioral ambiguities. The engine can decline a unit when compilation, mocking or host fidelity cannot be justified. A frozen suite SHALL NOT silently execute against changed inputs: the user must regenerate for the current snapshot or restore the recorded Git revision and dependencies. An earlier run's evidence remains archived even when inputs evolve. Docker does not establish target equivalence. SDD-derived oracles require provenance and controlled change. Credentials remain per-user outside the repository. Original inputs are mounted read-only.
