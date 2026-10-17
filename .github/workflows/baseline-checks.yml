@@ -29,22 +29,28 @@ jobs:
       - name: CLI unit and contract tests
         run: python3 -m pytest tests -q
 
-  # Fast offline smoke: build the generic image and run the sample workflow
-  # headlessly, proving the PR 1 control path end to end. No credentials, no LLM.
+  # Fast offline smoke: build the generic image and run the workflow THROUGH THE
+  # CLI (the user-facing path, not 'docker run dagu' directly). Proves the CLI
+  # drives the container, the bench state persists on the host, and no host Dagu
+  # is required. No credentials, no LLM.
   image-smoke:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CLI dependencies
+        run: python3 -m pip install --quiet PyYAML jsonschema
       - name: Build the generic image
-        run: docker build -f image/Dockerfile -t utest-machinery/mtm:1.0.0 .
-      - name: Dagu version inside the image
-        run: docker run --rm --entrypoint dagu utest-machinery/mtm:1.0.0 version
-      - name: Run the sample workflow headlessly (host-mounted bench)
+        run: python3 -m mtm.cli install
+      - name: Init a bench and run the workflow through the CLI
         run: |
           mkdir -p /tmp/bench
-          docker run --rm \
-            -v /tmp/bench:/bench \
-            -v "$PWD/workflows:/workflows:ro" \
-            utest-machinery/mtm:1.0.0 \
-            dagu start --run-id ci-smoke /workflows/sample.yaml
+          PYTHONPATH="$PWD" python3 -m mtm.cli init /tmp/bench
+          cd /tmp/bench
+          PYTHONPATH="$PWD" python3 -m mtm.cli workflow run --run-id ci-smoke
+      - name: Verify bench-local state persisted on the host
+        run: test -d /tmp/bench/.mtm/dagu/data/dag-runs

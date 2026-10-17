@@ -12,7 +12,7 @@ import yaml
 
 from conftest import REPO, run_mtm, run_mtm_json
 
-SCHEMAS = REPO / "schemas"
+SCHEMAS = REPO / "mtm" / "schemas"
 
 
 def test_init_creates_bench(bench: Path):
@@ -150,6 +150,45 @@ def test_bench_flag_switches_directory(bench: Path, tmp_path: Path):
     assert record["bench_root"] == str(bench)
 
 
+def test_status_does_not_overwrite_last_operation(bench: Path):
+    """A failed operation must survive repeated 'mtm status' consultations."""
+    # Cause a failing operation that journals.
+    run_mtm_json("scope", "add", "/does/not/exist.c", cwd=bench)
+    journal = bench / ".mtm" / "state" / "last-operation.json"
+    first = json.loads(journal.read_text())
+    assert first["status"] == "FAILED"
+
+    run_mtm_json("status", cwd=bench)
+    second = json.loads(journal.read_text())
+    run_mtm_json("status", cwd=bench)
+    third = json.loads(journal.read_text())
+
+    assert second["code"] == first["code"] == "INPUT_MISSING"
+    assert third["code"] == "INPUT_MISSING"
+    assert third["message"]
+
+
+def test_init_force_preserves_scopes(bench: Path, tmp_path: Path):
+    target = tmp_path / "mod.c"
+    target.write_text("int f(void){return 0;}\n")
+    added, _ = run_mtm_json("scope", "add", str(target), cwd=bench)
+    scope_id = added["scope"]["id"]
+
+    record, code = run_mtm_json("init", str(bench), "--force", cwd=bench)
+    assert code == 0, record
+
+    listed, _ = run_mtm_json("scope", "list", cwd=bench)
+    assert [s["id"] for s in listed["scopes"]] == [scope_id]
+
+
+def test_scope_add_rejects_schema_incompatible_id(bench: Path, tmp_path: Path):
+    target = tmp_path / "mod.c"
+    target.write_text("int f(void){return 0;}\n")
+    record, code = run_mtm_json("scope", "add", str(target), "--id", "not-a-scope-id", cwd=bench)
+    assert code == 40
+    assert record["code"] == "SCOPE_INVALID"
+
+
 def test_corrupt_config_fails_schema_validation(tmp_path: Path):
     bad = tmp_path / "bad"
     bad.mkdir()
@@ -204,6 +243,6 @@ def test_doctor_image_check_uses_full_reference(monkeypatch):
     monkeypatch.setattr(commands, "docker_available",
                         lambda: __import__("mtm.docker", fromlist=["DockerInfo"]).DockerInfo(True, "test"))
     monkeypatch.setattr(commands, "image_digest", lambda ref: "sha256:test")
-    ctx = Context(context=str(REPO), image_tag="1.0.0", dagu_home=None)
+    ctx = Context(context=str(REPO), image_tag="1.0.0")
     _run_checks(None, ctx)
     assert seen == ["utest-machinery/mtm:1.0.0"]

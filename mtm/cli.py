@@ -28,6 +28,7 @@ from .commands import (
     cmd_scope_remove,
     cmd_status,
     cmd_workflow_run,
+    cmd_workflow_status,
     cmd_workflow_view,
 )
 from .errors import EXIT_INVALID_INPUT, EXIT_TOOL_FAILURE, MtmError
@@ -47,7 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context", default=str(DEFAULT_CONTEXT),
                         help="path to the uTest Machinery source tree (image, workflows)")
     parser.add_argument("--image-tag", default="1.0.0", help="generic image tag")
-    parser.add_argument("--dagu-home", help="Dagu state directory (host-mounted)")
+    parser.add_argument("--backend", default="docker", choices=["docker", "host"],
+                        help="workflow execution backend (default: docker; 'host' needs host Dagu)")
+    parser.add_argument("--host-dagu", help="path to a host dagu binary (only with --backend host)")
 
     sub = parser.add_subparsers(dest="_command", required=True)
 
@@ -78,8 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     wf_sub = wf.add_subparsers(dest="_workflow_command", required=True)
     view = wf_sub.add_parser("view", help="show the text DAG")
     view.add_argument("--dry", action="store_true", help="simulate the DAG without executing")
-    run = wf_sub.add_parser("run", help="run the sample workflow headlessly")
+    run = wf_sub.add_parser("run", help="run the sample workflow headlessly (in the image by default)")
     run.add_argument("--run-id", help="deterministic run id")
+    wstatus = wf_sub.add_parser("status", help="inspect a run; a dead owner reconciles to INTERRUPTED")
+    wstatus.add_argument("--run-id", required=True, help="the run id to inspect")
 
     for name, help_text in (
         ("plan", "view the verification plan (later milestone)"),
@@ -103,6 +108,7 @@ DISPATCH: dict[str, Callable[[Any, Context], dict[str, Any]]] = {
     "status": cmd_status,
     "workflow-view": cmd_workflow_view,
     "workflow-run": cmd_workflow_run,
+    "workflow-status": cmd_workflow_status,
 }
 
 
@@ -133,7 +139,9 @@ def _print_human(record: dict[str, Any], command: str) -> None:
         print(f"  removed {scope.get('id')} ({scope.get('path')}) — history preserved")
     if record.get("text_dag"):
         print(record["text_dag"])
-    for key in ("bench_root", "image", "dag", "run_id", "pid", "raw_status"):
+    if record.get("cause"):
+        print(f"  cause: {record['cause']}")
+    for key in ("bench_root", "image", "dag", "run_id", "backend", "pid", "raw_status", "code"):
         if record.get(key) not in (None, "", 0):
             print(f"  {key}: {record[key]}")
 
@@ -154,7 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     ctx = Context(
         context=args.context,
         image_tag=args.image_tag,
-        dagu_home=Path(args.dagu_home).expanduser().resolve() if args.dagu_home else None,
+        backend=args.backend,
+        host_dagu=args.host_dagu,
         json_output=args.json,
     )
 
@@ -171,13 +180,19 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
     exit_code = int(record.get("exit_code", 0))
-    _persist(record)
+    if command not in READ_ONLY_COMMANDS:
+        _persist(record)
     if args.json:
         json.dump(record, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
     else:
         _print_human(record, command)
     return exit_code
+
+
+#: Read-only consultations: they must never overwrite the last-operation journal,
+#: otherwise simply looking at status would erase the failure being diagnosed.
+READ_ONLY_COMMANDS = {"status", "workflow-view", "workflow-status"}
 
 
 def _fail(args: argparse.Namespace, command: str, err: MtmError) -> int:

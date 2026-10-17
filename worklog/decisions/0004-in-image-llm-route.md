@@ -20,13 +20,13 @@ Observed by reading `~/.claude-code-router/config.sqlite` read-only, values mask
 | --- | --- |
 | Provider id / name | `scaleway` |
 | Provider type | `openai_chat_completions` |
-| Upstream base URL | `https://llm.tools.lacroix-dev.com` |
-| Upstream chat endpoint | `https://llm.tools.lacroix-dev.com/chat/completions` |
-| Alternate detected endpoint | `https://llm.tools.lacroix-dev.com/responses` (`openai_responses`) |
+| Upstream base URL | taken from `SCW_BASE_URL` in the environment (value never recorded) |
+| Upstream chat endpoint | `<SCW_BASE_URL>` + `/chat/completions` |
+| Alternate detected endpoint | `<SCW_BASE_URL>` + `/responses` (`openai_responses`) |
 | Upstream model id | `deepseek-v4.1-flash` |
 | Provider credential | length 216, **equal to `SCW_BEARER_TOKEN` from the environment** (see below) |
-| CCR gateway | enabled, `127.0.0.1:3456` |
-| Claude profile id | `default-claude-code` ("Claude DeepSeek Flash"), scope `ccr`, surface `cli` |
+| CCR gateway | enabled, bound to a loopback port inside the container |
+| Claude profile id | `default-claude-code` (scope `ccr`, surface `cli`) |
 | Profile model slots | `model`/`opusModel`/`sonnetModel`/`haikuModel`/`fableModel`/`smallFastModel` all = `scaleway/deepseek-v4.1-flash` |
 | Profile env | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=240000`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS=256000` |
 
@@ -44,7 +44,7 @@ model mapping, and the container must reproduce it too:
 | Element | Value (nonsecret) |
 | --- | --- |
 | Profile dir | `~/.claude-code-router/profiles/default-claude-code/claude/settings.json` |
-| API base (in-container router) | `ANTHROPIC_BASE_URL` = `ANTHROPIC_API_BASE_URL` = `CLAUDE_AGENT_API_BASE_URL` = `http://127.0.0.1:3456` |
+| API base (in-container router) | `ANTHROPIC_BASE_URL` = `ANTHROPIC_API_BASE_URL` = `CLAUDE_AGENT_API_BASE_URL` = the container's own loopback router (`http://<loopback>:<port>`)| 
 | Model mapping | `ANTHROPIC_MODEL` + `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL` all = `scaleway/deepseek-v4.1-flash`; also `CCR_CLAUDE_CODE_MODEL` / `CODEXL_CLAUDE_CODE_MODEL` |
 | **Context sizing** | `CLAUDE_CODE_MAX_CONTEXT_TOKENS=256000`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=240000`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384` |
 | Window enforcement | `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` |
@@ -64,7 +64,7 @@ what makes "same configuration as here" true rather than approximate.
 The image ships a **sanitized CCR route template** (nonsecret) with these properties, and the
 token is injected only at runtime:
 
-- Provider `scaleway`, type `openai_chat_completions`, base `https://llm.tools.lacroix-dev.com`.
+- Provider `scaleway`, type `openai_chat_completions`, base = `SCW_BASE_URL` (runtime).
 - Model list: `deepseek-v4.1-flash` (the `glm-5.3` host entry is not part of the product route).
 - All Claude profile model slots → `scaleway/deepseek-v4.1-flash`, with the four `env` vars
   above so in-container model discovery/limits match the host.
@@ -73,14 +73,14 @@ token is injected only at runtime:
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW=240000`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384`, discovery
   and window-enforcement flags), with the credential supplied through an `apiKeyHelper`
   equivalent reading the runtime secret.
-- Gateway bound to `127.0.0.1:3456` **inside the container**; the container runs its own CCR,
-  so the WSL host's `localhost:3456` is irrelevant (`docs/development/setup.md`).
+- Gateway bound to a loopback port **inside the container**; the container runs its own CCR,
+  so the host's router port is irrelevant (`docs/development/setup.md`).
 - The **provider api_key is a runtime secret**, injected from
   `~/.config/utest-machinery/credentials.env` via a narrowly scoped `--env-file` or a runtime
   secret mount, expanded by the container entrypoint. Never in `ARG`/`ENV`/`COPY`/layers,
   never in Git, never in logs.
 - Upstream reachability from inside Docker was **not** tested yet: the container still needs
-  outbound HTTPS to `llm.tools.lacroix-dev.com`, and this is a PR 1/PR 2 verification item
+  outbound HTTPS to the host named by `SCW_BASE_URL`, and this is a PR 1/PR 2 verification item
   (the live call is PR 2, per `docs/qualification/ci-and-manual-tests.md`).
 
 ## Alternatives considered

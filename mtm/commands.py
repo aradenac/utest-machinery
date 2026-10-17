@@ -8,7 +8,7 @@ stdout and the process exit code, and persists it as ``last-operation.json``.
 from __future__ import annotations
 
 import json
-import os
+import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -25,10 +25,18 @@ from .docker import (
     image_exists,
     image_ref,
 )
-from .engine import DaguAdapter, INTERRUPTED, RUNNING
+from .engine import (
+    FAILED,
+    INTERRUPTED,
+    SUCCEEDED,
+    DaguBackend,
+    RunStatus,
+    make_adapter,
+)
 from .errors import (
+    Category,
     Code,
-    EXIT_INVALID_INPUT,
+    EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_PARTIAL,
     EXIT_TEST_FINDINGS,
@@ -142,6 +150,9 @@ def cmd_init(args: Any, ctx: "Context") -> dict[str, Any]:
         bench_id=(existing.bench_id if existing else new_bench_id(root)),
         source_roots=list(args.source or (existing.source_roots if existing else [])),
         spec_roots=list(args.spec or (existing.spec_roots if existing else [])),
+        # A --force reinit must not silently drop the existing selection: the
+        # scope IDs and history are preserved (only newly created dirs differ).
+        scopes=list(existing.scopes) if existing else [],
     )
     write_project(root, config)
 
@@ -188,8 +199,27 @@ def cmd_scope_add(args: Any, ctx: "Context") -> dict[str, Any]:
     root = require_bench_root()
     config = _load_config(root)
 
+    scope_id = args.id or f"scope-{uuid.uuid4().hex[:12]}"
+    # Reject an id the ProjectConfig schema would refuse, before writing it.
+    if not re.fullmatch(r"scope-[0-9a-f]+", scope_id):
+        raise MtmError(
+            code=Code.SCOPE_INVALID,
+            message=f"Scope id {scope_id!r} is not valid; expected 'scope-' + hex.",
+            action="Omit --id to let mtm generate one, or pass a 'scope-<hex>' id.",
+            stage="scope-add",
+            input_reference=scope_id,
+        )
+    if any(s.get("id") == scope_id for s in config.scopes):
+        raise MtmError(
+            code=Code.SCOPE_INVALID,
+            message=f"Scope id already in use: {scope_id}",
+            action="Choose a different id, or omit --id.",
+            stage="scope-add",
+            input_reference=scope_id,
+        )
+
     entry: dict[str, Any] = {
-        "id": f"scope-{uuid.uuid4().hex[:12]}" if not args.id else args.id,
+        "id": scope_id,
         "path": args.path,
         "kind": args.kind,
         "added_at": _now(),
@@ -417,19 +447,50 @@ def cmd_install(args: Any, ctx: "Context") -> dict[str, Any]:
 # --- workflow ---------------------------------------------------------------
 
 
+def _adapter(root: Path, ctx: "Context") -> "DaguBackend":
+    """Build the workflow adapter for the requested backend (docker default).
+
+    The docker backend runs Dagu inside the pinned image and needs no host Dagu;
+    the bench is host-mounted so results persist, and DAGU_HOME is bench-local.
+    """
+    if ctx.backend == "docker" and not image_exists(image_ref(ctx.image_tag)):
+        raise MtmError(
+            code=Code.IMAGE_MISSING,
+            message=f"Generic image {image_ref(ctx.image_tag)} is not built.",
+            action="Run 'mtm install' first.",
+            stage="workflow-run",
+            tool_name="docker",
+        )
+    return make_adapter(
+        ctx.backend,
+        image_ref=image_ref(ctx.image_tag),
+        bench=root,
+        workflow_dir=None,
+        host_dagu=ctx.host_dagu,
+    )
+
+
 def cmd_workflow_view(args: Any, ctx: "Context") -> dict[str, Any]:
     op = _op_id()
     root = require_bench_root()
     dag = _sample_dag_path(root, ctx)
-    adapter = DaguAdapter(dagu_home=ctx.dagu_home)
+    adapter = _adapter(root, ctx)
     if args.dry:
+        if not adapter.available():
+            raise MtmError(
+                code=Code.DOCKER_UNAVAILABLE if ctx.backend == "docker" else Code.TOOL_FAILED,
+                message="The workflow engine is not available for the 'dry' run.",
+                action="Run 'mtm install' (docker backend) or install the pinned Dagu (host backend).",
+                stage="workflow-dry",
+            )
         status = adapter.dry(dag)
         return _record(op, "workflow-dry", status.status,
-                       dag=str(dag), raw_status=status.raw_status, error=status.error,
-                       engine=adapter.name)
+                       dag=str(dag), raw_status=status.raw_status,
+                       backend=ctx.backend, engine=adapter.name,
+                       cause=status.cause, exit_code=_exit_for_engine_status(status.status))
     steps = _read_dag_steps(dag)
     return _record(op, "workflow-view", "SUCCEEDED",
-                   dag=str(dag), steps=steps, engine=adapter.name,
+                   dag=str(dag), steps=steps, backend=ctx.backend, engine=adapter.name,
                    text_dag=_render_text_dag(steps))
 
 
@@ -437,14 +498,13 @@ def cmd_workflow_run(args: Any, ctx: "Context") -> dict[str, Any]:
     op = _op_id()
     root = require_bench_root()
     dag = _sample_dag_path(root, ctx)
-    adapter = DaguAdapter(dagu_home=ctx.dagu_home)
+    adapter = _adapter(root, ctx)
     if not adapter.available():
         raise MtmError(
-            code=Code.TOOL_FAILED,
-            message="Dagu executable not found.",
-            action="Run inside the generic image, or install the pinned Dagu (see image/SBOM.md).",
+            code=Code.DOCKER_UNAVAILABLE if ctx.backend == "docker" else Code.TOOL_FAILED,
+            message="The workflow engine backend is not available.",
+            action="Run 'mtm install' (docker backend) or install the pinned Dagu (host backend).",
             stage="workflow-run",
-            tool_name="dagu",
         )
     adapter.validate(dag)
     run_id = args.run_id or f"run-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:6]}"
@@ -452,33 +512,91 @@ def cmd_workflow_run(args: Any, ctx: "Context") -> dict[str, Any]:
     exit_code = _exit_for_engine_status(status.status)
     record = _record(
         op, "workflow-run", status.status,
-        dag=str(dag), run_id=run_id, engine=adapter.name,
+        dag=str(dag), run_id=run_id, backend=ctx.backend, engine=adapter.name,
         raw_status=status.raw_status, pid=status.pid,
-        reconciled=status.reconciled, error=status.error,
+        reconciled=status.reconciled,
+        dagu_home=str(root / ".mtm" / "dagu"),
         exit_code=exit_code,
     )
-    if status.status == INTERRUPTED:
-        record["category"] = "WORKFLOW"
-        record["code"] = Code.WORKFLOW_INTERRUPTED
-        record["action"] = "Rerun with 'mtm workflow run'; the previous owner process is gone."
+    _apply_status_error(record, status, run_id)
     return record
+
+
+def cmd_workflow_status(args: Any, ctx: "Context") -> dict[str, Any]:
+    """Inspect a run's status, reconciling a dead owner to INTERRUPTED."""
+    op = _op_id()
+    root = require_bench_root()
+    dag = _sample_dag_path(root, ctx)
+    adapter = _adapter(root, ctx)
+    status = adapter.run_status(dag, args.run_id)
+    record = _record(
+        op, "workflow-status", status.status,
+        dag=str(dag), run_id=args.run_id, backend=ctx.backend, engine=adapter.name,
+        raw_status=status.raw_status, pid=status.pid, reconciled=status.reconciled,
+        exit_code=_exit_for_engine_status(status.status),
+    )
+    _apply_status_error(record, status, args.run_id)
+    return record
+
+
+def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str) -> None:
+    """Attach the full error contract for non-success engine outcomes.
+
+    A failed DAG run is a *workflow finding* (the tool ran; a step failed), so it
+    maps to TEST_FINDING/exit 10 and preserves the raw cause. An interruption is a
+    workflow failure mapped to WORKFLOW_INTERRUPTED/exit 130.
+    """
+    if status.status == SUCCEEDED:
+        return
+    if status.status == INTERRUPTED:
+        record.update(
+            category=Category.WORKFLOW,
+            code=Code.WORKFLOW_INTERRUPTED,
+            message="The workflow run was interrupted; the engine process is gone.",
+            cause=status.cause,
+            action="Re-run with 'mtm workflow run'; the previous owner no longer exists.",
+            retryable=True,
+        )
+        return
+    if status.status == FAILED:
+        record.update(
+            category=Category.TEST_FINDING,
+            code=Code.TEST_ASSERTION,
+            message="The workflow ran and at least one step failed.",
+            cause=status.cause,
+            action="Inspect the failing step and its logs; fix the failure and re-run.",
+            retryable=False,
+        )
+        return
+    # BLOCKED / SKIPPED / PENDING / UNKNOWN
+    record.update(
+        category=Category.WORKFLOW,
+        code=Code.OPERATION_FAILED,
+        message=f"The workflow ended in a non-success state: {status.status}.",
+        cause=status.cause,
+        action="Inspect the workflow definition and logs, then re-run.",
+        retryable=False,
+    )
 
 
 def _exit_for_engine_status(status: str) -> int:
     return {
         "SUCCEEDED": EXIT_OK,
-        "FAILED": EXIT_TOOL_FAILURE,
-        "INTERRUPTED": 130,
+        "FAILED": EXIT_TEST_FINDINGS,  # the run happened; a step failed -> finding
+        "INTERRUPTED": EXIT_INTERRUPTED,
         "BLOCKED": EXIT_PARTIAL,
     }.get(status, EXIT_TOOL_FAILURE)
 
 
 def _sample_dag_path(root: Path, ctx: "Context") -> Path:
-    """Use a bench-local DAG if the user placed one, else the bundled sample."""
+    """Use a bench-local DAG if the user placed one, else the bundled sample.
+
+    The bundled sample ships as package data so an installed CLI finds it too.
+    """
     local = root / "workflows" / "sample.yaml"
     if local.is_file():
         return local
-    return Path(ctx.context).resolve() / "workflows" / "sample.yaml"
+    return Path(__file__).resolve().parent / "workflows" / "sample.yaml"
 
 
 def _read_dag_steps(dag: Path) -> list[dict[str, Any]]:
@@ -521,6 +639,7 @@ class Context:
 
     context: str
     image_tag: str
-    dagu_home: Path | None
+    backend: str = "docker"
+    host_dagu: str | None = None
     json_output: bool = False
     extra: dict[str, Any] = field(default_factory=dict)

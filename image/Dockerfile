@@ -41,14 +41,24 @@ RUN set -eux; \
     rm -rf /tmp/dagu.tgz /opt/dagu
 
 # Bench and runtime layout inside the container. All real state is host-mounted.
-RUN mkdir -p /bench /usr/share/utest-machinery
+RUN mkdir -p /bench /usr/share/utest-machinery /opt/mtm
 COPY image/SBOM.md /usr/share/utest-machinery/SBOM.md
-COPY mtm /usr/share/utest-machinery/mtm
+COPY pyproject.toml /opt/mtm/pyproject.toml
+COPY mtm /opt/mtm/mtm
 COPY image/entrypoint.sh /usr/local/bin/mtm-entrypoint
+
+# A usable mtm launcher for in-container use. Source-tree install (no pip build
+# step / no network needed at build time).
+RUN printf '#!/bin/sh\nexport PYTHONPATH=/opt/mtm\nexec python3 -m mtm.cli "$@"\n' \
+      > /usr/local/bin/mtm && chmod 0755 /usr/local/bin/mtm
 
 # Headless only: no server, no UI, no graphical dependency.
 ENV DAGU_HOME=/bench/.mtm/dagu \
-    MTM_BENCH=/bench
+    MTM_BENCH=/bench \
+    PYTHONPATH=/opt/mtm
+
+# Run inside the bench by default so the CLI discovers the host-mounted bench.
+WORKDIR /bench
 
 ENTRYPOINT ["/usr/local/bin/mtm-entrypoint"]
 CMD ["dagu", "--help"]

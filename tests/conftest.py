@@ -12,6 +12,9 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 
 
+SCHEMAS = REPO / "mtm" / "schemas"
+
+
 def run_mtm(*args: str, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     """Invoke the mtm CLI as a subprocess and capture its result."""
     base_env = {
@@ -28,6 +31,14 @@ def run_mtm(*args: str, cwd: Path | None = None, env: dict | None = None) -> sub
         text=True,
         env=base_env,
     )
+
+
+def dagu_dir() -> str | None:
+    """Directory holding a host ``dagu`` binary, or None if none is available."""
+    import shutil
+
+    found = shutil.which("dagu")
+    return str(Path(found).parent) if found else None
 
 
 def run_mtm_json(*args: str, cwd: Path | None = None, env: dict | None = None) -> tuple[dict, int]:

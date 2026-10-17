@@ -44,9 +44,9 @@ newest; the in-image Python is pinned independently. See
 
 ## D6 — in-image CCR configuration — RESOLVED (option B, 2026-10-17)
 
-The route was derived read-only from `~/.claude-code-router/config.sqlite` (values masked):
-provider `scaleway` / `openai_chat_completions`, base `https://llm.tools.lacroix-dev.com`,
-model `deepseek-v4.1-flash`, gateway `127.0.0.1:3456`, profile `default-claude-code`. The
+The route was derived read-only from the CCR host config (values masked): provider
+`scaleway` / `openai_chat_completions`, base from `SCW_BASE_URL` (value never recorded),
+model `deepseek-v4.1-flash`, a loopback gateway port, profile `default-claude-code`. The
 provider api_key is stored **inline and equals `SCW_BEARER_TOKEN`** — hence the host config is
 never copied; only the nonsecret route shape is used, with the token injected at runtime. See
 [`decisions/0004-in-image-llm-route.md`](decisions/0004-in-image-llm-route.md).

@@ -23,12 +23,11 @@ if [ ! -f "${DAGU_HOME}/config.yaml" ]; then
   printf 'auth:\n  mode: none\n' > "${DAGU_HOME}/config.yaml"
 fi
 
-# Ownership: when the image runs as root against a host-mounted bench (the
-# default on Linux/WSL), files it creates would be root-owned on the host. If a
-# numeric owner was passed, take it so the bench stays writable by the user.
-if [ "$(id -u)" = "0" ] && [ -n "${MTM_UID:-}" ]; then
-  chown -R "${MTM_UID}:${MTM_GID:-${MTM_UID}}" "${BENCH}" 2>/dev/null || true
-fi
+# Ownership: the caller is responsible for identity, not this script. The CLI
+# runs the container as the invoking user (docker run --user UID:GID) so files
+# created in the host-mounted bench stay user-owned. This entrypoint never runs
+# 'chown -R' on the bench: the bench may contain the selected source tree, and
+# rewriting its ownership would modify unrelated host files.
 
 if [ "$#" -eq 0 ]; then
   set -- dagu --help

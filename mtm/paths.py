@@ -120,7 +120,7 @@ class ProjectConfig:
         return data
 
 
-_SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas"
+_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
 
 def _validate_against_schema(data: dict[str, Any], project_file: Path) -> None:
@@ -128,10 +128,17 @@ def _validate_against_schema(data: dict[str, Any], project_file: Path) -> None:
 
     Unknown fields are allowed (the schema sets additionalProperties true), so a
     newer config is not rejected for additive changes; structural errors are.
+    The schema ships as package data, so a wheel install validates too; if it is
+    somehow missing, this fails loudly rather than silently skipping validation.
     """
     schema_file = _SCHEMA_DIR / "project.schema.json"
     if not schema_file.is_file():
-        return  # schema not shipped (installed without source tree): skip
+        raise MtmError(
+            code=Code.EVIDENCE_INVALID,
+            message="Internal error: the ProjectConfig schema is not installed.",
+            action="Reinstall uTest Machinery; the package data is incomplete.",
+            stage="load-config",
+        )
     try:
         import json
 
