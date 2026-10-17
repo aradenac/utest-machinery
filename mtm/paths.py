@@ -94,6 +94,7 @@ class ProjectConfig:
                 stage="load-config",
                 input_reference=str(project_file),
             )
+        _validate_against_schema(data, project_file)
         return cls(
             bench_id=str(data.get("bench_id", "")),
             schema_version=version,
@@ -117,6 +118,35 @@ class ProjectConfig:
             scopes=self.scopes,
         )
         return data
+
+
+_SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas"
+
+
+def _validate_against_schema(data: dict[str, Any], project_file: Path) -> None:
+    """Validate a parsed config against the versioned ProjectConfig schema.
+
+    Unknown fields are allowed (the schema sets additionalProperties true), so a
+    newer config is not rejected for additive changes; structural errors are.
+    """
+    schema_file = _SCHEMA_DIR / "project.schema.json"
+    if not schema_file.is_file():
+        return  # schema not shipped (installed without source tree): skip
+    try:
+        import json
+
+        import jsonschema
+
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        jsonschema.validate(data, schema)
+    except Exception as exc:  # jsonschema.ValidationError or a parse error
+        raise MtmError(
+            code=Code.CONFIG_INVALID,
+            message=f"{project_file.name} does not satisfy the ProjectConfig schema: {exc}",
+            action="Correct the configuration file, or re-run 'mtm init'.",
+            stage="load-config",
+            input_reference=str(project_file),
+        ) from exc
 
 
 def write_project(root: Path, config: ProjectConfig) -> Path:

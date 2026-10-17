@@ -150,6 +150,26 @@ def test_bench_flag_switches_directory(bench: Path, tmp_path: Path):
     assert record["bench_root"] == str(bench)
 
 
+def test_corrupt_config_fails_schema_validation(tmp_path: Path):
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "project.yaml").write_text("schema_version: 1\nbench_id: x\nscopes: [{id: 1}]\n")
+    record, code = run_mtm_json("status", cwd=bad)
+    assert code == 40
+    assert record["code"] == "CONFIG_INVALID"
+
+
+def test_unknown_config_field_is_not_rejected(tmp_path: Path):
+    bench_dir = tmp_path / "b2"
+    bench_dir.mkdir()
+    (bench_dir / "project.yaml").write_text(
+        "schema_version: 1\nbench_id: bench-x\nfuture_field: hello\n"
+    )
+    record, code = run_mtm_json("status", cwd=bench_dir)
+    assert code == 0
+    assert record["status"] == "SUCCEEDED"
+
+
 def test_invalid_bench_flag(bench: Path, tmp_path: Path):
     record, code = run_mtm_json("--bench", str(tmp_path / "nope"), "status")
     assert code == 40
@@ -160,3 +180,30 @@ def test_human_output_has_next_action_on_error(bench: Path):
     proc = run_mtm("scope", "remove", "scope-0000", cwd=bench)
     assert proc.returncode == 40
     assert "next:" in proc.stderr
+
+
+def test_image_reference_helpers_use_full_ref():
+    """Regression: image_exists/image_digest take a reference, not a bare tag."""
+    from mtm.docker import image_ref
+
+    assert image_ref("1.0.0") == "utest-machinery/mtm:1.0.0"
+
+
+def test_doctor_image_check_uses_full_reference(monkeypatch):
+    """Regression: doctor must pass the full image reference to image_exists."""
+    import mtm.commands as commands
+    from mtm.commands import Context, _run_checks
+
+    seen: list[str] = []
+
+    def fake_exists(ref):
+        seen.append(ref)
+        return True
+
+    monkeypatch.setattr(commands, "image_exists", fake_exists)
+    monkeypatch.setattr(commands, "docker_available",
+                        lambda: __import__("mtm.docker", fromlist=["DockerInfo"]).DockerInfo(True, "test"))
+    monkeypatch.setattr(commands, "image_digest", lambda ref: "sha256:test")
+    ctx = Context(context=str(REPO), image_tag="1.0.0", dagu_home=None)
+    _run_checks(None, ctx)
+    assert seen == ["utest-machinery/mtm:1.0.0"]

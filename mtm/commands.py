@@ -303,12 +303,13 @@ def _run_checks(root: Path | None, ctx: "Context") -> list[Check]:
 
     # Image
     if info.available:
-        if image_exists(ctx.image_tag):
+        ref = image_ref(ctx.image_tag)
+        if image_exists(ref):
             checks.append(Check("image", True, "info",
-                                f"Image {image_ref(ctx.image_tag)} present ({image_digest(ctx.image_tag)})"))
+                                f"Image {ref} present ({image_digest(ref)})"))
         else:
             checks.append(Check("image", False, "error",
-                                f"Image {image_ref(ctx.image_tag)} not built",
+                                f"Image {ref} not built",
                                 "Run 'mtm install'."))
 
     # Credentials (required, per user decision D5)
@@ -403,7 +404,7 @@ def cmd_install(args: Any, ctx: "Context") -> dict[str, Any]:
         )
     context = Path(ctx.context).resolve()
     ref = build_image(context, ctx.image_tag)
-    digest = image_digest(ctx.image_tag)
+    digest = image_digest(ref)
     lock = context / "image" / "toolchain.lock"
     return _record(
         op, "install", "SUCCEEDED",
