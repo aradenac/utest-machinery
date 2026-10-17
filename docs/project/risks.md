@@ -105,7 +105,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Vérification d'efficacité à venir :** sur les prochaines PR concernées, rechercher les invariants explicités dans Beads, les essais de transitions et de résultats mixtes, et la diminution des erreurs de conservation d'état ou de verdict malgré une CI verte. Les exemples d'IMP-11 sont des cas de référence, non une liste universelle obligatoire. **L'application des consignes ne corrige pas la PR #5 et ne démontre pas encore l'efficacité de la mesure.**
 
-**Statut :** **En attente de confirmation** — mesure appliquée aux consignes et au plan via la PR documentaire d'AP-03 ; **efficacité non encore démontrée**, à examiner à la prochaine revue indépendante.
+**Statut :** **En attente de confirmation** — mesure appliquée aux consignes et au plan via la [PR #10](https://github.com/aradenac/utest-machinery/pull/10) (17 octobre 2026) ; **efficacité non encore démontrée**, à examiner lors des prochaines revues indépendantes.
 
 ### AP-04 — Mémoire de travail et instructions à jour
 
