@@ -9,10 +9,14 @@ flowchart LR
   P --> C["Fast offline PR CI"]
   C --> R["Human PR review"]
   H["Optional heavy CI / live-model"] --> R
+  R -->|Changes requested| F["Developer: fixes and local tests"]
+  F --> VR["Subagent: PR_RECHECK"]
+  VR --> U["Update same open PR"]
+  U --> C
   R -->|Accept and merge| N["Next feature only after new approval"]
 ```
 
-The pre-PR `/verify-feature` subagent checks the current milestone's contracts, relevant counterexamples and actual acceptance evidence after local testing. Its report returns directly to the developer, who resolves material findings and records proof in the existing Beads item. This is a **local developer preflight**, not a second CI job, an external approval or a substitute for the GitHub review; its effectiveness remains to be measured.
+The `/verify-feature` subagent supports **PRE_PR** (current milestone's contracts, counterexamples and actual evidence before opening the PR) and **PR_RECHECK** (read the open PR's review comments, verify subsequent fixes against their underlying contracts and relevant regressions before updating the **same PR**). Its evidence-led report returns directly to the developer, who records dispositions and tests in the existing Beads item. This is a **local developer verification**, not a second CI job, an external approval or a substitute for GitHub review; its effectiveness remains to be measured.
 
 ## CI policy
 
