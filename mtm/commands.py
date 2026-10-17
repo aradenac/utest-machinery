@@ -734,9 +734,11 @@ def cmd_generate(args: Any, ctx: "Context") -> dict[str, Any]:
             code=Code.HOST_UNSUPPORTED,
         )
     elif result.status == "INCOMPLETE":
+        # Verification is incomplete, not failing: exit 20 (INPUT_LIMITATION),
+        # consistent with the exit-20 semantics in workflow-failures.md.
         record.update(
-            category=Category.TEST_FINDING,
-            code=Code.TEST_ASSERTION,
+            category=Category.INPUT_LIMITATION,
+            code=Code.SDD_GAP,
             message="No planned scenario could be materialised into an executable test.",
             action="Inspect the recorded limitations in suite.json; the plan is preserved.",
         )
