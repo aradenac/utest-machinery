@@ -1,8 +1,10 @@
 # Decision record 0008 — docker run liveness and read-only bench mount
 
-- **Status:** accepted (2026-10-17, PR #5 review round 3)
+- **Status:** accepted (2026-10-17, PR #5 review rounds 3–4)
 - **Date:** 2026-10-17
-- **Supersedes:** none. Corrects the round-2 liveness and mount behaviour.
+- **Supersedes:** none. Corrects the round-2 liveness and mount behaviour; the
+  round-4 amendment below tightens the liveness label from run-scoped to
+  bench-scoped (no reversal of the decision).
 
 ## Context
 
@@ -21,9 +23,14 @@ Two round-2 defects, both found by review:
 determinable" and is **not** reconciled. Reconciliation to INTERRUPTED happens only on a
 positive `False`:
 
-- **docker backend:** the owner container is labelled `mtm.run-id=<run_id>` at `docker run`;
-  a later status query runs `docker ps --filter label=mtm.run-id=<id>`. Found ⇒ alive (RUNNING);
-  absent ⇒ dead ⇒ INTERRUPTED; `docker ps` fails ⇒ unknown ⇒ RUNNING.
+- **docker backend:** the owner container is labelled at `docker run`; a later status
+  query runs `docker ps --filter label=<value>`. Found ⇒ alive (RUNNING); absent ⇒
+  dead ⇒ INTERRUPTED; `docker ps` fails ⇒ unknown ⇒ RUNNING. **Round-4 amendment:**
+  the label is `mtm.owner=<bench-id>__<run-id>` where `bench_identity()` is
+  `bench-<sha256(resolved bench path)[:16]>`. The label was previously the bare
+  `mtm.run-id=<run-id>`, which is only run-scoped: two benches reusing the same
+  explicit run id could collide, letting a live run in one bench make an interrupted
+  run in another look RUNNING. The lookup now filters on the full bench-scoped value.
 - **host backend:** the OS PID from the run state, as before.
 
 Every `RunStatus` now carries `owner_alive` and `liveness_evidence` (a human-readable
@@ -50,7 +57,9 @@ The `.mtm` directory is created before the mount so Docker does not create it as
 
 ## Consequences
 
-- The `mtm.run-id` label is a stable, documented liveness handle.
+- The `mtm.owner` label is a stable, documented, **bench-scoped** liveness handle;
+  `bench_identity()` is derived from the resolved bench path so two benches never
+  share it (two-bench collision test).
 - The container can no longer write outside `.mtm`; a workflow writing an input fails inside
   the container (covered by an integration test and the CI smoke).
 - Residual: `docker ps` liveness assumes the same Docker context as the run; if the context
@@ -58,5 +67,6 @@ The `.mtm` directory is created before the mount so Docker does not create it as
 
 ## References
 
-- `mtm/engine.py` (`DockerRunner.owner_alive`, `OWNER_LABEL`, `_pid_alive`, `_finalize`),
-  `worklog/decisions/0006-workflow-backend.md`, `docs/architecture/architecture.md` (SYS-004).
+- `mtm/engine.py` (`DockerRunner.owner_alive`, `owner_label`, `bench_identity`, `OWNER_LABEL`,
+  `_pid_alive`, `_finalize`), `worklog/decisions/0006-workflow-backend.md`,
+  `docs/architecture/architecture.md` (SYS-004).

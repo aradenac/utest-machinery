@@ -1,6 +1,6 @@
 # Decision record 0007 — workflow outcome taxonomy (typed step evidence)
 
-- **Status:** accepted (2026-10-17, PR #5 review round 3)
+- **Status:** accepted (2026-10-17, PR #5 review rounds 3–4)
 - **Date:** 2026-10-17
 - **Supersedes:** none. Refines [`0006`](0006-workflow-backend.md) (backend) and the error/exit
   contract in `docs/architecture/workflow-failures.md`.
@@ -42,6 +42,20 @@ maps only a small, explicit allow-list:
 Untyped or unrecognised ⇒ **tool failure** (exit 30). The default is the *safe* one: never
 invent a test finding from a generic shell exit status.
 
+**Aggregation across steps (round-4 amendment).** A run has many steps, so the run-level
+outcome must aggregate, not take the first typed failure. `RunStatus.dominant_outcome`
+collects an outcome from **every** failed step — each step's recognised `MTM_CATEGORY`, or
+the untyped TOOL outcome — and picks the one with the greatest `errors.SEVERITY`, matching the
+contract's "**most severe wins, all findings retained**" rule. `category_hint` derives from the
+dominant outcome. Consequence: a C assertion failure alongside a crashed tool reports the
+**tool** failure (exit 30); the finding is not lost, it stays in `step_evidence`. Reporting only
+the first typed step (the round-3 behaviour) let a co-occurring infrastructure failure hide
+behind a test finding.
+
+**Nonterminal observation (round-4 amendment).** `PENDING`/`RUNNING` are not failures at all:
+a status consultation of a live run reports `OPERATION_RUNNING` and exit **0**, never
+`OPERATION_FAILED`/exit 30. "Not finished" ≠ "failed".
+
 ## Alternatives considered
 
 - **Custom step keys** (`mtm_kind:`): rejected — Dagu's validator rejects unknown keys
@@ -58,10 +72,13 @@ invent a test finding from a generic shell exit status.
   sample step is correctly a tool failure.
 - `status.jsonl` under the bench is read host-side; a missing/corrupt file yields no evidence
   (untyped), which is safe.
-- The run record exposes `step_evidence` so a reviewer can see the typed basis of the exit code.
+- The run record exposes `step_evidence` so a reviewer can see the typed basis of the exit code;
+  the run-level category is the **most severe** failed step's outcome.
 
 ## References
 
-- `mtm/engine.py` (`CATEGORY_MARKER`, `REPORTED_CATEGORIES`, `_step_evidence_from_state`),
-  `mtm/commands.py` (`_apply_status_error`, `_exit_for_engine_status`),
+- `mtm/engine.py` (`CATEGORY_MARKER`, `REPORTED_CATEGORIES`, `_step_evidence_from_state`,
+  `RunStatus.dominant_outcome`/`category_hint`),
+  `mtm/commands.py` (`_apply_status_error`, `_exit_for_engine_status`, `Code.OPERATION_RUNNING`),
+  `mtm/errors.py` (`SEVERITY`, `CONTRACT`),
   `docs/architecture/workflow-failures.md`, [`0006-workflow-backend.md`](0006-workflow-backend.md).
