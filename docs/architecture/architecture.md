@@ -4,7 +4,7 @@
 
 ## Component topology
 
-\`\`\`mermaid
+```mermaid
 flowchart TB
   U["Engineer / standalone mtm CLI"] --> RUNNER
   IN["Selected source and SDD roots"] -->|read-only| RUNNER
@@ -21,7 +21,7 @@ flowchart TB
     DAG --> TEST
     DAG --> REPORT
   end
-\`\`\`
+```
 
 Only generic product code, tool installations and workflow templates reside in the image. **All project-specific state** is host-mounted. Persistent data include configurations, scenario IDs, plan, generated code, adaptations, hashes, findings, decisions and interpretable evidence.
 
