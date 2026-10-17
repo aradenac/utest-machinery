@@ -11,12 +11,40 @@ permissions:
 jobs:
   baseline:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']  # floor and a newer interpreter
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
       - name: Validate documentation, requirements and C example syntax
         run: python3 scripts/validate_baseline.py
+      - name: Install CLI dependencies
+        run: python3 -m pip install --quiet PyYAML jsonschema pytest
+      - name: CLI unit and contract tests
+        run: python3 -m pytest tests -q
+
+  # Fast offline smoke: build the generic image and run the sample workflow
+  # headlessly, proving the PR 1 control path end to end. No credentials, no LLM.
+  image-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build the generic image
+        run: docker build -f image/Dockerfile -t utest-machinery/mtm:1.0.0 .
+      - name: Dagu version inside the image
+        run: docker run --rm --entrypoint dagu utest-machinery/mtm:1.0.0 version
+      - name: Run the sample workflow headlessly (host-mounted bench)
+        run: |
+          mkdir -p /tmp/bench
+          docker run --rm \
+            -v /tmp/bench:/bench \
+            -v "$PWD/workflows:/workflows:ro" \
+            utest-machinery/mtm:1.0.0 \
+            dagu start --run-id ci-smoke /workflows/sample.yaml

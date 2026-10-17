@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "utest-machinery"
+version = "0.1.0"
+description = "uTest Machinery — traceable host-native verification for selected embedded C and SDDs"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "PyYAML>=6.0",
+    "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mtm = "mtm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mtm*"]
+
+[tool.setuptools.package-data]
+mtm = ["templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

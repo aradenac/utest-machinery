@@ -1,0 +1,24 @@
+# Machine-readable pin set for the generic image and the host CLI.
+#
+# Regenerate image.digest after a deliberate base-image bump. Every entry here
+# has a matching row in SBOM.md, and vice versa.
+schema_version: 1
+
+image:
+  name: utest-machinery/mtm
+  base: ubuntu:24.04
+  # Immutable base digest (docker image inspect ubuntu:24.04 --format '{{index .RepoDigests 0}}')
+  base_digest: sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+  # Digest of the built generic image is filled in locally by 'mtm install'
+  # and recorded in state/, not hard-coded here (it changes when the image is
+  # rebuilt): kept empty to avoid claiming an unverified value.
+  built_digest: ""
+
+host_cli:
+  python: ">=3.11"
+
+tools:
+  dagu:
+    version: "2.20.1"
+    license: GPL-3.0-only
+    sha256: 0d5c1612cd842931fe6d4e598fc2e43fb912a94122e571c62a8f73691ea49837

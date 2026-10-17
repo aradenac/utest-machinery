@@ -1,0 +1,28 @@
+# Minimal, auditable sample workflow (PR 1).
+#
+# This DAG exists to prove the headless orchestration path end to end: it is
+# human-readable YAML, has explicit step ordering, and both a passing and a
+# failing branch so failure diagnostics can be exercised. It performs no
+# destructive action and touches nothing outside the bench.
+#
+# Passed to Dagu BY PATH, so it must not declare a top-level 'name:' (a DAG file
+# passed as an entrypoint document that defines 'name' is rejected by validate).
+steps:
+  - name: fingerprint-inputs
+    command: |
+      set -eu
+      echo "scope fingerprint step: no inputs selected yet"
+
+  - name: assess
+    command: |
+      set -eu
+      echo "native feasibility assessment is a PR 2 concern; PR 1 only proves orchestration"
+    depends:
+      - fingerprint-inputs
+
+  - name: report-outcome
+    command: |
+      set -eu
+      echo "workflow completed"
+    depends:
+      - assess
