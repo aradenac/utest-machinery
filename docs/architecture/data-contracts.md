@@ -1,0 +1,68 @@
+# Versioned data contracts
+
+These are **normative semantic contracts**, not a commitment to an implementation language. Store canonical YAML/JSON in the single project bench; validate against versioned JSON Schemas before any stage consumes them. Concrete schemas are a deliverable of implementation step 1. Unknown fields and schema migrations must fail explicitly or use a documented migration.
+
+```mermaid
+erDiagram
+  INPUT_SNAPSHOT ||--o{ UNIT : contains
+  INPUT_SNAPSHOT ||--o{ REQUIREMENT : contains
+  REQUIREMENT }o--o{ UNIT : constrains
+  REQUIREMENT }o--o{ SCENARIO : specifies
+  UNIT ||--o{ SCENARIO : exercises
+  PLAN ||--o{ SCENARIO : selects
+  SCENARIO ||--o{ TEST_ARTIFACT : implemented_by
+  CAMPAIGN ||--o{ EXECUTION : contains
+  EXECUTION }o--|| SCENARIO : runs
+  EXECUTION ||--o{ EVIDENCE : produces
+  EVIDENCE }o--o{ FINDING : supports
+  FINDING ||--o{ RECOMMENDATION : motivates
+```
+
+| Object | Mandatory fields and semantics |
+| --- | --- |
+| **ProjectConfig** | `schema_version`, bench ID, selected source/SDD roots and selectors, relative workspace/repository references, campaign policies. Never persist secrets. Paths must resolve within explicitly selected mounts. |
+| **InputSnapshot** | Snapshot ID, content-addressed hash, source repository/revision, canonical selected path, hash, include/build context and time. No original contents copied by default. |
+| **Requirement** | Stable ID, snapshot/source anchor (document, section and text span), normative statement, interpreted behavior, ambiguity/conflict markers, review decision. |
+| **Unit** | Stable ID, source path/snapshot/hash, symbol/signature, translation unit, build macros/options, dependency IDs, native feasibility `READY/ADAPTED/BLOCKED`, adaptation assumptions. |
+| **Scenario** | Stable ID, linked requirement IDs and unit IDs, precondition/input/mock sequence, independently stated oracle and provenance, technique/objective, applicability, review state. If no SDD-grounded oracle: `UNDETERMINED`. |
+| **Plan** | Version, snapshot hash, selected/omitted scenarios, method/objective per scenario, justifications, anticipated tests, applicability, model/prompt/agent identity, locked/reviewed oracle status. |
+| **TestArtifact** | Stable scenario links, paths/hashes to generated C, mocks, harness and build config, generation provenance, changed/obsolete status. |
+| **Campaign** | Unique run ID, frozen plan and test-bench hashes, pinned image digest, tools/flags/OS/ABI, selected profiles, seeds/time budgets, start/end and final status. Read-only after finalization. |
+| **Execution** | Scenario and profile IDs, command fingerprint, exit/timeout signal, attempted/completed status, timestamps, retry count and source-anchored output references. |
+| **Evidence** | Raw tool artifact path/hash, format/version, parsed metric/status, applicability denominator, source locations, interpretation-independent provenance. |
+| **Finding** | Stable ID, category `IMPLEMENTATION_DEFECT/SDD_GAP/SDD_CONFLICT/INSUFFICIENT_EVIDENCE/TOOL_FAILURE`, severity, evidence IDs, SDD/code anchors, confidence, unresolved assumptions. |
+| **Recommendation** | Finding ID, cause and justification, proposed precise edit or clarification with location, before/after behavior, risk/impact, verification command and expected acceptance, human disposition. |
+| **StageJournal** | DAG and stage version, dependency fingerprints, input/output hashes, status `PENDING/RUNNING/SUCCEEDED/FAILED/BLOCKED/SKIPPED/INTERRUPTED`, attempts, diagnostic and resume token. |
+
+## Rules
+
+- Generated IDs remain stable across non-semantic changes; never reuse a retired ID for a different meaning.
+- Every `PASS` asserting SDD conformance must trace through an accepted SDD oracle to an executed observation. If oracle provenance is absent, mark `UNDETERMINED` regardless of green harness status.
+- One requirement can map to many units and tests; missing mappings are visible. Planned, generated, executed, covered and requirement-satisfied are **different counts**.
+- Separate runtime `PASS/FAIL/ERROR/SKIPPED` from requirement-level `SUPPORTED/CONTRADICTED/UNDETERMINED/INSUFFICIENT`.
+- Never merge metrics with unlike denominators (e.g. MC/DC, mutation, requirement count). Preserve raw reports.
+- A new LLM interpretation references an immutable campaign and produces its own versioned interpretation ID; never rewrite raw observations.
+- `toolchain.lock` records container digest, compiler versions and compatibility, Ceedling plugins, mutation operators, fuzz parameters and workflow engine version.
+- A scope removal invalidates active links but retains history. On snapshot change, cache invalidation uses both source dependencies and test/oracle relationships.
+- Reproduction requires the frozen suite, scope snapshot, build flags, seeds/time bounds, toolchain and staged mocks. Real LLM generation is **traceable**, not assumed bit-reproducible.
+
+## Minimal illustrative result
+
+```yaml
+schema_version: 1
+campaign_id: run-20261017-example
+scenario_id: SAT-002-B1
+requirement_ids: [SAT-002]
+status:
+  execution: FAIL
+  requirement: CONTRADICTED
+evidence:
+  - profile: functional
+    source: evidence/run-20261017-example/unity.xml
+    sha256: "<computed by engine>"
+finding:
+  category: IMPLEMENTATION_DEFECT
+  evidence_required: true
+```
+
+This is a **shape example**, not an actual run. The implementation must use proper JSON Schema and a consistent complete envelope.
