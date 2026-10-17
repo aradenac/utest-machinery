@@ -13,16 +13,22 @@ flowchart TD
   C & S & M & P & Z & V --> E["Evidence, limitations and report"]
 ```
 
-| Campaign | Test objectives consolidated | Toolchain | Evidence guaranteed when successful | Important limitations |
+| Campaign | Test objectives consolidated | Toolchain | What the evidence establishes | Important limitations |
 | --- | --- | --- | --- | --- |
 | Functional/robustness | SDD scenarios, equivalence partitions, boundaries, decisions, state transitions, valid/invalid inputs, dependency errors, sequences, recovery, repeatability | Ceedling/Unity/CMock | Tested expected observations and mock contracts | Oracles may be wrong; mocks differ from target |
 | Structural | Functions, regions, lines, branches, decisions, MC/DC; selected loop/path goals | Clang/llvm-profdata/llvm-cov | Instrumented exercised portions and MC/DC-supported decisions | Unsupported/unreachable conditions; coverage ≠ correctness |
-| Dynamic runtime | Buffer errors, invalid frees, signed-overflow/UB, leaks; optional uninitialized-read/concurrency cases | Clang ASan/UBSan/LSan; optional MSan/TSan | No observed instrumented violation on executed inputs | Only executed paths; MSan/TSan need controlled build/threads |
-| Mutation sensitivity | Test response to seeded perturbations | Mull matching LLVM release | Per-mutant killed/survived/other results, mutation score | Operator set finite; equivalent mutants; tool integration must be validated |
-| Generative | Coverage-guided exploration, invariant, metamorphic, stateful sequences and regression corpus | libFuzzer + assertions/sanitizers | No discovered property violation during bounded campaign; reproducible corpus | No exhaustive oracle or completeness proof |
+| Dynamic runtime | Buffer errors, invalid frees, signed-overflow/UB, leaks; optional uninitialized-read/concurrency cases | Clang ASan/UBSan/LSan; optional MSan/TSan | No violation observed on instrumented and executed paths | Only executed paths; MSan/TSan need controlled build/threads |
+| Mutation sensitivity | Test response to seeded perturbations | Mull compatible with locked LLVM plugin/runtime and test runner | Per-mutant killed/survived/other results, mutation score | Operator set finite; equivalent mutants; tool integration must be validated |
+| Generative | Coverage-guided exploration, invariant, metamorphic, stateful sequences and regression corpus | libFuzzer + assertions/sanitizers | Observed property/corpus outcomes for a bounded run; seeds and reproducer | No exhaustive oracle or completeness proof |
 | Host portability/resources | Compiler/optimization variants, selected 32-bit ABI where available, profiling, allocations and host instruction counts | GCC/Clang, Valgrind Memcheck/Callgrind/Massif | Host-observed consistency and resource estimates | Not target ABI, WCET, real ISR/peripheral fidelity |
 
 **Conditional test profiles** are enabled only where applicable: LSan for allocation, TSan for actual concurrency, MSan only when fully instrumentable, Valgrind resource tooling when useful, special endian/vector or float tests for corresponding types. Pairwise, exhaustive small-domain tests, decision tables and state-machine runs use the *same Unity framework*; no dedicated platform is needed. If selected pairwise tooling becomes justified, ACTS remains optional.
+
+## Selection and non-redundancy rules
+
+The *same* scenario definitions serve functional assertions, instrumentation, mutation and compiler variants; only fuzzing needs a separate input generator/properties. Include each selected function in the scope denominator even if it is BLOCKED, not instrumentable or lacking an oracle. Mark campaign applicability and reasons explicitly instead of fabricating 100% scores. Instrumented builds are independent profiles with their own compiler flags and tool outputs.
+
+Clang/llvm-cov MC/DC must show actual supported decisions and version-dependent limits. Neither MC/DC nor branch coverage certifies correctness. Valgrind and sanitizer profiles are separate where instrumentation interferes. Allocation-free and concurrency-free functions do not need irrelevant LSan/TSan passes. Use native test-engine metrics rather than custom coverage or mutation algorithms.
 
 ## Test planning contract
 
@@ -30,7 +36,11 @@ Each function/requirement receives a plan with: SDD source location and version,
 
 ## Mutation manifest
 
-Freeze the mutation operator set/configuration and an inventory of **generated** mutants before execution: stable mutant ID, input source location, operator, affected function and source hash. Track generated, attempted, killed by assertion, crashed, timed-out, survived, equivalent (justified), skipped/invalid separately. Record native Mull outputs, tool version and mapping to SDD via function/test links. Report raw and justified scores transparently; do not silently remove survivors.
+Freeze the mutation operator set/configuration and an inventory of **generated** mutants before execution: stable mutant ID, input source location, operator, affected function and source hash. First validate that the chosen Mull build can enumerate the planned mutants before execution. If it cannot, disclose the limitation or generate a faithful derived inventory without claiming advance knowledge. Track generated, attempted, killed by assertion, crashed, timed-out, survived, equivalent (justified), skipped/invalid separately. Record native Mull outputs, tool version and mapping to SDD via function/test links. Report raw and justified scores transparently; do not silently remove survivors.
+
+## Toolchain selection gate
+
+Select only free tools, pin versions proven compatible: Ceedling/Unity/CMock (use original translation units and supported partials), Clang/llvm-profdata/llvm-cov with `-fcoverage-mcdc`, ASan/UBSan and optional LSan, Mull matched to LLVM, libFuzzer, GCC and Valgrind. Do not rewrite originals. References: [LLVM coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html), [Ceedling](https://github.com/ThrowTheSwitch/Ceedling), [Mull](https://mull-project.com/). Failed tool compatibility blocks claims about that campaign, not all independent testing.
 
 ## Campaign reproducibility
 
