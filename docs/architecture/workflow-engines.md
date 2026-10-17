@@ -29,16 +29,15 @@ Dagu is the preferred **separate executable** inside Docker: textual YAML DAGs, 
 
 **Not yet final adoption.** Validate the documented Dagu CLI version (including start/status/retry/dry commands) before relying on resume semantics; the [official CLI reference](https://docs.dagu.sh/getting-started/cli) is the starting point. Prove: (1) no server/UI required, (2) deterministic and explicit step failure policies, (3) resumability after container interruption, (4) workflow/state export/import with no hidden source of truth, (5) CLI progress and optional DAG display, (6) per-project state on host volume, (7) compatible image/license/version pinning. If any acceptance gate fails, reconsider Prefect or a deliberately small Python orchestrator. Keep this comparison and reasons in source control.
 
-## Failure policy
+## Failure and recovery contract
 
-- Every step records stable ID, declared inputs/outputs, hashes, version, status, start/end timestamps and attempts.
-- Domain test failure is **data**, not necessarily workflow-engine failure; continue independent evidence collection.
-- Infrastructure/tool failure is explicit, may retry only when safe, and cannot become `PASS`.
-- Use idempotent stages or per-attempt temp outputs with atomic publication after validation.
-- Replay only when step inputs/tool versions match its recorded fingerprint; otherwise invalidate downstream steps.
-- On interruption, the journal survives and a developer can inspect, resume or restart.
-- Human or LLM modifications to workflow definitions go through Git diff and validation.
-- Optional UI is for observation, **not authoring source of truth**. Ordinary execution must not require a server started by `start-all`; use a proven headless invocation.
+Use the common [stop/error contract](workflow-failures.md) for all statuses, retries and actionable diagnostics. Dagu is a **headless executor**, not an extra repository or a second source of truth.
+
+- Keep authored DAG YAML and project run journal on the host bench; optional UI only for observation.
+- Only transient, idempotent steps may be retried automatically within a bounded budget; workflow-wide scheduler retries are not required.
+- Failed assertions and mutant survivors are findings captured by the step wrapper, **not** execution errors. A failed tool/build/runtime is a distinct failure status; independent stages may still contribute evidence.
+- `continue_on` must never hide error provenance or mark tool failure as PASS.
+- Before accepting Dagu, demonstrate restart after an interrupted container, correct statuses in the CLI and a text-to-diagram representation; fall back to an alternative only with evidence.
 
 ## Visual workflow source
 
