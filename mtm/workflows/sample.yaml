@@ -1,12 +1,18 @@
 # Minimal, auditable sample workflow (PR 1).
 #
 # This DAG exists to prove the headless orchestration path end to end: it is
-# human-readable YAML, has explicit step ordering, and both a passing and a
-# failing branch so failure diagnostics can be exercised. It performs no
-# destructive action and touches nothing outside the bench.
+# human-readable YAML, has explicit step ordering, and performs no destructive
+# action. It touches nothing outside the bench.
 #
 # Passed to Dagu BY PATH, so it must not declare a top-level 'name:' (a DAG file
 # passed as an entrypoint document that defines 'name' is rejected by validate).
+#
+# Outcome taxonomy: Dagu's own FAILED status says only "a step failed" — it does
+# not say whether a *test found a defect* or a *tool crashed*. A step that
+# verifies code therefore types its own outcome by emitting an MTM_CATEGORY
+# output. Recognised values: TEST_FINDING (exit 10), INPUT_LIMITATION (exit 20),
+# TOOL (exit 30). A step that declares nothing is treated as a workflow/tool
+# failure (exit 30), never invented as a test assertion.
 steps:
   - name: fingerprint-inputs
     command: |

@@ -26,6 +26,7 @@ from .docker import (
     image_ref,
 )
 from .engine import (
+    REPORTED_CATEGORIES,
     FAILED,
     INTERRUPTED,
     SUCCEEDED,
@@ -39,7 +40,6 @@ from .errors import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_PARTIAL,
-    EXIT_TEST_FINDINGS,
     EXIT_TOOL_FAILURE,
     MtmError,
     most_severe,
@@ -146,14 +146,27 @@ def cmd_init(args: Any, ctx: "Context") -> dict[str, Any]:
     if project_file.exists():
         existing = ProjectConfig.load(project_file)
 
-    config = ProjectConfig(
-        bench_id=(existing.bench_id if existing else new_bench_id(root)),
-        source_roots=list(args.source or (existing.source_roots if existing else [])),
-        spec_roots=list(args.spec or (existing.spec_roots if existing else [])),
-        # A --force reinit must not silently drop the existing selection: the
-        # scope IDs and history are preserved (only newly created dirs differ).
-        scopes=list(existing.scopes) if existing else [],
-    )
+    if existing is not None:
+        # A --force reinit must not silently drop persisted settings: keep every
+        # field the previous config carried (scopes, selectors and any unknown
+        # additive fields preserved in ``raw``), overriding only what the command
+        # explicitly sets. Only an explicit --source/--spec replaces those lists.
+        config = ProjectConfig(
+            bench_id=existing.bench_id,
+            schema_version=existing.schema_version,
+            released_milestone=existing.released_milestone,
+            source_roots=list(args.source) if args.source else list(existing.source_roots),
+            spec_roots=list(args.spec) if args.spec else list(existing.spec_roots),
+            selectors=dict(existing.selectors),
+            scopes=list(existing.scopes),
+            raw=dict(existing.raw),
+        )
+    else:
+        config = ProjectConfig(
+            bench_id=new_bench_id(root),
+            source_roots=list(args.source or []),
+            spec_roots=list(args.spec or []),
+        )
     write_project(root, config)
 
     created: list[str] = []
@@ -509,7 +522,7 @@ def cmd_workflow_run(args: Any, ctx: "Context") -> dict[str, Any]:
     adapter.validate(dag)
     run_id = args.run_id or f"run-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:6]}"
     status = adapter.run(dag, run_id)
-    exit_code = _exit_for_engine_status(status.status)
+    exit_code = _exit_for_engine_status(status.status, reported_category=status.category_hint)
     record = _record(
         op, "workflow-run", status.status,
         dag=str(dag), run_id=run_id, backend=ctx.backend, engine=adapter.name,
@@ -533,7 +546,9 @@ def cmd_workflow_status(args: Any, ctx: "Context") -> dict[str, Any]:
         op, "workflow-status", status.status,
         dag=str(dag), run_id=args.run_id, backend=ctx.backend, engine=adapter.name,
         raw_status=status.raw_status, pid=status.pid, reconciled=status.reconciled,
-        exit_code=_exit_for_engine_status(status.status),
+        owner_alive=status.owner_alive, liveness_evidence=status.liveness_evidence,
+        step_evidence=status.step_evidence,
+        exit_code=_exit_for_engine_status(status.status, reported_category=status.category_hint),
     )
     _apply_status_error(record, status, args.run_id)
     return record
@@ -542,9 +557,13 @@ def cmd_workflow_status(args: Any, ctx: "Context") -> dict[str, Any]:
 def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str) -> None:
     """Attach the full error contract for non-success engine outcomes.
 
-    A failed DAG run is a *workflow finding* (the tool ran; a step failed), so it
-    maps to TEST_FINDING/exit 10 and preserves the raw cause. An interruption is a
-    workflow failure mapped to WORKFLOW_INTERRUPTED/exit 130.
+    The taxonomy is driven by the **typed evidence a step reported**, not by
+    Dagu's generic ``FAILED`` status: a step that declares
+    ``MTM_CATEGORY=TEST_FINDING`` is a domain finding (exit 10); a step that
+    declares ``TOOL``/``INPUT_LIMITATION`` maps accordingly; and a step that
+    declares nothing — a crashed tool, a missing executable, a bad shell
+    command — is a **workflow/tool failure** (exit 30), never invented as a C
+    test assertion. An interruption maps to WORKFLOW_INTERRUPTED/exit 130.
     """
     if status.status == SUCCEEDED:
         return
@@ -559,14 +578,29 @@ def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str
         )
         return
     if status.status == FAILED:
-        record.update(
-            category=Category.TEST_FINDING,
-            code=Code.TEST_ASSERTION,
-            message="The workflow ran and at least one step failed.",
-            cause=status.cause,
-            action="Inspect the failing step and its logs; fix the failure and re-run.",
-            retryable=False,
-        )
+        reported = status.category_hint
+        if reported in REPORTED_CATEGORIES:
+            category, code, _ = REPORTED_CATEGORIES[reported]
+            record.update(
+                category=category,
+                code=code,
+                message=f"A step reported a {reported.replace('_', ' ').lower()} outcome.",
+                cause=status.cause,
+                action="Inspect the failing step and its logs; fix the failure and re-run.",
+                retryable=False,
+            )
+        else:
+            # Untyped failure: the tool/workflow failed. NOT a test finding.
+            record.update(
+                category=Category.TOOL,
+                code=Code.TOOL_FAILED,
+                message="The workflow failed without a typed test outcome.",
+                cause=status.cause,
+                action=("Inspect the failing step's command and logs. A step that verifies "
+                        "code must report its outcome via a MTM_CATEGORY output."),
+                retryable=False,
+            )
+            record["tool_name"] = "dagu"
         return
     # BLOCKED / SKIPPED / PENDING / UNKNOWN
     record.update(
@@ -579,10 +613,12 @@ def _apply_status_error(record: dict[str, Any], status: "RunStatus", run_id: str
     )
 
 
-def _exit_for_engine_status(status: str) -> int:
+def _exit_for_engine_status(status: str, *, reported_category: str = "") -> int:
+    if status == "FAILED" and reported_category in REPORTED_CATEGORIES:
+        return REPORTED_CATEGORIES[reported_category][2]
     return {
         "SUCCEEDED": EXIT_OK,
-        "FAILED": EXIT_TEST_FINDINGS,  # the run happened; a step failed -> finding
+        "FAILED": EXIT_TOOL_FAILURE,  # untyped failure -> tool/workflow failure
         "INTERRUPTED": EXIT_INTERRUPTED,
         "BLOCKED": EXIT_PARTIAL,
     }.get(status, EXIT_TOOL_FAILURE)

@@ -168,6 +168,24 @@ def test_status_does_not_overwrite_last_operation(bench: Path):
     assert third["message"]
 
 
+def test_status_text_shows_last_failure(bench: Path):
+    """Human 'mtm status' must render the last operation's diagnosis, not only JSON."""
+    run_mtm_json("scope", "add", "/does/not/exist.c", cwd=bench)
+    proc = run_mtm("status", cwd=bench)
+    assert proc.returncode == 0
+    combined = proc.stdout + proc.stderr
+    assert "last operation" in combined
+    assert "INPUT_MISSING" in combined
+    assert "next:" in combined  # the actionable step is rendered
+
+
+def test_status_text_shows_diagnosis_after_two_queries(bench: Path):
+    run_mtm_json("scope", "add", "/does/not/exist.c", cwd=bench)
+    run_mtm("status", cwd=bench)
+    second = run_mtm("status", cwd=bench)
+    assert "INPUT_MISSING" in (second.stdout + second.stderr)
+
+
 def test_init_force_preserves_scopes(bench: Path, tmp_path: Path):
     target = tmp_path / "mod.c"
     target.write_text("int f(void){return 0;}\n")
@@ -179,6 +197,23 @@ def test_init_force_preserves_scopes(bench: Path, tmp_path: Path):
 
     listed, _ = run_mtm_json("scope", "list", cwd=bench)
     assert [s["id"] for s in listed["scopes"]] == [scope_id]
+
+
+def test_init_force_preserves_selectors_and_unknown_fields(bench: Path):
+    """--force must not silently drop persisted settings or additive fields."""
+    project = bench / "project.yaml"
+    config = yaml.safe_load(project.read_text())
+    config["selectors"] = {"unit": "adc"}
+    config["future_field"] = {"kept": True}
+    project.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    record, code = run_mtm_json("init", str(bench), "--force", cwd=bench)
+    assert code == 0, record
+
+    after = yaml.safe_load(project.read_text())
+    assert after["selectors"] == {"unit": "adc"}
+    assert after["future_field"] == {"kept": True}
+
 
 
 def test_scope_add_rejects_schema_incompatible_id(bench: Path, tmp_path: Path):

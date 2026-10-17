@@ -2,7 +2,10 @@
 
 Builds a wheel, installs it into a throwaway virtual environment, and runs the
 CLI from outside the source tree. This catches package-data gaps such as a schema
-or bundled DAG that is only found in the checkout.
+or bundled DAG that is only found in the checkout, and pins the **distribution
+contract**: a wheel ships the control commands and their data, while building the
+generic Docker image requires the source tree (a wheel does not carry a Docker
+context, and must not silently pretend to).
 
 The interpreter running the suite may be a bare system Python without ``pip``
 (common on distro builds). We therefore bootstrap a virtual environment and use
@@ -38,10 +41,13 @@ def _bootstrap_python(tmp_path: Path) -> Path:
     return py
 
 
-def test_installed_cli_validates_and_has_package_data(tmp_path: Path):
-    py = _bootstrap_python(tmp_path)
+@pytest.fixture(scope="module")
+def installed_cli(tmp_path_factory) -> Path:
+    """Build the wheel once, install it in a clean venv, return that interpreter."""
+    tmp = tmp_path_factory.mktemp("packaging")
+    py = _bootstrap_python(tmp)
 
-    wheel_dir = tmp_path / "wheel"
+    wheel_dir = tmp / "wheel"
     wheel_dir.mkdir()
     proc = subprocess.run(
         [str(py), "-m", "pip", "wheel", "--no-deps", "-w", str(wheel_dir), str(REPO)],
@@ -59,9 +65,8 @@ def test_installed_cli_validates_and_has_package_data(tmp_path: Path):
     assert any(n.endswith("mtm/schemas/operation-status.schema.json") for n in names), names
     assert any(n.endswith("mtm/workflows/sample.yaml") for n in names), names
 
-    # Install into a clean venv and run the CLI outside the source tree. Let pip
-    # resolve the runtime dependencies (PyYAML, jsonschema); skip when offline.
-    env_dir = tmp_path / "venv"
+    # Install into a clean venv (let pip resolve runtime deps); skip when offline.
+    env_dir = tmp / "venv"
     venv.create(env_dir, with_pip=True)
     app_py = env_dir / "bin" / "python"
     install = subprocess.run(
@@ -70,19 +75,38 @@ def test_installed_cli_validates_and_has_package_data(tmp_path: Path):
     )
     if install.returncode != 0:
         pytest.skip(f"install of the wheel failed (offline?): {install.stderr.strip()[-300:]}")
+    return app_py
 
+
+def test_installed_cli_validates_and_has_package_data(installed_cli: Path, tmp_path: Path):
+    """The installed CLI finds its bundled schema from outside the checkout."""
     bench = tmp_path / "bench"
     bench.mkdir()
     run = subprocess.run(
-        [str(app_py), "-m", "mtm.cli", "init", str(bench)],
+        [str(installed_cli), "-m", "mtm.cli", "init", str(bench)],
         capture_output=True, text=True, cwd=str(tmp_path),
     )
     assert run.returncode == 0, run.stderr
-
-    # The installed CLI must find its bundled schema from outside the checkout:
-    # a schema-loading command (status) succeeds, proving package data ships.
     run = subprocess.run(
-        [str(app_py), "-m", "mtm.cli", "status"],
+        [str(installed_cli), "-m", "mtm.cli", "status"],
         capture_output=True, text=True, cwd=str(bench),
     )
     assert run.returncode == 0, run.stderr
+
+
+def test_installed_cli_image_install_requires_source_context(installed_cli: Path, tmp_path: Path):
+    """Distribution contract: a wheel cannot build the image without a source tree.
+
+    `mtm install` from outside a checkout must fail with an actionable message
+    (exit 40, CONFIG_INVALID) — never silently succeed or crash obscurely.
+    """
+    run = subprocess.run(
+        [str(installed_cli), "-m", "mtm.cli", "--json", "install"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert run.returncode == 40, (run.returncode, run.stdout, run.stderr)
+    import json
+
+    record = json.loads(run.stdout)
+    assert record["code"] == "CONFIG_INVALID"
+    assert "source" in record["action"].lower()

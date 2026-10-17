@@ -75,13 +75,22 @@ def image_digest(ref: str | None = None) -> str:
 
 
 def build_image(context: Path, tag: str = IMAGE_TAG) -> str:
-    """Build the generic image. Raises :class:`MtmError` on failure."""
+    """Build the generic image. Raises :class:`MtmError` on failure.
+
+    The image build context is the **source tree** (``image/Dockerfile`` plus the
+    ``mtm`` sources it copies), not the installed package: a wheel install ships
+    the control CLI and its data, not a Docker context. Point ``--context`` at a
+    source checkout to build.
+    """
     if not (context / "image" / "Dockerfile").is_file():
         raise MtmError(
             code=Code.CONFIG_INVALID,
-            message=f"No image/Dockerfile found under {context}.",
-            action="Run mtm from the uTest Machinery source tree, or fix --context.",
+            message=f"No image/Dockerfile found under the build context {context}.",
+            action=("Building the generic image requires the uTest Machinery source tree. "
+                    "Run 'mtm install --context <source-dir>' (or run mtm from the checkout). "
+                    "An installed wheel provides the control commands, not a Docker context."),
             stage="image-build",
+            input_reference=str(context),
         )
     proc = subprocess.run(
         ["docker", "build", "-f", "image/Dockerfile", "-t", image_ref(tag), "."],

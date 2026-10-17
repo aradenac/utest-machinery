@@ -141,6 +141,20 @@ def _print_human(record: dict[str, Any], command: str) -> None:
         print(record["text_dag"])
     if record.get("cause"):
         print(f"  cause: {record['cause']}")
+    # A 'status' consultation must surface the last operation's diagnosis in
+    # text too, not only in --json: otherwise the failure it exists to report is
+    # invisible to a human.
+    last = record.get("last_operation")
+    if isinstance(last, dict) and last:
+        print(f"  last operation: {last.get('stage', '?')} -> {last.get('status', '?')}")
+        if last.get("code"):
+            print(f"    code: {last['code']} ({last.get('category', '')})")
+        if last.get("message"):
+            print(f"    {last['message']}")
+        if last.get("cause"):
+            print(f"    cause: {last['cause']}")
+        if last.get("action"):
+            print(f"    next: {last['action']}")
     for key in ("bench_root", "image", "dag", "run_id", "backend", "pid", "raw_status", "code"):
         if record.get(key) not in (None, "", 0):
             print(f"  {key}: {record[key]}")

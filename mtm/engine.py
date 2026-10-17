@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .errors import Code, MtmError
+from .errors import Category, Code, MtmError
 
 # --- normalized engine statuses --------------------------------------------
 
@@ -68,6 +69,104 @@ _STATUS_MAP = {
 #: domain finding preserved as evidence, not a workflow/infrastructure failure.
 DAGU_GO_EXIT_ERROR = 1
 
+#: A step types its own outcome by emitting this output variable, e.g.
+#: ``echo MTM_CATEGORY=TEST_FINDING``. Only a value listed in
+#: :data:`REPORTED_CATEGORIES` is honoured; an unknown or absent value leaves the
+#: outcome untyped (a workflow/tool failure), never a test finding.
+CATEGORY_MARKER = "MTM_CATEGORY"
+
+#: marker value -> (category, stable code, exit code). Kept tiny and explicit:
+#: the wrapper must not guess a taxonomy from a generic shell exit status.
+REPORTED_CATEGORIES: dict[str, tuple[str, str, int]] = {
+    "TEST_FINDING": (Category.TEST_FINDING, Code.TEST_ASSERTION, 10),  # EXIT_TEST_FINDINGS
+    "INPUT_LIMITATION": (Category.INPUT_LIMITATION, Code.HOST_UNSUPPORTED, 20),  # EXIT_PARTIAL
+    "TOOL": (Category.TOOL, Code.TOOL_FAILED, 30),  # EXIT_TOOL_FAILURE
+}
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """Whether *pid* is alive; ``None`` when liveness cannot be determined.
+
+    A PID is only meaningful for a host-local process. Callers that run the
+    engine in a container pass a sentinel (``<= 0``), and this returns ``None``
+    — "unknown", never ``False`` — so an active run is not mistaken for a dead
+    one and reported as INTERRUPTED.
+    """
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by someone else
+    except OSError:  # pragma: no cover - platform specific
+        return None
+    return True
+
+
+#: Dagu node status constants (see dagu ``scheduler``): the numeric ``status``
+#: field of each node in ``status.jsonl``.
+DAGU_NODE_FAILED = 2
+DAGU_NODE_ABORTED = 3
+
+
+def _decode_marker(raw: str | None) -> str:
+    """Extract a marker value from Dagu's stored ``outputVariables`` string.
+
+    Dagu stores an output variable both under its own name and under
+    ``DAGU_OUTPUT.<name>`` and loosely appends the name again for booleans, so
+    the raw text is ``MTM_CATEGORY=TEST_FINDING`` or ``TEST_FINDING``. Take the
+    last ``=``-separated token and upper-case it; unknown values are ignored
+    downstream.
+    """
+    if not raw:
+        return ""
+    value = str(raw).rsplit("=", 1)[-1].strip()
+    return value.upper()
+
+
+def _step_evidence_from_state(dagu_home: Path, run_id: str) -> list[dict]:
+    """Parse per-step evidence from Dagu's own run state, host-side.
+
+    Returns one entry per step: ``{name, status, failed, aborted, error,
+    category}``. ``category`` is the value a step declared via
+    :data:`CATEGORY_MARKER`, or '' when it declared none. Absent/corrupt state
+    yields an empty list — untyped, which is the safe default.
+    """
+    root = dagu_home / "data" / "dag-runs"
+    if not root.is_dir():
+        return []
+    candidates = sorted(root.rglob(f"dag-run_*_{run_id}/**/status.jsonl"), reverse=True)
+    if not candidates:
+        return []
+    try:
+        lines = [ln for ln in candidates[0].read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if not lines:
+            return []
+        state = json.loads(lines[-1])
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    evidence: list[dict] = []
+    for node in state.get("nodes", []) or []:
+        step = node.get("step", {}) or {}
+        status = node.get("status")
+        outvars = node.get("outputVariables") or {}
+        marker = ""
+        for key, raw in outvars.items():
+            if str(key).split(".")[-1] == CATEGORY_MARKER:
+                marker = _decode_marker(raw)
+        evidence.append({
+            "name": step.get("name", ""),
+            "status": status,
+            "failed": status == DAGU_NODE_FAILED,
+            "aborted": status == DAGU_NODE_ABORTED,
+            "error": (node.get("error") or "").strip(),
+            "category": marker if marker in REPORTED_CATEGORIES else "",
+        })
+    return evidence
+
 
 @dataclass
 class RunStatus:
@@ -81,21 +180,46 @@ class RunStatus:
     stdout: str = ""
     stderr: str = ""
     reconciled: bool = False
+    #: Always populated. ``None`` = liveness could not be determined.
+    owner_alive: bool | None = None
+    #: Human-readable justification for the liveness decision above.
+    liveness_evidence: str = ""
+    #: Typed per-step evidence parsed from the engine's own run state.
+    step_evidence: list[dict] = field(default_factory=list)
 
     @property
     def is_terminal(self) -> bool:
         return self.status in (SUCCEEDED, FAILED, INTERRUPTED, BLOCKED, SKIPPED)
 
     @property
+    def category_hint(self) -> str:
+        """Strongest typed category a failed step declared, or '' if none.
+
+        A verification tool types its own outcome by emitting a ``MTM_CATEGORY``
+        output (see :data:`CATEGORY_MARKER`); anything else is untyped. The
+        taxonomy must never invent a test finding from a generic shell failure.
+        """
+        for step in self.step_evidence:
+            if step.get("failed") and step.get("category"):
+                return str(step["category"])
+        return ""
+
+    @property
     def cause(self) -> str:
         """Short, actionable cause extracted from the engine's own output."""
         if self.status == FAILED:
+            failed = [s for s in self.step_evidence if s.get("failed")]
+            if failed:
+                names = ", ".join(s["name"] for s in failed if s.get("name"))
+                detail = next((s.get("error") for s in failed if s.get("error")), "")
+                base = f"failed step(s): {names}" if names else "at least one step failed"
+                return f"{base}: {detail}".strip(": ") if detail else base
             text = (self.stderr or self.stdout).strip()
             if text:
                 return text[-1000:]
             return "the workflow ran and at least one step failed"
         if self.status == INTERRUPTED:
-            return "the engine process is no longer running"
+            return self.liveness_evidence or "the engine process is no longer running"
         return ""
 
 
@@ -120,22 +244,51 @@ class DockerRunner(CommandRunner):
     """
 
     def __init__(self, image_ref: str, bench: Path, *, extra_mounts: list[str] | None = None,
-                 user: str | None = None):
+                 user: str | None = None, run_label: str | None = None):
         self.image_ref = image_ref
         self.bench = bench
         self.extra_mounts = extra_mounts or []
         self.user = user if user is not None else _invoking_user()
+        #: Set by the adapter for an owner run, so liveness can be probed later
+        #: with ``docker ps --filter label=mtm.run-id=<id>``.
+        self.run_label = run_label
 
-    def container_argv(self, inner: list[str], *, user: str | None = None) -> list[str]:
+    def container_argv(self, inner: list[str], *, user: str | None = None,
+                       run_label: str | None = None) -> list[str]:
         effective_user = user if user is not None else self.user
+        label = run_label if run_label is not None else self.run_label
         argv = ["docker", "run", "--rm"]
         if effective_user:
             argv += ["--user", effective_user]
-        argv += ["-v", f"{self.bench}:/bench"]
+        if label:
+            argv += ["--label", f"{OWNER_LABEL}={label}"]
+        # The bench is mounted READ-ONLY: selected inputs live inside it and must
+        # never be writable from a run. Only the engine state directory is
+        # mounted read-write, so Dagu can record runs without endangering inputs.
+        (self.bench / ".mtm").mkdir(parents=True, exist_ok=True)
+        argv += ["-v", f"{self.bench}:/bench:ro"]
+        argv += ["-v", f"{self.bench / '.mtm'}:/bench/.mtm"]
         for mount in self.extra_mounts:
             argv += ["-v", mount]
         argv += [self.image_ref, *inner]
         return argv
+
+    def owner_alive(self, run_id: str) -> tuple[bool | None, str]:
+        """Whether an owner container for *run_id* is still running.
+
+        Returns ``(alive, evidence)``. Evidence is the container id, or an
+        explanation when liveness is undeterminable (Docker unreachable).
+        """
+        proc = subprocess.run(
+            ["docker", "ps", "--quiet", "--filter", f"label={OWNER_LABEL}={run_id}"],
+            capture_output=True, text=True, check=False,
+        )
+        if proc.returncode != 0:
+            return None, "docker ps failed; liveness not determinable"
+        ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        if ids:
+            return True, f"owner container {ids[0][:12]} running"
+        return False, f"no running container labelled {OWNER_LABEL}={run_id}"
 
     def run(self, argv: list[str], *, timeout: int | None = None, user: str | None = None) -> subprocess.CompletedProcess:
         if argv and argv[0] == "dagu":
@@ -151,6 +304,10 @@ def _invoking_user() -> str | None:
     except OSError:  # pragma: no cover - platform specific
         pass
     return None
+
+
+#: Docker label used to find the owner container of a run for liveness checks.
+OWNER_LABEL = "mtm.run-id"
 
 
 @dataclass
@@ -212,33 +369,26 @@ class EngineAdapter:
         return ""
 
     def _finalize(self, run_id: str, raw_status: str, pid: int,
-                  *, exit_code: int = 0, stdout: str = "", stderr: str = "") -> RunStatus:
+                  *, exit_code: int = 0, stdout: str = "", stderr: str = "",
+                  owner_alive: bool | None = None, liveness_evidence: str = "",
+                  step_evidence: list[dict] | None = None) -> RunStatus:
         status = _STATUS_MAP.get(raw_status.lower().strip(), "UNKNOWN")
         reconciled = False
-        if status == RUNNING and not _pid_alive(pid):
-            # Dead owner: Dagu never reconciles this on the local backend.
+        if status == RUNNING and owner_alive is False:
+            # Liveness was positively determined and the owner is gone: Dagu
+            # never reconciles this on the local backend. When liveness is
+            # unknown (``None``, e.g. a docker run) the run stays RUNNING — it
+            # must never be reported INTERRUPTED merely because no host PID
+            # exists.
             status = INTERRUPTED
             reconciled = True
         elif status == "UNKNOWN" and exit_code:
             status = FAILED
         return RunStatus(dag_run_id=run_id, status=status, raw_status=raw_status,
                          pid=pid, engine_exit_code=exit_code, stdout=stdout,
-                         stderr=stderr, reconciled=reconciled)
-
-
-def _pid_alive(pid: int) -> bool:
-    # A containerized run's PID is meaningless on the host, so liveness is only
-    # meaningful for a host-local process. Callers pass pid=0 for the docker
-    # backend, which is treated as "liveness not determinable".
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but owned by someone else
-    return True
+                         stderr=stderr, reconciled=reconciled,
+                         owner_alive=owner_alive, liveness_evidence=liveness_evidence,
+                         step_evidence=list(step_evidence or []))
 
 
 class DaguBackend(EngineAdapter):
@@ -294,6 +444,10 @@ class DaguBackend(EngineAdapter):
                          stdout=proc.stdout, stderr=proc.stderr)
 
     def run(self, dag_path: Path, run_id: str) -> RunStatus:
+        if isinstance(self.backend, DockerRunner):
+            # Label the owner container so a later status query can positively
+            # confirm whether this run is still alive (vs. a killed run).
+            self.backend.run_label = run_id
         proc = self.backend.run(
             [self.dagu_bin, "start", "--run-id", run_id, self._dag_arg(dag_path)]
         )
@@ -302,20 +456,39 @@ class DaguBackend(EngineAdapter):
     def run_status(self, dag_path: Path, run_id: str) -> RunStatus:
         proc = self.backend.run([self.dagu_bin, "status", "--run-id", run_id, self._dag_arg(dag_path)])
         raw = self._parse_status_text(proc.stdout + proc.stderr)
-        # Docker runs have no meaningful host PID; liveness comes from the
-        # engine's own state. A 'running' status is only reconciled when a PID
-        # is available (host backend).
+        owner_alive, evidence = self._liveness(run_id)
         pid = self._find_pid(run_id) if isinstance(self.backend, LocalRunner) else 0
         return self._finalize(run_id, raw, pid, exit_code=proc.returncode,
-                              stdout=proc.stdout, stderr=proc.stderr)
+                              stdout=proc.stdout, stderr=proc.stderr,
+                              owner_alive=owner_alive, liveness_evidence=evidence,
+                              step_evidence=self._step_evidence(run_id))
 
     # -- internals ----------------------------------------------------------
+
+    def _liveness(self, run_id: str) -> tuple[bool | None, str]:
+        """Determine whether the run's owner is still alive, with evidence.
+
+        Host backend: the OS PID from the run state. Docker backend: the owner
+        container found by its ``mtm.run-id`` label. If neither can be
+        determined, returns ``(None, reason)`` so the run is *not* reconciled.
+        """
+        if isinstance(self.backend, DockerRunner):
+            return self.backend.owner_alive(run_id)
+        pid = self._find_pid(run_id)
+        if pid <= 0:
+            return None, "no host PID recorded for this run"
+        alive = _pid_alive(pid)
+        return alive, f"host PID {pid} {'alive' if alive else 'dead'}"
+
+    def _step_evidence(self, run_id: str) -> list[dict]:
+        return _step_evidence_from_state(self.paths.dagu_home_host, run_id)
 
     def _reconcile(self, run_id: str, proc: subprocess.CompletedProcess) -> RunStatus:
         raw = self._parse_status_text(proc.stdout + proc.stderr)
         # For the docker backend the daemon's exit code is Dagu's own exit code.
         status = self._finalize(run_id, raw, 0, exit_code=proc.returncode,
-                                stdout=proc.stdout, stderr=proc.stderr)
+                                stdout=proc.stdout, stderr=proc.stderr,
+                                step_evidence=self._step_evidence(run_id))
         if status.status in (PENDING, RUNNING) and proc.returncode != 0:
             status.status = FAILED
         return status

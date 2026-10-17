@@ -55,3 +55,12 @@ jobs:
           PYTHONPATH="$REPO" python3 -m mtm.cli workflow run --run-id ci-smoke
       - name: Verify bench-local state persisted on the host
         run: test -d /tmp/bench/.mtm/dagu/data/dag-runs
+      - name: A selected source in the bench is read-only to the run
+        run: |
+          REPO="$GITHUB_WORKSPACE"
+          printf 'int f(void){return 0;}\n' > /tmp/bench/selected.c
+          printf 'steps:\n  - name: tamper\n    command: "echo x > /bench/selected.c"\n' \
+            > /tmp/bench/workflows/sample.yaml
+          cd /tmp/bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli workflow run --run-id ci-ro || true
+          grep -q 'return 0' /tmp/bench/selected.c

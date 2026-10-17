@@ -40,22 +40,35 @@ def test_status_map_covers_the_documented_set():
 
 def test_running_with_dead_pid_reconciles_to_interrupted(tmp_path: Path):
     adapter = _adapter(tmp_path)
-    status = adapter._finalize("run-1", "running", 2 ** 22)
+    status = adapter._finalize("run-1", "running", 2 ** 22, owner_alive=False,
+                               liveness_evidence="host PID dead")
     assert status.status == INTERRUPTED
     assert status.reconciled is True
 
 
 def test_running_with_live_pid_stays_running(tmp_path: Path):
     adapter = _adapter(tmp_path)
-    status = adapter._finalize("run-1", "running", os.getpid())
+    status = adapter._finalize("run-1", "running", os.getpid(), owner_alive=True,
+                               liveness_evidence="host PID alive")
     assert status.status == RUNNING
     assert status.reconciled is False
 
 
-def test_running_without_owner_is_not_a_false_success(tmp_path: Path):
+def test_running_with_unknown_liveness_stays_running(tmp_path: Path):
+    """A docker run with no host PID must NOT be reconciled to INTERRUPTED."""
     adapter = _adapter(tmp_path)
-    status = adapter._finalize("run-1", "running", 0)
-    assert status.status == INTERRUPTED
+    status = adapter._finalize("run-1", "running", 0, owner_alive=None)
+    assert status.status == RUNNING
+    assert status.reconciled is False
+
+
+def test_pid_alive_returns_none_for_non_host_pid():
+    from mtm.engine import _pid_alive
+
+    assert _pid_alive(0) is None
+    assert _pid_alive(-1) is None
+    assert _pid_alive(os.getpid()) is True
+    assert _pid_alive(2 ** 22) is False
 
 
 def test_terminal_statuses_are_not_reconciled(tmp_path: Path):
@@ -68,6 +81,49 @@ def test_unknown_status_with_nonzero_exit_is_failed(tmp_path: Path):
     adapter = _adapter(tmp_path)
     status = adapter._finalize("r", "", 0, exit_code=1)
     assert status.status == FAILED
+
+
+def test_step_evidence_parses_category_marker(tmp_path: Path):
+    from mtm.engine import _step_evidence_from_state
+
+    run_dir = tmp_path / "data" / "dag-runs" / "dag-run_20260101_000000Z_r1" / "a_1_1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.jsonl").write_text(
+        '{"nodes": ['
+        '{"step": {"name": "check"}, "status": 2, "error": "exit status 1", '
+        '"outputVariables": {"MTM_CATEGORY": "MTM_CATEGORY=TEST_FINDING"}},'
+        '{"step": {"name": "boom"}, "status": 2, "error": "exit status 3"}'
+        ']}\n'
+    )
+    evidence = _step_evidence_from_state(tmp_path, "r1")
+    assert [s["name"] for s in evidence] == ["check", "boom"]
+    assert evidence[0]["category"] == "TEST_FINDING"
+    assert evidence[0]["failed"] is True
+    assert evidence[1]["category"] == ""  # untyped
+
+
+def test_category_hint_is_strongest_reported(tmp_path: Path):
+    from mtm.engine import RunStatus
+
+    status = RunStatus(dag_run_id="r", status=FAILED, step_evidence=[
+        {"name": "boom", "failed": True, "category": ""},
+        {"name": "check", "failed": True, "category": "TEST_FINDING"},
+    ])
+    assert status.category_hint == "TEST_FINDING"
+    assert "check" in status.cause or "boom" in status.cause
+
+
+def test_unknown_category_marker_is_ignored(tmp_path: Path):
+    from mtm.engine import _step_evidence_from_state
+
+    run_dir = tmp_path / "data" / "dag-runs" / "dag-run_20260101_000000Z_r2" / "a_1_1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.jsonl").write_text(
+        '{"nodes": [{"step": {"name": "x"}, "status": 2, '
+        '"outputVariables": {"MTM_CATEGORY": "MTM_CATEGORY=BOGUS"}}]}\n'
+    )
+    evidence = _step_evidence_from_state(tmp_path, "r2")
+    assert evidence[0]["category"] == ""
 
 
 def test_parse_status_handles_start_and_status_verbs(tmp_path: Path):
@@ -84,11 +140,13 @@ def test_pid_from_events_reads_last_pid(tmp_path: Path):
 
 
 def test_docker_backend_argv_uses_user_and_bench_mount(tmp_path: Path):
+    (tmp_path / ".mtm").mkdir()
     runner = DockerRunner("img:1", tmp_path, user="1000:1000")
     argv = runner.container_argv(["dagu", "version"])
     assert argv[:2] == ["docker", "run"]
     assert "--user" in argv and "1000:1000" in argv
-    assert f"{tmp_path}:/bench" in argv
+    assert f"{tmp_path}:/bench:ro" in argv  # inputs read-only
+    assert f"{tmp_path / '.mtm'}:/bench/.mtm" in argv  # only state is writable
     assert argv[-2:] == ["img:1", "dagu"] or argv[-3] == "img:1"
 
 
@@ -97,6 +155,13 @@ def test_docker_runner_never_chowns(tmp_path: Path):
     runner = DockerRunner("img:1", tmp_path, user="1000:1000")
     argv = runner.container_argv(["dagu", "version"])
     assert "chown" not in argv
+
+
+def test_docker_run_arg_carries_owner_label(tmp_path: Path):
+    (tmp_path / ".mtm").mkdir()
+    runner = DockerRunner("img:1", tmp_path, user="1000:1000", run_label="run-x")
+    argv = runner.container_argv(["dagu", "start"])
+    assert "mtm.run-id=run-x" in argv
 
 
 def test_make_adapter_unknown_backend(tmp_path: Path):

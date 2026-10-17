@@ -12,8 +12,10 @@ The non-docker unit tests of the adapter (status mapping, reconciliation) live i
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,15 +55,30 @@ class TestDockerBackend:
         # bench-local state, written by the container, on the host
         assert (bench / ".mtm" / "dagu" / "data" / "dag-runs").is_dir()
 
-    def test_failed_step_is_a_finding_with_full_contract(self, bench: Path):
+    def test_failed_step_is_a_tool_failure_by_default(self, bench: Path):
+        """An untyped failing command is a tool/workflow failure (exit 30)."""
         _write_dag(bench, "steps:\n  - name: boom\n    command: 'exit 3'\n")
         record, code = run_mtm_json("workflow", "run", "--run-id", "d-fail", cwd=bench)
-        assert code == 10, record  # finding, not tool failure
+        assert code == 30, record  # tool failure, NOT a test finding
+        assert record["status"] == "FAILED"
+        assert record["code"] == "TOOL_FAILED"
+        assert record["category"] == "TOOL"
+        assert record["cause"]  # the failing step is named
+        assert record["action"]
+
+    def test_typed_test_finding_is_exit_10(self, bench: Path):
+        """A step reporting MTM_CATEGORY=TEST_FINDING is a finding -> exit 10."""
+        _write_dag(
+            bench,
+            "steps:\n  - name: check\n    command: |\n"
+            "      echo MTM_CATEGORY=TEST_FINDING\n      exit 1\n"
+            "    output: MTM_CATEGORY\n",
+        )
+        record, code = run_mtm_json("workflow", "run", "--run-id", "d-finding", cwd=bench)
+        assert code == 10, record
         assert record["status"] == "FAILED"
         assert record["code"] == "TEST_ASSERTION"
         assert record["category"] == "TEST_FINDING"
-        assert record["cause"]  # the failure reason is present
-        assert record["action"]
 
     def test_state_files_are_owned_by_the_invoking_user(self, bench: Path):
         _write_dag(bench, "steps:\n  - name: ok\n    command: echo ok\n")
@@ -79,6 +96,80 @@ class TestDockerBackend:
         assert code == 0
         assert record["status"] == "SUCCEEDED"
 
+    def _wait_for_owner(self, run_id: str, timeout: float = 20.0) -> bool:
+        import time
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = subprocess.run(
+                ["docker", "ps", "-q", "--filter", f"label=mtm.run-id={run_id}"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if found:
+                return True
+            time.sleep(0.5)
+        return False
+
+    def test_running_docker_run_is_not_reported_interrupted(self, bench: Path):
+        """A genuinely running container must read as RUNNING, not INTERRUPTED.
+
+        Regression for the docker liveness path: the owner container is found by
+        its mtm.run-id label while it runs, and only a killed owner (no running
+        container) reconciles to INTERRUPTED.
+        """
+        import subprocess
+
+        _write_dag(bench, "steps:\n  - name: slow\n    command: 'sleep 8'\n")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "mtm.cli", "--json", "workflow", "run", "--run-id", "d-live"],
+            cwd=str(bench),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, "PYTHONPATH": str(REPO)},
+        )
+        try:
+            assert self._wait_for_owner("d-live"), "owner container never appeared"
+            record, code = run_mtm_json("workflow", "status", "--run-id", "d-live", cwd=bench)
+            assert record["status"] == "RUNNING", record
+            assert record["owner_alive"] is True, record
+            assert record["liveness_evidence"]
+        finally:
+            proc.wait(timeout=30)
+
+    def test_killed_docker_run_reconciles_to_interrupted(self, bench: Path):
+        """Killing the owner container reconciles a stale running run."""
+        import subprocess
+
+        _write_dag(bench, "steps:\n  - name: slow\n    command: 'sleep 30'\n")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "mtm.cli", "--json", "workflow", "run", "--run-id", "d-kill"],
+            cwd=str(bench),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, "PYTHONPATH": str(REPO)},
+        )
+        try:
+            assert self._wait_for_owner("d-kill"), "owner container never appeared"
+            ids = subprocess.run(
+                ["docker", "ps", "-q", "--filter", "label=mtm.run-id=d-kill"],
+                capture_output=True, text=True,
+            ).stdout.split()
+            assert ids, "no owner container to kill"
+            subprocess.run(["docker", "kill", *ids], check=False, capture_output=True)
+        finally:
+            proc.wait(timeout=30)
+        record, code = run_mtm_json("workflow", "status", "--run-id", "d-kill", cwd=bench)
+        assert record["status"] == "INTERRUPTED", record
+        assert record["owner_alive"] is False, record
+        assert code == 130
+
+    def test_run_cannot_write_a_selected_source(self, bench: Path):
+        """The bench is mounted read-only: a step cannot tamper with inputs."""
+        src = bench / "selected.c"
+        src.write_text("int f(void){return 0;}\n")
+        before = src.read_text()
+        _write_dag(bench, "steps:\n  - name: tamper\n    command: 'echo hacked > /bench/selected.c'\n")
+        run_mtm_json("workflow", "run", "--run-id", "d-ro", cwd=bench)
+        assert src.read_text() == before, "a step modified a selected input"
+
 
 @pytest.mark.skipif(HOST_DAGU_DIR is None, reason="no host dagu available")
 class TestHostBackend:
@@ -90,9 +181,9 @@ class TestHostBackend:
             "--backend", "host", "workflow", "run", "--run-id", "h-fail",
             cwd=bench, env=self.CLI_ENV,
         )
-        assert code == 10, record
+        assert code == 30, record  # untyped failure -> tool failure
         assert record["backend"] == "host"
-        assert record["code"] == "TEST_ASSERTION"
+        assert record["code"] == "TOOL_FAILED"
 
 
 def test_docker_backend_does_not_require_host_dagu(bench: Path):
