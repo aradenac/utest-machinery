@@ -54,7 +54,7 @@ Le statut d'un risque ne passe à `En attente de confirmation` qu'après une app
 
 Ce registre permanent regroupe les **familles d'impacts** observées ou mises en évidence pendant les travaux, essais et revues de **toutes les features**. Les entrées `IMP-*` restent suivies dans le temps : une nouvelle occurrence est associée à l'impact existant si elle relève du même mécanisme, ou reçoit un nouvel ID si sa cause généralisée est distincte. **La correction ponctuelle d'une PR ne constitue pas une action préventive** et reste suivie dans cette PR/Beads.
 
-**Premières observations :** [PR #5 — première feature, bootstrap et contrôle](https://github.com/aradenac/utest-machinery/pull/5), [première revue](https://github.com/aradenac/utest-machinery/pull/5#pullrequestreview-5559839228), [deuxième revue](https://github.com/aradenac/utest-machinery/pull/5#pullrequestreview-5560023666) et [troisième revue](https://github.com/aradenac/utest-machinery/pull/5#pullrequestreview-5560125577), le 17 octobre 2026. Il s'agit de constats de revue **avant fusion**, pas d'incidents de production ni d'essais tous reproduits indépendamment sur WSL. Les **causes probables restent des hypothèses**, à confirmer lors de l'analyse des éléments disponibles et des futures observations.
+**Premières observations :** [PR #5 — première feature, bootstrap et contrôle](https://github.com/aradenac/utest-machinery/pull/5), [première revue](https://github.com/aradenac/utest-machinery/pull/5#pullrequestreview-5559839228), [deuxième revue](https://github.com/aradenac/utest-machinery/pull/5#pullrequestreview-5560023666) et [troisième revue](https://github.com/aradenac/utest-machinery/pull/5#pullrequestreview-5560125577), le 17 octobre 2026. Il s'agit de constats de revue **avant fusion**, pas d'incidents de production ni d'essais tous reproduits indépendamment sur WSL. Les **causes probables restent des hypothèses**, à confirmer lors de l'analyse des éléments disponibles et des futures observations. **Extension (18 octobre 2026) :** [PR #14, revue indépendante de l'étape 2](https://github.com/aradenac/utest-machinery/pull/14#pullrequestreview-5560550060), rapprochée du code, du worklog, de Beads et des décisions 0010/0011. Les constats B2–B6 relèvent d'une inspection du code et ne sont pas tous reproduits indépendamment. B1 est une **divergence entre décision documentée et contrat normatif**, dont l'historique d'arbitrage utilisateur reste incertain, et non une preuve de dépassement d'autorité de l'agent.
 
 ### Matrice des impacts et généralisation
 
@@ -79,21 +79,23 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 ## Actions préventives — suivi global
 
-**AP-01 à AP-05 sont désormais appliquées aux consignes de développement**, et AP-01/AP-02/AP-03 sont intégrées aux critères de passage pertinents ; **leur efficacité reste à vérifier lors des futures revues**. L'application signifie que la mesure de processus est en place, pas que tous les risques associés sont maîtrisés. Les actions répondent à des mécanismes systémiques, indépendamment de la PR qui a révélé leur existence. Éviter de créer de nouveaux outils, sous-agents ou procédures coûteuses pour leur application.
+**AP-01 à AP-05 sont désormais appliquées aux consignes de développement**, et AP-01/AP-02/AP-03 sont intégrées aux critères de passage pertinents ; **leur efficacité reste à vérifier lors des futures revues**. L'application signifie que la mesure de processus est en place, pas que tous les risques associés sont maîtrisés. Les actions répondent à des mécanismes systémiques, indépendamment de la PR qui a révélé leur existence. Éviter de créer des outils ou procédures coûteuses : le sous-agent de vérification ciblé, décidé comme expérimentation pour IMP-12, réutilise les moyens Claude Code existants et n'ajoute ni seconde base ni matrice de suivi.
 
 ### AP-01 — Preuve par critère d'acceptation
 
-**Cible :** IMP-01, IMP-02, IMP-03, IMP-04, IMP-05, IMP-06, **IMP-11 et IMP-12** ; couvre également la faiblesse transversale des « CI vertes mais comportement utilisateur non prouvé » (R14).
+**Cible :** IMP-01, IMP-02, IMP-03, IMP-04, IMP-05, IMP-06, **IMP-11, IMP-12, IMP-13 et IMP-14** ; couvre également la faiblesse transversale des « CI vertes mais comportement utilisateur non prouvé » (R14).
 
 **Action appliquée (17 octobre 2026) :** les règles sont intégrées dans [`CLAUDE.md`](../../CLAUDE.md) et les [critères de passage du plan](../plan/implementation.md). **Avant ouverture ou mise à jour d'une PR**, l'agent associe chaque critère d'acceptation applicable à une **commande/test exécuté, son résultat observé et une référence de preuve**, ou le marque explicitement `NOT_DEMONSTRATED` avec justification, dans le **ticket Beads de la feature**. La PR référence Beads et les résultats, **sans deuxième matrice** ; un critère obligatoire non démontré bloque la déclaration « prêt pour revue », même si la CI est verte. **Après un finding de revue**, l'agent identifie le contrat général violé et vérifie les **cas voisins/contrastés pertinents** en plus du symptôme initial, puis consigne les preuves dans Beads. Ces contrôles restent proportionnés au jalon en cours.
 
-**Vérification d'efficacité à venir :** dès les prochaines PR de features et leurs éventuelles corrections, contrôler que chaque critère obligatoire dispose d'une preuve pertinente, que les cas voisins sont considérés après les findings et que les défauts détectables avant PR diminuent, sans surcharge documentaire. **Point de surveillance IMP-12 :** vérifier notamment les cas mixtes ou contrastés issus d'un contrat corrigé ; la troisième revue de PR #5 ne démontre pas encore l'efficacité d'AP-01, intégrée à `main` après le démarrage de cette feature.
+**Complément mis en place (18 octobre 2026, efficacité non démontrée) :** avant une PR de feature, la consigne [`CLAUDE.md`](../../CLAUDE.md) invoque le skill [`/verify-feature`](../../.claude/skills/verify-feature/SKILL.md), exécuté dans un contexte séparé par le sous-agent [`contract-reviewer`](../../.claude/agents/contract-reviewer.md). Il examine les contrats et le code avant de consulter les affirmations Beads/worklog, recherche des contre-exemples ciblés et renvoie directement son résultat à l'agent développeur. Celui-ci corrige, teste et consigne les constats retenus dans **le même Beads**, sans second rapport permanent. Une passe complète avant PR et un recontrôle ciblé après corrections substantielles ; la revue externe GitHub est conservée. **Aucune efficacité du sous-agent n'est encore démontrée.**
+
+**Vérification d'efficacité à venir :** dès les prochaines PR de features et leurs éventuelles corrections, contrôler que chaque critère obligatoire dispose d'une preuve pertinente, que les cas voisins sont considérés après les findings et que les défauts détectables avant PR diminuent, sans surcharge documentaire ; suivre aussi les vrais défauts détectés par le sous-agent, ses fausses alertes et son coût. **Point de surveillance IMP-12 :** vérifier notamment les cas mixtes ou contrastés issus d'un contrat corrigé ; la troisième revue de PR #5 ne démontre pas encore l'efficacité d'AP-01, intégrée à `main` après le démarrage de cette feature.
 
 **Statut :** **🟡 En attente de confirmation** — mesure appliquée aux consignes et au plan via la [PR #8](https://github.com/aradenac/utest-machinery/pull/8) (17 octobre 2026) ; **efficacité non encore démontrée**, à examiner lors des prochaines revues de features.
 
 ### AP-02 — Qualification dans l'environnement réel
 
-**Cible :** IMP-01, IMP-05 et IMP-06 ; en lien avec R13 et R14.
+**Cible :** IMP-01, IMP-05, IMP-06 et IMP-14 ; en lien avec R13 et R14.
 
 **Action appliquée (17 octobre 2026) :** la règle dans [`CLAUDE.md`](../../CLAUDE.md) et le [plan de développement](../plan/implementation.md) exige **un essai d'intégration local représentatif lorsqu'une feature traverse une frontière d'environnement** (CLI installée, image Docker, exécuteur, compilateur ou LLM). L'essai doit suivre **la commande publique jusqu'au résultat observable**, à partir de l'artefact réellement distribué quand le packaging est pertinent. Vérifier les dépendances minimales, les montages, la propriété des fichiers et **le refus effectif d'une écriture sur les inputs** quand applicable, pas seulement leurs hashes inchangés. Conserver commande, résultat et éventuelles limites dans les **preuves Beads d'AP-01**, référencées par la PR ; pas de nouvelle matrice ni d'essai lourd par test unitaire.
 
@@ -103,7 +105,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 ### AP-03 — Tests d'invariants et de cycle de vie
 
-**Cible :** IMP-02, IMP-03, IMP-04, IMP-07 et **IMP-11** ; en lien avec R05, R12, R13 et R16.
+**Cible :** IMP-02, IMP-03, IMP-04, IMP-07, **IMP-11 et IMP-13** ; en lien avec R05, R12, R13 et R16.
 
 **Action appliquée (17 octobre 2026) :** [`CLAUDE.md`](../../CLAUDE.md) impose désormais à l'agent, pour toute feature manipulant **un état persistant, des transitions de cycle de vie ou des classifications/agrégations de résultats**, d'identifier quelques **invariants critiques** et de vérifier les **séquences et cas contrastés pertinents**. Exemples selon la feature : écriture → lecture, échec → consultations répétées, réinitialisation → conservation des champs non modifiés, interruption → reprise, `RUNNING` ≠ échec, échec de test + panne d'outil → panne non masquée. **Les schémas persistants sont validés à l'écriture et à la lecture.** Les invariants applicables et les tests/commandes réellement exécutés (ou `NOT_DEMONSTRATED` avec motif) utilisent **les mêmes preuves Beads qu'AP-01**, sans seconde matrice. Le [plan de développement](../plan/implementation.md) rend **bloquante** la non-démonstration d'un invariant obligatoire du jalon courant. Pas de framework, commande ou protocole exhaustif ajouté.
 
@@ -113,7 +115,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 ### AP-04 — Mémoire de travail et instructions à jour
 
-**Cible :** IMP-08 et IMP-09 ; en lien avec R20.
+**Cible :** IMP-08 et IMP-09 (dont la divergence de décision documentée en PR #14 B1) ; en lien avec R20.
 
 **Action appliquée (17 octobre 2026) :** la règle dans [`CLAUDE.md`](../../CLAUDE.md) distingue **`worklog/` = mémoire chronologique détaillée** (tentatives, erreurs, observations), **Beads = décisions finales/alternatives et preuves concises**, **PR = livrables, résultats et références Beads**, **`docs/` = référentiel normatif**. Avant publication/mise à jour d'une PR, l'agent confronte sa branche aux **instructions applicables de `main`** et les réconcilie sans supprimer les règles du worklog. Aucun second backlog ou doublon des preuves n'est créé.
 
@@ -133,7 +135,7 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 ### Revue et mesure d'efficacité
 
-Les impacts **IMP-01 à IMP-12** sont des **familles globales suivies au cours du projet**, initialement révélées par la PR #5 ; de nouvelles occurrences pourront provenir de toutes les PR, essais et validations. Ils ne sont pas « corrigés » du seul fait de l'inscription d'une prévention. Les causes probables restent à confirmer à partir des preuves `worklog/`, Beads et des prochaines campagnes. **Les corrections ponctuelles restent suivies dans chaque PR et non dans cette matrice.**
+Les impacts **IMP-01 à IMP-14** sont des **familles globales suivies au cours du projet** ; IMP-01 à IMP-12 ont été initialement révélés par la PR #5, IMP-13 et IMP-14 lors de la revue de PR #14 ; de nouvelles occurrences pourront provenir de toutes les PR, essais et validations. Ils ne sont pas « corrigés » du seul fait de l'inscription d'une prévention. Les causes probables restent à confirmer à partir des preuves `worklog/`, Beads et des prochaines campagnes. **Les corrections ponctuelles restent suivies dans chaque PR et non dans cette matrice.**
 
 Les trois premières revues ont notamment alimenté **R05** (faux verdicts et illusion de conformité), **R14** (CI non suffisante), **R16** (états trompeurs) et **R20** (coût de correctifs locaux). **Les scores et statuts des risques restent inchangés.** **AP-01 à AP-05** sont appliquées au processus ; leur efficacité n'est pas encore confirmée. La mitigation **R20** est également appliquée en tant que consigne de simplicité, avec contrôle d'efficacité ultérieur.
 
