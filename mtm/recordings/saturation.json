@@ -1,0 +1,60 @@
+{
+  "fixture": "saturation",
+  "note": "Recorded generation response used offline (no token) by fast PR CI and tests. It mirrors what the in-image DeepSeek route returns for this fixture. Ground truth (examples/expected-outcomes.md) is NOT embedded here; the oracle values below are taken from the SDD text only.",
+  "match": {
+    "functions": ["saturate_u16"],
+    "requirements": ["SAT-001", "SAT-002", "SAT-004"]
+  },
+  "identity": {
+    "model": "recorded-deepseek-v4.1-flash",
+    "prompt_version": "plan-v2"
+  },
+  "response": {
+    "scenarios": [
+      {
+        "id": "S1",
+        "title": "input at or below ceiling is returned unchanged",
+        "function": "saturate_u16",
+        "requirement_ids": ["SAT-001", "SAT-004"],
+        "technique": "boundary/equivalence",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [5, 10], "expected": 5, "note": "below ceiling"},
+          {"args": [10, 10], "expected": 10, "note": "equal to ceiling"},
+          {"args": [0, 0], "expected": 0, "note": "zero"},
+          {"args": [65535, 65535], "expected": 65535, "note": "maximum"}
+        ],
+        "oracle": {
+          "kind": "SPECIFIED",
+          "statement": "For input <= ceiling the function returns input.",
+          "rationale": "SAT-001 states the value is returned unchanged at or below the ceiling.",
+          "proposal": ""
+        }
+      },
+      {
+        "id": "S2",
+        "title": "input above ceiling is clamped to the ceiling",
+        "function": "saturate_u16",
+        "requirement_ids": ["SAT-002", "SAT-004"],
+        "technique": "boundary",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [11, 10], "expected": 10, "note": "above a nonzero ceiling"},
+          {"args": [65535, 10], "expected": 10, "note": "far above ceiling"},
+          {"args": [1, 0], "expected": 0, "note": "zero ceiling, above"}
+        ],
+        "oracle": {
+          "kind": "SPECIFIED",
+          "statement": "For input > ceiling the function returns ceiling.",
+          "rationale": "SAT-002 states the clamped result equals the ceiling value.",
+          "proposal": ""
+        }
+      }
+    ],
+    "omitted": [
+      {"function": "saturate_u16", "reason": "SAT-003 (no persistent state) is a purity property with no observable state in this interface; noted rather than asserted."}
+    ]
+  }
+}

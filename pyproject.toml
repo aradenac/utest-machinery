@@ -23,7 +23,13 @@ mtm = "mtm.cli:main"
 include = ["mtm*"]
 
 [tool.setuptools.package-data]
-mtm = ["schemas/*.json", "workflows/*.yaml", "image/*"]
+mtm = [
+    "schemas/*.json",
+    "workflows/*.yaml",
+    "image/*",
+    "recordings/*.json",
+    "vendor/unity/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

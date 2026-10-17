@@ -64,3 +64,43 @@ jobs:
           cd /tmp/bench
           PYTHONPATH="$REPO" python3 -m mtm.cli workflow run --run-id ci-ro || true
           grep -q 'return 0' /tmp/bench/selected.c
+
+  # PR 2: generation THROUGH THE CLI with the recorded (mock) provider. Offline
+  # and token-free, so it needs no credential and cannot reach any LLM. Proves a
+  # fresh selected C/SDD fixture becomes an executable, runnable unit suite, and
+  # that generation leaves the selected inputs byte-identical.
+  generate-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CLI dependencies
+        run: python3 -m pip install --quiet PyYAML jsonschema
+      - name: Generate and run a unit suite from a fixture (mock provider)
+        run: |
+          REPO="$PWD"
+          mkdir -p /tmp/gen-bench
+          cp examples/mocked-sensor/* /tmp/gen-bench/
+          cd /tmp/gen-bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli init .
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sensor.c --kind source
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sensor.h --kind source
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sdd.md --kind spec
+          PYTHONPATH="$REPO" python3 -m mtm.cli --json generate --provider mock \
+            | tee /tmp/gen.json
+          python3 -c "import json; r=json.load(open('/tmp/gen.json')); \
+            assert r['status'] == 'SUCCEEDED', r; \
+            assert r['smoke']['built'] and r['smoke']['ran'], r; \
+            assert r['smoke']['unity']['total'] >= 1, r"
+      - name: The selected inputs are unchanged by generation
+        run: |
+          REPO="$GITHUB_WORKSPACE"
+          cd /tmp/gen-bench
+          sha256sum sensor.c sensor.h sdd.md > /tmp/before.txt
+          PYTHONPATH="$REPO" python3 -m mtm.cli --json generate --provider mock >/dev/null
+          sha256sum -c /tmp/before.txt
+

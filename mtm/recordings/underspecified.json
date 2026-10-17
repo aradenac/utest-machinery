@@ -1,0 +1,47 @@
+{
+  "fixture": "underspecified",
+  "note": "Recorded generation response used offline (no token). Demonstrates SYS-010: bytes 2..255 have no SDD oracle, so those cases stay UNDETERMINED with a clarification proposal, even though the implementation returns MODE_INVALID.",
+  "match": {"functions": ["decode_mode"], "requirements": ["MODE-001", "MODE-002"]},
+  "identity": {"model": "recorded-deepseek-v4.1-flash", "prompt_version": "plan-v2"},
+  "response": {
+    "scenarios": [
+      {
+        "id": "S1",
+        "title": "defined input bytes decode to their modes",
+        "function": "decode_mode",
+        "requirement_ids": ["MODE-001", "MODE-002"],
+        "technique": "equivalence partition",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [0], "expected": "MODE_IDLE", "note": "MODE-001"},
+          {"args": [1], "expected": "MODE_RUN", "note": "MODE-002"}
+        ],
+        "oracle": {"kind": "SPECIFIED",
+                   "statement": "Byte 0 maps to MODE_IDLE and byte 1 to MODE_RUN.",
+                   "rationale": "MODE-001 and MODE-002 state the two defined mappings.",
+                   "proposal": ""}
+      },
+      {
+        "id": "S2",
+        "title": "undefined input bytes have no SDD oracle",
+        "function": "decode_mode",
+        "requirement_ids": [],
+        "technique": "unspecified domain",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [2], "expected": null, "note": "undefined by the SDD"},
+          {"args": [255], "expected": null, "note": "undefined by the SDD"}
+        ],
+        "oracle": {"kind": "UNDETERMINED",
+                   "statement": "Behaviour for bytes 2..255 is not defined by the SDD.",
+                   "rationale": "MODE-001/002 define only 0 and 1; no requirement decides the rest.",
+                   "proposal": "Specify the intended handling for undefined bytes (reject with MODE_INVALID vs another default) and add a requirement id for it."}
+      }
+    ],
+    "omitted": [
+      {"function": "decode_mode", "reason": "MODE-003 (no persistent state) is a purity property with no observable state in this interface."}
+    ]
+  }
+}

@@ -54,6 +54,7 @@ from .paths import (
     find_bench_root,
     logs_dir,
     new_bench_id,
+    read_json,
     read_last_operation,
     require_bench_root,
     sha256_file,
@@ -66,8 +67,6 @@ CREDENTIALS_FILE = Path.home() / ".config" / "utest-machinery" / "credentials.en
 
 #: Commands that are declared in the user guide but belong to later milestones.
 NOT_YET_IMPLEMENTED = {
-    "plan": "PR5",
-    "generate": "PR2",
     "verify": "PR3",
     "interpret": "PR5",
     "report": "PR5",
@@ -680,7 +679,129 @@ def _render_text_dag(steps: list[dict[str, Any]]) -> str:
     return "DAG steps:\n" + "\n".join(lines)
 
 
-# --- not implemented --------------------------------------------------------
+# --- generate / plan (PR 2) -------------------------------------------------
+
+
+def cmd_generate(args: Any, ctx: "Context") -> dict[str, Any]:
+    """Assess, plan and generate a unit-test bench from the selected inputs."""
+    from .generate import INVENTORY_FILE, PLAN_FILE, run_generate
+    from .llm import make_provider
+
+    op = _op_id()
+    root = require_bench_root()
+    config = _load_config(root)
+    if not config.scopes:
+        raise MtmError(
+            code=Code.INPUT_MISSING,
+            message="No inputs are selected, so there is nothing to generate from.",
+            action="Select the source/SDD inputs first, e.g. 'mtm scope add <path> --kind source'.",
+            stage="generate",
+        )
+
+    provider = None
+    if not getattr(args, "dry_run", False):
+        provider = make_provider(
+            getattr(args, "provider", "auto"),
+            image_ref=image_ref(ctx.image_tag),
+            model=getattr(args, "model", "scaleway/deepseek-v4.1-flash"),
+        )
+
+    result = run_generate(root, config.scopes, provider=provider,
+                          dry_run=getattr(args, "dry_run", False))
+    state = root / ".mtm" / "state" / "generate"
+    record = _record(
+        op, "generate", result.status,
+        bench_root=str(root),
+        snapshot_hash=_read_snapshot_hash(state / INVENTORY_FILE),
+        feasibility_counts=result.counts,
+        feasibility=result.feasibility,
+        inventory_path=str(state / INVENTORY_FILE),
+        plan_path=str(state / PLAN_FILE) if result.plan else None,
+        model=result.model,
+        suite=result.suite,
+        smoke=result.smoke,
+        findings=result.findings,
+        dry_run=result.dry_run,
+        exit_code=result.exit_code,
+    )
+    if result.status == "BLOCKED":
+        record.update(
+            message="No selected unit is feasible for host compilation; nothing was generated.",
+            action="Provide the missing headers/build context in scope, or accept the limitation.",
+        )
+    elif result.status == "TOOL_FAILURE":
+        record.update(
+            category=Category.TOOL,
+            code=Code.TOOL_FAILED,
+            message="The generated suite could not be built.",
+            cause=(result.smoke.get("diagnostics", "") or "")[-800:],
+            action="Inspect the build diagnostics; the plan and generated files are preserved.",
+            tool_name="cc",
+        )
+    elif result.findings:
+        record.update(
+            category=Category.TEST_FINDING,
+            code=Code.TEST_ASSERTION,
+            message=f"Generation succeeded and {len(result.findings)} SDD contradiction(s) were found.",
+            action="Review each finding against the SDD; fix the implementation or clarify the SDD.",
+        )
+    else:
+        record.update(message="Generated an executable unit-test bench from the selected inputs.")
+    return record
+
+
+def _read_snapshot_hash(path: Path) -> str:
+    data = read_json(path)
+    return str(data.get("snapshot_hash", "")) if isinstance(data, dict) else ""
+
+
+def cmd_plan(args: Any, ctx: "Context") -> dict[str, Any]:
+    """View the stored plan: planned vs generated scenarios and their gaps (SYS-009)."""
+    op = _op_id()
+    root = require_bench_root()
+    state = root / ".mtm" / "state" / "generate"
+    plan = read_json(state / "plan.json")
+    suite = read_json(state / "suite.json")
+    feasibility = read_json(state / "feasibility.json")
+    if not isinstance(plan, dict):
+        raise MtmError(
+            code=Code.INPUT_MISSING,
+            message="No plan exists yet for this bench.",
+            action="Run 'mtm generate' to plan and generate the test bench.",
+            stage="plan",
+        )
+    scenarios = plan.get("scenarios", [])
+    generated = set((suite or {}).get("test_functions", []))
+    rows = []
+    for scenario in scenarios:
+        unit = scenario.get("unit_id", "")
+        test_name = f"test_{unit.replace('unit-', 'u')}_{scenario.get('id')}".replace("-", "_")
+        rows.append({
+            "id": scenario.get("id"),
+            "function": scenario.get("function"),
+            "requirement_ids": scenario.get("requirement_ids", []),
+            "oracle_kind": (scenario.get("oracle") or {}).get("kind"),
+            "generated": test_name in generated,
+            "test": test_name,
+        })
+    undetermined = [r for r in rows if r["oracle_kind"] == "UNDETERMINED"]
+    return _record(
+        op, "plan", "SUCCEEDED",
+        bench_root=str(root),
+        model=plan.get("model", {}),
+        snapshot_hash=plan.get("snapshot_hash", ""),
+        validation=plan.get("validation", {}),
+        feasibility_counts=(feasibility or {}).get("counts", {}),
+        scenarios=rows,
+        planned=len(rows),
+        generated=sum(1 for r in rows if r["generated"]),
+        undetermined=len(undetermined),
+        proposals=[
+            {"scenario": s.get("id"), "proposal": (s.get("oracle") or {}).get("proposal")}
+            for s in scenarios
+            if (s.get("oracle") or {}).get("proposal")
+        ],
+    )
 
 
 def cmd_not_implemented(args: Any, ctx: "Context") -> dict[str, Any]:
