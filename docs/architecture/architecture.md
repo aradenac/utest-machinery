@@ -81,41 +81,44 @@ flowchart TD
 
 Compilation and smoke runs are concrete evidence, **not proof of target equivalence**. Preserve original translation units where possible; only extract/transform isolated work copies when necessary. Link each replacement to the original target dependency and contract; register all compiler flags, ABI assumptions, conditional macros, source hashes and mock behavior.
 
-## Formal requirements
+## Product requirements
 
-| ID | Requirement | Acceptance evidence |
-| --- | --- | --- |
-| SYS-001 | The only mandatory user interface SHALL be a standalone CLI, suitable for WSL and non-interactive CI. | CLI end-to-end sample |
-| SYS-002 | All test engines, workflow runtime and LLM harness SHALL be packaged in a reusable pinned Docker image. | Clean host bootstrap |
-| SYS-003 | All project-specific files, journals, generated tests and outcomes SHALL be outside Docker in one project bench root. | Recreate container and resume |
-| SYS-004 | Original code, SDD and other selected inputs SHALL remain byte-for-byte unchanged. | Before/after SHA-256, read-only mounts |
-| SYS-005 | Multiple code/spec repositories and explicit scope additions/removals SHALL be supported without copying originals. | Multi-repository fixture |
-| SYS-006 | A machine-readable, human-reviewable verification plan SHALL precede test generation. | Plan artifact and decision references |
-| SYS-007 | Generated assertions SHALL carry requirement/provenance links; semantic oracle changes SHALL require review. | Rejected silent oracle-change test |
-| SYS-008 | Feasibility SHALL classify units Ready, Adapted or Blocked, with diagnostics and host-fidelity limitations. | Target-specific fixture |
-| SYS-009 | Existing tests SHALL be incrementally maintained with stable IDs, reproducible diffs and obsolescence records. | Revisions fixture |
-| SYS-010 | `verify` SHALL recreate all deterministic test/evidence outputs without invoking any LLM. | Offline replay |
-| SYS-011 | `interpret` SHALL re-analyze a frozen campaign without modifying raw evidence. | Reinterpretation diff |
-| SYS-012 | The engine SHALL avoid redundant suites by reusing functional scenarios across instrumentation profiles. | Campaign manifest |
-| SYS-013 | Each verdict SHALL trace input revision → SDD requirement → code/function → test → run → evidence. | Report link integrity |
-| SYS-014 | Reported findings SHALL distinguish code defect, SDD gap, conflict, insufficient evidence and tool/environment failure. | Classification fixtures |
-| SYS-015 | Recommendations SHALL include root cause, exact location, suggested change, expected behavior, supporting evidence, risk and validation procedure. | Actionable finding fixture |
-| SYS-016 | Workflow SHALL be headless, textual, auditable, failure-resilient and optionally visually inspectable. | Crash/resume qualification |
-| SYS-017 | Personal LLM credentials SHALL stay outside project repositories, Docker images, logs and saved evidence. | Secret-leak tests |
-| SYS-018 | Project state and tool selections SHALL be versioned for collaboration and reproducibility. | Cross-machine replay |
-| SYS-019 | Compiler, mutation and other tool errors SHALL never be misreported as passing functional results. | Injected tool failures |
-| SYS-020 | Verification coverage SHALL account for selected but untested/blocked units; exclusions require explanation. | Blocked denominator test |
-| SYS-021 | LLM actions SHALL use constrained, logged tool calls and bounded iteration budgets; no unrestricted host access. | Agent policy test |
-| SYS-022 | UI-free workflow and GitHub-rendered diagrams SHALL be available; GUI editing SHALL never be mandatory. | Headless run + diagram review |
-| SYS-023 | The report SHALL distinguish host measurements from MCU properties and avoid unearned conformity claims. | Review of target-dependent fixture |
-| SYS-024 | Source, SDD and generated input content SHALL be treated as untrusted data, not agent instructions. | Prompt-injection qualification |
-| SYS-025 | Every executed tool and generated artifact SHALL carry hashes/versions sufficient for auditing a frozen campaign. | Provenance replay |
-| SYS-026 | A campaign SHALL record not-selected, unsupported, blocked, attempted and completed checks separately. | Completeness matrix |
-| SYS-027 | Discovery SHALL inspect only selected input roots and SHALL run feasibility assessment automatically when scope or relevant inputs change. | Unselected-directory sentinel and scope-change test |
-| SYS-028 | The plan view SHALL show expected cases, generated cases, executed cases, evidence, gaps and applicability, without claiming test counts prove correctness. | Planned/generated/executed comparison fixture |
-| SYS-029 | The CLI SHALL expose distinct generate, offline verify, interpret and report operations; each SHALL respect read/write boundaries. | CLI behavioral integration tests |
-| SYS-030 | CI SHALL exercise all specified subsystem contracts, user workflows, security/failure modes and qualification examples, with explicit reporting of untested cases. | CI test plan and coverage matrix |
-| SYS-031 | Headless CI SHALL accept short-lived LLM credentials only from an external secret store and SHALL never print, archive or commit them; offline tests SHALL need none. | Secret-redaction and disconnected CI tests |
+Requirements below express **observable behavior**; schemas are specified in [data contracts](data-contracts.md), LLM review rules in [automation policy](automation-policy.md), test methods in [verification strategy](verification-strategy.md) and workflow-engine options in [workflow engines](workflow-engines.md). Acceptance is defined by the [CI/manual plan](../qualification/ci-and-manual-tests.md) and [C/SDD fixtures](../qualification/qualification.md).
+
+| ID | Verifiable requirement |
+| --- | --- |
+| SYS-001 | A standalone WSL CLI SHALL implement documented commands and noninteractive invocation; no GUI SHALL be mandatory. |
+| SYS-002 | The CLI SHALL bootstrap/check a version-pinned reusable Docker image containing workflow, LLM harness and deterministic tools. |
+| SYS-003 | Every project-specific persistent file SHALL reside in one externally mounted bench root; rebuilding the image SHALL preserve it. |
+| SYS-004 | Selected original inputs SHALL be mounted read-only and retain byte-identical hashes after all operations. |
+| SYS-005 | The tool SHALL inspect only explicitly selected source/specification roots, including roots in multiple repositories; no unrelated workspace discovery. |
+| SYS-006 | Scope add/remove SHALL persist the selection, record impact and invalidate affected derived artifacts without deleting historical evidence. |
+| SYS-007 | Native feasibility SHALL run automatically for selected units, classifying READY, ADAPTED or BLOCKED with diagnostic and fidelity assumptions. |
+| SYS-008 | The system SHALL persist an SDD-anchored, versioned verification plan before generating candidate test code. |
+| SYS-009 | The plan viewer SHALL compare planned, generated, executed and evidence-supported scenarios and expose missing links. |
+| SYS-010 | Generated tests SHALL carry SDD-grounded oracle provenance; missing/conflicting expected behavior SHALL be UNDETERMINED. |
+| SYS-011 | Approved oracle semantics SHALL NOT change without an explicit recorded human approval. |
+| SYS-012 | The tool SHALL generate and incrementally maintain mocks, host adaptations, test harnesses and stable test identifiers. |
+| SYS-013 | The functional suite SHALL be reusable across applicable coverage, sanitizer, mutation and compiler profiles without duplicate authoring. |
+| SYS-014 | Verification SHALL capture raw native tool evidence and distinguish unsupported, blocked, skipped, attempted, passed and failed checks. |
+| SYS-015 | `verify` SHALL rebuild and execute the frozen suite without LLM, source edits or oracle edits. |
+| SYS-016 | Each frozen run SHALL record input/test/toolchain hashes, build flags, execution environment, scenario IDs and native evidence locations. |
+| SYS-017 | `interpret` SHALL create a new LLM interpretation of an existing immutable run without modifying original evidence. |
+| SYS-018 | Verdicts SHALL trace requirement source → function → planned scenario → generated test → execution → raw evidence. |
+| SYS-019 | A requirement SHALL NOT be marked conforming solely because an assertion passed or a structural metric reached 100%. |
+| SYS-020 | Findings SHALL separate implementation defect, SDD gap, SDD conflict, insufficient evidence and tool/environment failure. |
+| SYS-021 | Each actionable recommendation SHALL identify evidence, precise location, rationale, proposed change, risks and post-change acceptance test. |
+| SYS-022 | Workflows SHALL be headless and text-versioned; optional diagrams/UI SHALL expose the same DAG and execution status. |
+| SYS-023 | A terminated workflow SHALL retain an external journal and support explicit safe resume or restart, without falsely successful stages. |
+| SYS-024 | Domain test failures SHALL be preserved as evidence and SHALL NOT prevent independent applicable campaigns from running. |
+| SYS-025 | LLM tools SHALL be allowlisted, logged and bounded; project inputs SHALL be treated as data rather than agent instructions. |
+| SYS-026 | User/CI credentials SHALL be supplied outside project data, image layers and archived logs, only to authorized LLM operations. |
+| SYS-027 | Generated C and its execution SHALL use scoped non-root container permissions, time/resource limits and restricted network access. |
+| SYS-028 | All project configuration, checkpoints, accepted decisions and generated test sources SHALL be Git-friendly and transferable between developers. |
+| SYS-029 | Reports SHALL distinguish observed host resource/ABI properties from unverified MCU behavior. |
+| SYS-030 | The CLI SHALL report live stage/status/failures and permit inspection of plan, results and audit evidence. |
+| SYS-031 | The tool SHALL publish a navigable HTML report and machine-readable results referencing immutable campaigns. |
+| SYS-032 | CI and qualification SHALL exercise user workflows, failure/recovery paths, security boundaries and semantic C/SDD samples, disclosing untested scope. |
 
 ## Execution semantics and security
 
