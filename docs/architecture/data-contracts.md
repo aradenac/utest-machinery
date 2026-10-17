@@ -20,8 +20,8 @@ erDiagram
 
 | Object | Mandatory fields and semantics |
 | --- | --- |
-| **ProjectConfig** | `schema_version`, bench ID, selected source/SDD roots and selectors, relative workspace/repository references, campaign policies. Never persist secrets. Paths must resolve within explicitly selected mounts. |
-| **InputSnapshot** | Snapshot ID, content-addressed hash, source repository/revision, canonical selected path, hash, include/build context and time. No original contents copied by default. |
+| **ProjectConfig** | `schema_version`, bench ID, selected source/SDD roots and selectors, explicit include/build-context roots, relative workspace/repository references, campaign policies. Never persist secrets. Paths must resolve within explicitly selected mounts. |
+| **InputSnapshot** | Snapshot ID, content-addressed hash, source repository/revision, canonical selected path, hash, include/build context and time. Originals are referenced, never moved; optional content-addressed copies in the bench or reproducible Git revisions are required for historical re-execution after inputs change. |
 | **Requirement** | Stable ID, snapshot/source anchor (document, section and text span), normative statement, interpreted behavior, ambiguity/conflict markers, review decision. |
 | **Unit** | Stable ID, source path/snapshot/hash, symbol/signature, translation unit, build macros/options, dependency IDs, native feasibility `READY/ADAPTED/BLOCKED`, adaptation assumptions. |
 | **Scenario** | Stable ID, linked requirement IDs and unit IDs, precondition/input/mock sequence, independently stated oracle and provenance, technique/objective, applicability, review state. If no SDD-grounded oracle: `UNDETERMINED`. |
@@ -41,10 +41,21 @@ erDiagram
 - One requirement can map to many units and tests; missing mappings are visible. Planned, generated, executed, covered and requirement-satisfied are **different counts**.
 - Separate runtime `PASS/FAIL/ERROR/SKIPPED` from requirement-level `SUPPORTED/CONTRADICTED/UNDETERMINED/INSUFFICIENT`.
 - Never merge metrics with unlike denominators (e.g. MC/DC, mutation, requirement count). Preserve raw reports.
+- Plan coverage is recorded as separate planned/implemented/executed/evidenced dimensions per scenario. Deleted or waived requirements retain identifiers and justification, and never vanish from the historical denominator.
 - A new LLM interpretation references an immutable campaign and produces its own versioned interpretation ID; never rewrite raw observations.
 - `toolchain.lock` records container digest, compiler versions and compatibility, Ceedling plugins, mutation operators, fuzz parameters and workflow engine version.
 - A scope removal invalidates active links but retains history. On snapshot change, cache invalidation uses both source dependencies and test/oracle relationships.
-- Reproduction requires the frozen suite, scope snapshot, build flags, seeds/time bounds, toolchain and staged mocks. Real LLM generation is **traceable**, not assumed bit-reproducible.
+- Re-execution requires the frozen suite, **the same original source/SDD bytes**, scope snapshot, build flags, seeds/time bounds, toolchain and staged mocks. If changed files cannot be restored from Git or an optional content-addressed bench snapshot, return STALE_INPUT and do not claim replay. Archived evidence may still be inspected and reinterpreted. Real LLM generation is **traceable**, not assumed bit-reproducible.
+
+## Stable operation outputs
+
+| Operation | Reads | May write | Must not write |
+| --- | --- | --- | --- |
+| `init/scope` | User selection, workspace references | Project config and scope journal | Original inputs |
+| `generate` | Selected originals, previous plan, LLM configuration | New plan, candidate tests/mocks and change manifest | Originals, approved oracle semantics without review |
+| `verify` | Frozen suite, matching selected input snapshot, toolchain lock | New immutable run, raw evidence and status index | Generated test content, previous runs, LLM records |
+| `interpret` | Existing frozen run and evidence | New interpretation and report revision | Raw evidence, executed test verdicts, original SDD |
+| `report/plan/status` | Project state | None (except optional local render cache) | Any canonical records |
 
 ## Minimal illustrative result
 
