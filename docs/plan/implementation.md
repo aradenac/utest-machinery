@@ -26,6 +26,8 @@ Each numbered milestone is a **substantial feature PR**, not an arbitrary implem
 
 **Checks for every feature:** positive and negative scenarios, important failure path, input immutability, provenance of claims and explicit NOT_TESTED for anything outside the feature. Do not demand unrelated future checks before their milestone exists.
 
+**Acceptance gate (AP-01):** each **applicable criterion** in the milestone's acceptance column must be backed by an **actually executed** test/command and its observed result, or be explicitly marked **NOT_DEMONSTRATED** with a reason, in the relevant **Beads feature item**. The PR references that item and the essential evidence without introducing a duplicate tracking matrix. **A mandatory criterion without adequate evidence blocks declaring the feature ready for review, regardless of green CI.** When addressing a PR review finding, verify the **underlying contract** and its relevant neighboring/contrasting scenarios, not only the reported symptom. Apply this gate only to the current milestone, without requiring later features' tests.
+
 ## CI policy — fastest safe PR gate
 
 **Local before CI:** the agent runs the *full relevant* tests on WSL first, fixes failures locally, then opens/updates its PR with commands, logs and artifacts. CI is **not the first debugging environment**.
