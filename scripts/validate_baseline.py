@@ -65,9 +65,9 @@ def requirements() -> None:
     if lines != [f"SYS-{n:03d}" for n in range(1, 38)]:
         error("Architecture: expected unique ordered SYS-001..SYS-037")
     plan = (ROOT / "docs/plan/implementation.md").read_text()
-    stages = re.findall(r"^\| \*\*(\d{2}) ", plan, re.MULTILINE)
-    if stages != [f"{n:02d}" for n in range(1, 13)]:
-        error("Implementation plan: expected stages 01..12")
+    stages = re.findall(r"^\| \*\*(\d{1,2}) ", plan, re.MULTILINE)
+    if [int(n) for n in stages] != list(range(1, 7)):
+        error("Implementation plan: expected six consecutive feature milestones 1..6")
     samples = sorted((ROOT / "examples").glob("*/sdd.md"))
     for sdd in samples:
         if not list(sdd.parent.glob("*.c")):

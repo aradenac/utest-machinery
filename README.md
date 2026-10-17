@@ -46,9 +46,11 @@ flowchart LR
 - [Qualification requirements and fixture catalog](docs/qualification/qualification.md)
 - [CI and manual product test plan](docs/qualification/ci-and-manual-tests.md)
 - [Step-by-step construction plan and PR gates](docs/plan/implementation.md)
-- [Implementation agent instructions](AGENTS.md)
+- [Claude Code development instructions](CLAUDE.md)
+- [Developer credentials and Beads setup](docs/development/setup.md)
+- [Workflow errors and recovery](docs/architecture/workflow-failures.md)
 
-**Status:** design/specification baseline. The documented CLI and product runtime are **proposed interfaces**, not implemented commands. The repository contains reference demonstration inputs; generated verification results must not be presented as observed until the machinery executes them.
+**Status:** design/specification baseline, with development planned as six feature PRs, each requiring a separate review and explicit go-ahead before the next. The documented CLI and product runtime are **proposed interfaces**, not implemented commands. The repository contains reference demonstration inputs; generated verification results must not be presented as observed until the machinery executes them.
 
 **Working boundary:** native C execution on Linux under WSL via Docker. QEMU/Renode and on-target testing are a future, separate stage.
 
