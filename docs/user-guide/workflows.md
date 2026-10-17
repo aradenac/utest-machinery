@@ -84,6 +84,10 @@ Scope changes never delete historical evidence. Adding an input triggers discove
 - Reinterpret an existing run: `interpret <run-id>` (LLM), then `report <run-id>`; no test execution.
 - Remove requirements/tests: adjust scope or retire via the versioned plan; inspect affected scenario and coverage gaps. Nothing historical is silently deleted.
 
+## Diagnosing failures
+
+A failed command prints a short reason and next action, then keeps details under the project's test-bench folder. Run `mtm status` for current/last operation, `mtm status --json` for structured error codes, `mtm doctor` for environment/CCR issues and `mtm report <run-id>` for completed or partial campaigns. A failed C assertion is preserved as evidence; a missing header may block only that function; authentication or corrupted input snapshots stop the affected operation. See [error categories and recovery](../architecture/workflow-failures.md).
+
 ## Outputs and audit navigation
 
 - HTML summary: applicability, requirement status, campaign metrics, findings and actionable corrections.
