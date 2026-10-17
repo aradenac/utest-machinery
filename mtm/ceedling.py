@@ -60,12 +60,18 @@ class CeedlingRun:
 
 
 def _unity_summary(stdout: str) -> tuple[int, int, int] | None:
-    """Parse Unity's ``N Tests M Failures K Ignored`` summary, or ``None``."""
-    m = re.search(r"(\d+)\s+Tests\s+(\d+)\s+Failures\s+(\d+)\s+Ignored", stdout)
-    if not m:
+    """Parse Unity's ``N Tests M Failures K Ignored`` summary, or ``None``.
+
+    Ceedling builds and runs **one executable per test file**, so a multi-unit
+    scope produces several per-file summaries and no grand total. Sum them, so a
+    multi-unit bench is not under-counted to its first file. Returns ``None`` when
+    there is no summary at all — the only honest signal that nothing ran.
+    """
+    matches = list(re.finditer(r"(\d+)\s+Tests\s+(\d+)\s+Failures\s+(\d+)\s+Ignored", stdout))
+    if not matches:
         return None
-    total = int(m.group(1))
-    failures = int(m.group(2))
+    total = sum(int(m.group(1)) for m in matches)
+    failures = sum(int(m.group(2)) for m in matches)
     return total, total - failures, failures
 
 

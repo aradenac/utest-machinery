@@ -71,6 +71,25 @@ def _run(ok: bool, returncode: int, *, stdout="", stderr="", timed_out=False,
 # --- B2: a tool fault is never a clean success or a defect -------------------
 
 
+def test_unity_summary_aggregates_every_test_executable():
+    """Ceedling runs one executable per test file, so a multi-unit scope emits
+    several per-file Unity summaries and no grand total. The parser must sum them,
+    not report only the first file, or a multi-unit bench is under-counted."""
+    from mtm.ceedling import _unity_summary, parse_failures
+
+    stdout = (
+        "test_b.c:3:test_x:PASS\n"
+        "2 Tests 1 Failures 0 Ignored\nFAIL\n"
+        "test_a.c:5:test_y:PASS\n"
+        "test_a.c:9:test_z:FAIL: Expected 5 Was 2\n"
+        "3 Tests 0 Failures 0 Ignored\nOK\n"
+    )
+    assert _unity_summary(stdout) == (5, 4, 1)
+    assert _unity_summary("no summary here") is None
+    failures = parse_failures(stdout)
+    assert len(failures) == 1 and failures[0][1] == "Expected 5 Was 2"
+
+
 def test_timeout_is_a_tool_failure_not_a_success(fixture_bench):
     bench = fixture_bench("mocked-sensor")
     result = _generate(bench, lambda *a, **k: _run(False, 124, timed_out=True,
