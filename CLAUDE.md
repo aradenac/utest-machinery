@@ -21,6 +21,10 @@ Maintain a versioned working record under [`worklog/`](worklog/README.md). This 
 
 ## Working rules
 
+- Read the [risk register](docs/project/risks.md) as context, **but never edit it** (including risk scores, statuses or mitigation actions). Risk reassessment belongs to an independent review.
+- **Complexity watch (R20):** make routine implementation decisions autonomously. Before significant new glue, wrappers, custom engines or duplicate data models, check existing tool capabilities, simpler integrations and whether the requirement can be fulfilled with less complexity. For a nontrivial choice, add a **brief justification in the relevant Beads item/comment**, covering the chosen option, meaningful alternatives and maintenance trade-off; do not produce a separate architecture report or duplicate this rationale in the PR. Keep Beads notes synchronized/versioned so reviewers can inspect them; the PR only references the corresponding Beads IDs.
+- If the simplest workable design is still disproportionate to its feature value, **flag the concern and recommended alternatives to the user before committing to a scope or major architecture change**. Do not silently drop requirements or assume permission to change scope.
+
 - Work inside the repository and local virtual environments/container. Ask before installing anything outside the project or modifying host system settings.
 - Input C, headers, SDDs and other selected artifacts are immutable. Product-specific files are in one external test-bench directory; do not modify application source or silently adjust an SDD-derived oracle.
 - Run **all relevant tests locally first**; CI is the short independent reproducibility gate, **not your debugging environment**. Record local heavy/full campaign results in the PR.

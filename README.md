@@ -46,6 +46,7 @@ flowchart LR
 - [Qualification requirements and fixture catalog](docs/qualification/qualification.md)
 - [CI and manual product test plan](docs/qualification/ci-and-manual-tests.md)
 - [Step-by-step construction plan and PR gates](docs/plan/implementation.md)
+- [Risks, amplified impacts and follow-up](docs/project/risks.md)
 - [Claude Code development instructions](CLAUDE.md)
 - [Developer credentials and Beads setup](docs/development/setup.md)
 - [Workflow errors and recovery](docs/architecture/workflow-failures.md)
