@@ -30,6 +30,7 @@ from mtm.ctypes_clang import (
     AliasFact,
     CTypeResolution,
     FunctionFact,
+    HeaderProbe,
     ResolveContext,
     TypeFact,
 )
@@ -169,6 +170,40 @@ def test_to_dict_round_trips_the_fact_set(tmp_path):
     json.dumps(data)  # the fact set must be JSON-serializable (evidence/provenance)
 
 
+def test_probe_headers_ride_the_single_resolution_call_as_a_batched_request(tmp_path):
+    """I1/AP-06: proposed interface headers are compiled by the **same** adapter
+    call — one batched ``probe_headers`` request in the spec, not N invocations —
+    and the driver's ``header_probe`` verdict is charted onto the fact set."""
+    (tmp_path / "repr.h").write_text(REPRESENTATIVE)
+    payload = dict(DRIVER_JSON, header_probe={
+        "mtm_dep_a.h": {"ok": True, "diagnostic": ""},
+        "mtm_dep_b.h": {"ok": False, "diagnostic": "8:9: unknown type name 'Q'"},
+    })
+    resolver, seen = _stub(payload)
+    result = ct.resolve([tmp_path / "repr.h"], bench_root=tmp_path, image="img",
+                        resolver=resolver,
+                        probe_headers={"mtm_dep_a.h": "int a(void);\n",
+                                       "mtm_dep_b.h": "typedef Q Q2;\nint b(Q2 q);\n"})
+    # ONE request carrying both proposed bodies (a batched probe, not N calls).
+    assert seen["spec"]["probe_headers"] == {
+        "mtm_dep_a.h": "int a(void);\n",
+        "mtm_dep_b.h": "typedef Q Q2;\nint b(Q2 q);\n"}
+    assert result.header_probe["mtm_dep_a.h"] == HeaderProbe(ok=True)
+    assert result.header_probe["mtm_dep_b.h"].ok is False
+    assert "Q" in result.header_probe["mtm_dep_b.h"].diagnostic
+    assert result.to_dict()["header_probe"]["mtm_dep_a.h"]["ok"] is True
+
+
+def test_resolve_omits_the_probe_key_when_none_is_proposed(tmp_path):
+    """Contrast: with no proposed header the spec carries no ``probe_headers`` key
+    (the request is unchanged for the resolve-only callers)."""
+    (tmp_path / "repr.h").write_text(REPRESENTATIVE)
+    resolver, seen = _stub(DRIVER_JSON)
+    ct.resolve([tmp_path / "repr.h"], bench_root=tmp_path, image="img",
+               resolver=resolver)
+    assert "probe_headers" not in seen["spec"]
+
+
 # --- offline: failure classification ----------------------------------------
 
 
@@ -289,3 +324,36 @@ def test_real_image_resolves_the_representative_header(tmp_path, product_image):
                          image=product_image)
     assert blocked.status == BLOCKED
     assert any("not found" in d for d in blocked.diagnostics), blocked.diagnostics
+
+
+@pytest.mark.docker
+def test_real_image_gates_a_proposed_header_on_its_compilation(tmp_path, product_image):
+    """DoD (I1/AP-06): the image's real clang decides whether a *proposed* private
+    interface header compiles in the selected context.
+
+    A body naming a type nothing defines (the V3 shape: ``typedef Q Q2;`` with ``Q``
+    nowhere) is refused with a real ``unknown type name`` diagnostic; a body whose
+    alias a selected header *does* define is admitted. Same batched request, same
+    driver call — a compiler verdict, not a lexical guard.
+    """
+    (tmp_path / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\ntypedef unsigned short Q;\nint use(int a);\n#endif\n")
+    result = ct.resolve(
+        [tmp_path / "foo.h"], bench_root=tmp_path, include_dirs=[tmp_path],
+        image=product_image,
+        probe_headers={
+            # V3: `Q2` rests on `Q`, which the selected context does not define.
+            "mtm_dep_v3.h": "typedef Q Q2;\nint dep_write(Q2 q);\n",
+            # Neighbour: an undefined base inside a nested struct body.
+            "mtm_dep_nested.h": "typedef struct { Undef u; } S;\nint dep(S s);\n",
+            # Neighbour: an undefined element type in an array typedef.
+            "mtm_dep_arr.h": "typedef Undef Arr[4];\nint dep(Arr a);\n",
+            # Positive control: the alias is defined by the selected `foo.h`.
+            "mtm_dep_ok.h": '#include "foo.h"\nint dep_write(Q q);\n',
+        })
+    assert result.status == RESOLVED, (result.status, result.message, result.diagnostics)
+    assert result.header_probe["mtm_dep_v3.h"].ok is False
+    assert "Q" in result.header_probe["mtm_dep_v3.h"].diagnostic
+    assert result.header_probe["mtm_dep_nested.h"].ok is False
+    assert result.header_probe["mtm_dep_arr.h"].ok is False
+    assert result.header_probe["mtm_dep_ok.h"].ok is True

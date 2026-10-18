@@ -124,6 +124,21 @@ class FunctionFact:
 
 
 @dataclass
+class HeaderProbe:
+    """The compiler's verdict on one *proposed* header text (I1/AP-06).
+
+    ``ok`` is the real clang's answer to "does this text compile in the selected
+    build context?"; ``diagnostic`` is the first ``Error``/``Fatal`` spelling when
+    it does not. The generator emits an interface header only when its probe is
+    ``ok``, so an uncompilable header becomes a precise per-symbol limitation
+    instead of body-less C behind empty limitations.
+    """
+
+    ok: bool = False
+    diagnostic: str = ""
+
+
+@dataclass
 class CTypeResolution:
     """The ``CTypeResolution`` fact set (``docs/architecture/data-contracts.md``).
 
@@ -146,6 +161,11 @@ class CTypeResolution:
     #: substitute the alias's defining statement verbatim rather than include such
     #: a header. The real compiler is the gate; no regex guard analysis is used.
     double_include_unsafe: dict[str, bool] = field(default_factory=dict)
+    #: clang's compilability verdict per **proposed** header name (the driver's
+    #: ``header_probe`` result). The generator emits only an ``ok`` header; a
+    #: failing one becomes a named per-symbol limitation. The real compiler is the
+    #: gate — no bespoke C parser or lexical undefined-type guard.
+    header_probe: dict[str, HeaderProbe] = field(default_factory=dict)
     diagnostics: list[str] = field(default_factory=list)
     issues: list[dict[str, Any]] = field(default_factory=list)
     message: str = ""
@@ -185,6 +205,8 @@ class CTypeResolution:
                 for name, a in self.aliases.items()
             },
             "double_include_unsafe": self.double_include_unsafe,
+            "header_probe": {name: {"ok": p.ok, "diagnostic": p.diagnostic}
+                             for name, p in self.header_probe.items()},
             "diagnostics": self.diagnostics,
             "issues": self.issues,
             "message": self.message,
@@ -232,6 +254,7 @@ def resolve(
     user: str | None = None,
     timeout: int = 300,
     resolver: Resolver | None = None,
+    probe_headers: dict[str, str] | None = None,
 ) -> CTypeResolution:
     """Resolve *paths* with libclang inside the product image.
 
@@ -241,6 +264,12 @@ def resolve(
     (``mtm.docker.image_ref()``). ``resolver`` overrides the image-backed
     transport (for host-side tests). Never raises for a resolution/tool failure:
     the typed status carries the reason.
+
+    *probe_headers* maps a filename to proposed header **text**; the driver
+    compiles each under the same flags and returns :attr:`CTypeResolution.header_probe`
+    — the compiler's verdict rides this same call, so a genuine tool fault still
+    surfaces through the existing ``TOOL_FAILED`` path and no second invocation is
+    made.
     """
     bench = Path(bench_root).resolve()
     context = ResolveContext(bench_root=bench, image_ref=image or _default_image(),
@@ -252,6 +281,9 @@ def resolve(
         "defines": list(defines),
         "args": list(args),
     }
+    if probe_headers:
+        spec["probe_headers"] = {str(name): str(text)
+                                 for name, text in probe_headers.items()}
     runner = resolver or _image_resolver
     try:
         raw = runner(spec, context)
@@ -306,7 +338,21 @@ def _map_result(raw: dict[str, Any]) -> CTypeResolution:
                            double_include_unsafe={
                                str(k): bool(v) for k, v in
                                (raw.get("double_include_unsafe") or {}).items()},
+                           header_probe=_header_probe_from_json(raw.get("header_probe")),
                            diagnostics=diagnostics, issues=[])
+
+
+def _header_probe_from_json(raw: Any) -> dict[str, HeaderProbe]:
+    """Chart the driver's ``header_probe`` map; tolerate a bare boolean too."""
+    probe: dict[str, HeaderProbe] = {}
+    for name, data in (raw or {}).items():
+        if isinstance(data, dict):
+            probe[str(name)] = HeaderProbe(
+                ok=bool(data.get("ok", False)),
+                diagnostic=str(data.get("diagnostic", "") or ""))
+        else:
+            probe[str(name)] = HeaderProbe(ok=bool(data))
+    return probe
 
 
 def _function_from_json(data: dict[str, Any]) -> FunctionFact:
