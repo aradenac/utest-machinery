@@ -100,6 +100,11 @@ class CeedlingRun:
     ignored: int = 0
     #: (test_function, reason) for each Unity assertion failure.
     failures: list[tuple[str, str]] = field(default_factory=list)
+    #: True when the container/runner could not be *started* at all (the ``docker``
+    #: CLI is absent on the host, or an equivalent launch error) — distinct from a
+    #: container command that ran and returned 127, so the diagnostic names the real
+    #: cause instead of blaming the in-container command.
+    launch_error: bool = False
 
     @property
     def executed(self) -> int:
@@ -190,7 +195,10 @@ def run_ceedling(
             stderr=f"Ceedling timed out after {timeout}s",
         )
     except OSError as exc:
-        return CeedlingRun(ok=False, returncode=127, argv=argv, stderr=str(exc))
+        # ``docker`` could not even be launched on the host (most often absent from
+        # PATH). Report that, not the in-container 127 wording.
+        return CeedlingRun(ok=False, returncode=127, argv=argv, launch_error=True,
+                           stderr=str(exc))
 
     out = _as_text(proc.stdout)
     summary = _unity_summary(out)

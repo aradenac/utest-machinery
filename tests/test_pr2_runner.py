@@ -1172,8 +1172,14 @@ def test_any_omitted_function_subset_is_declared_and_units_get_distinct_helpers(
 @pytest.mark.docker
 def test_real_image_links_and_executes_a_partial_stem_header_unit(tmp_path, product_image):
     """AP-02 for E2: the multi-function/partial-stem-header bench actually compiles,
-    links and executes in the product image (the failure mode E2 describes is a
-    compile/link outcome that a stub runner cannot prove)."""
+    links and executes in the product image.
+
+    Honest scope: the image's default ``gcc`` (gnu17, no ``-Werror``) only *warns*
+    on an implicit declaration, so this run alone does not prove the helper is
+    necessary — it proves the post-fix suite is genuinely buildable and executable.
+    The discriminating assertions for the fix are the string/limitation checks in
+    the offline tests above (helper emitted with exactly the omitted declarations,
+    a conflicting stem header refused)."""
     from mtm.ceedling import run_ceedling
     from mtm.gen import generate_suite
     from mtm.inventory import build_inventory
@@ -1248,3 +1254,85 @@ def test_a_selected_file_named_like_the_helper_is_refused_not_shadowed(tmp_path)
     # The selected file is untouched and never overwritten by the generator.
     assert (bench / "mtm_unit_foo_extra.h").read_text().count("unrelated") == 1
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_unit_foo_extra.h").exists()
+
+
+def test_a_stem_header_declaring_an_incompatible_signature_is_refused(tmp_path):
+    """E2 adjacent (same contract class, found by the test-challenger): a selected
+    stem header that declares a function under test with a different arity/parameter
+    type is *not* "covered" — the test would see the header's prototype and call it
+    with the plan's arguments, a hard compile error, and we cannot work around it
+    (a private declaration would clash with the header). The unit is refused with a
+    limitation instead of emitting uncompilable code."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "incompatible-stem-header"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo_a(int x) { return x + 1; }\n")
+    # The header declares the same NAME with a different arity.
+    (bench / "foo.h").write_text("#ifndef FOO_H\n#define FOO_H\nint foo_a(void);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("incompatible" in lim for lim in out.limitations), out.limitations
+
+
+def test_a_stem_header_with_a_different_param_name_is_still_used(tmp_path):
+    """E2 contrast: a stem header that repeats the same declaration with different
+    parameter *names* is compatible and must not be falsely refused."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "param-name-differs"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo_a(int x) { return x + 1; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int value);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    src = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert '"foo.h"' in src and "mtm_unit_foo_extra.h" not in src
+
+
+def test_a_host_launch_error_is_reported_as_such_not_as_an_in_container_127(
+        fixture_bench, monkeypatch):
+    """E1 adjacent: when ``docker`` cannot be launched on the *host*, the diagnostic
+    must name that cause, not the in-container 'command not found (127)' wording."""
+    import subprocess
+    from mtm.ceedling import run_ceedling
+
+    bench = fixture_bench("mocked-sensor")
+    run_mtm_json("generate", "--provider", "mock", cwd=bench)
+
+    def boom(*a, **k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    run = run_ceedling(bench, image_ref="img:test")
+    assert run.launch_error and not run.ran
+    assert run.returncode == 127

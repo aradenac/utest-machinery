@@ -167,6 +167,20 @@ def _unit_includes(unit, scenarios: list[Scenario] | None, copied: set[str] | No
         # mislinked test.
         covered = _functions_declared_by(unit, scenarios, copied, src_dir, stem_header)
         if declaring == stem_header:
+            # A stem header that declares a function under test with an
+            # *incompatible* signature (different arity/parameter types) cannot be
+            # worked around: the test would see the header's prototype and call it
+            # with the plan's arguments — a hard compile error — and a private
+            # declaration would clash with the header. Refuse rather than emit
+            # uncompilable code (the class E2 exists to remove).
+            conflicts = _conflicting_declarations(unit, scenarios, copied, src_dir,
+                                                   stem_header)
+            if conflicts:
+                out.limitations.append(
+                    f"unit {unit.id} ({unit.path}) cannot be linked: the selected "
+                    f"{stem_header!r} declares {sorted(conflicts)!r} with a signature "
+                    "incompatible with the source; the test could not call it")
+                return None
             missing = _wanted_functions(scenarios) - covered
             if not missing:
                 return [stem_header]
@@ -224,6 +238,57 @@ def _functions_declared_by(unit, scenarios: list[Scenario] | None,
 
     declared = {n for n, _ in scan_prototypes(path)}
     return declared & _wanted_functions(scenarios)
+
+
+def _signature_key(signature: str) -> tuple | None:
+    """A comparable key for a C signature, or ``None`` when unparseable.
+
+    Parameter *names* are dropped and types normalised, so a header that repeats
+    the same declaration with different parameter names is not a conflict; arity,
+    parameter types and the return type are compared.
+    """
+    parsed = split_declaration(signature)
+    if parsed is None:
+        return None
+    ret, params = parsed
+    if return_is_void(signature):
+        ret_key = "void"
+    elif "*" in ret:
+        ret_key = f"{ret.replace(' ', '')}*"
+    else:
+        ret_key = ret
+    return (ret_key, tuple(
+        f"{'*' if p.pointer else ''}{p.type.replace(' ', '')}" for p in params))
+
+
+def _conflicting_declarations(unit, scenarios: list[Scenario] | None,
+                              copied: set[str] | None, src_dir: Path | None,
+                              header: str) -> set[str]:
+    """Functions under test the copied *header* declares incompatibly.
+
+    Compares each header prototype against the unit's own scanned signature (the
+    same source the generator uses for arity checks). An unparseable signature on
+    either side is not treated as a conflict — only a definite disagreement.
+    """
+    if copied is not None and header not in copied:
+        return set()
+    path = (src_dir / header) if src_dir is not None else None
+    if path is None or not path.is_file():
+        return set()
+    from .cscan import scan_prototypes
+
+    own = {fn["name"]: fn.get("signature", "")
+           for fn in getattr(unit, "functions", []) or []}
+    wanted = _wanted_functions(scenarios)
+    conflicts: set[str] = set()
+    for name, decl in scan_prototypes(path):
+        if name not in wanted or name not in own:
+            continue
+        header_key = _signature_key(decl)
+        own_key = _signature_key(own[name])
+        if header_key is not None and own_key is not None and header_key != own_key:
+            conflicts.add(name)
+    return conflicts
 
 
 def _declaring_header(unit, scenarios: list[Scenario] | None,

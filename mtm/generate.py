@@ -306,6 +306,9 @@ def _tool_fault_reason(run: CeedlingRun) -> str:
         return "the test run timed out before producing a Unity summary"
     if run.returncode < 0:
         return f"the test runner was killed by signal {-run.returncode}"
+    if run.launch_error:
+        return ("the Docker CLI could not be launched on the host; no Unity summary "
+                "was produced, so the suite did not run")
     docker_fault = docker_fault_reason(run.returncode)
     if docker_fault is not None:
         return (f"{docker_fault}; no Unity summary was produced, so the "
