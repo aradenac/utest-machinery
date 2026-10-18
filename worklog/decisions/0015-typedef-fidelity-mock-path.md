@@ -80,12 +80,13 @@ header `struct S {…}; typedef struct S S_t;` with `void dep_send(S_t s)` emitt
 `redefinition of 'struct S'` / `conflicting types for 'S_t'`. (Honesty note: at the
 true base `dd122e7` this shape was *also* broken — verified in a `dd122e7`
 worktree — so F-A2 is a *narrowing* of a fix, not a fresh regression; it is
-nonetheless correct on the merits.) **F-A2 decision — restate the invariant at the
-right level:** *a header is unsafe to include twice iff it **defines** a
-`struct`/`union`/`enum` with an inline `{…}` body* — a **header-level** property
-(`_header_defines_inline_type`, comment/string-stripped), covering anonymous and
-tag-named bodies uniformly while still admitting a header whose only typedefs are
-plain/pointer.
+nonetheless correct on the merits — though F-A4 below later showed the predicate
+at this level was still unsound without the guard-enclosure check.) **F-A2 decision
+— restate the invariant at the right level:** *a header is unsafe to include twice
+iff it **defines** a `struct`/`union`/`enum` with an inline `{…}` body* — a
+**header-level** property (initially `_header_defines_inline_type`,
+comment/string-stripped), covering anonymous and tag-named bodies uniformly while
+still admitting a header whose only typedefs are plain/pointer.
 
 **F-A3 (self-found, pre-existing) — statement-line anchoring of the typedef
 scanners.** An exhaustive guard-predicate probe surfaced a *separate* pre-existing
@@ -101,6 +102,30 @@ separating `;` is **not consumed** (a candidate that consumed it, `[;}][ \t]*typ
 was rejected by the probe: it swallowed the alias after a `;` and leaked a leading
 `;` into the verbatim statement). Scope stays a statement-level scanner — a
 `typedef` inside a function body on its own line keeps its pre-existing behaviour.
+
+**F-A4 correction — share-safety must prove the body is *inside* a guard (third
+independent PRE_PR review).** The reviewer on `d7eb00e` returned CHANGES_REQUIRED
+with a mandatory finding the lead reproduced and accepted: `_header_has_guard`
+accepted *any* `#ifndef X`/`#define X` pair, so a guard-like block that does **not**
+enclose the definition read as guarded — a mid-file feature toggle
+(`#ifndef FEATURE_X … #endif` before an unguarded `typedef struct {…} S;`) or a
+definition written **before** the real guard. The interface header then `#include`d
+the header, the TU repeated the `{…}`, and gcc failed `conflicting types for 'S'`
+with `limitations == []`. **F-A4 decision — restate the invariant soundly:** *a
+header is safe to include twice iff **every** inline `struct`/`union`/`enum`
+definition it contains lies inside an include guard, or the header is `#pragma
+once`.* `_header_has_guard` + `_header_defines_inline_type` were replaced by
+`_header_shares_safely` (+ `_guard_spans`: real guard regions `#ifndef X` /
+`#if !defined(X)` with a matching `#define X`, measured to the correct `#endif` by
+a nesting stack; `#pragma once` treated as guarded). This also closed the
+reviewer's advisory finding (a `#pragma once` header with an inline body is no
+longer false-refused). **Escalation note:** the share-safety class has now taken
+three corrective passes (F-A1→F-A2, then F-A4); per the skill's escalation rule the
+lead restated the invariant and adopted a *sound* predicate plus a **named
+limitation** for the genuinely-unsupported shape (which §C permits), rather than a
+third blind patch. If the next review finds another mandatory hole in this class,
+escalate to owner arbitration.
+
 
 
 ## Options considered
@@ -134,13 +159,15 @@ was rejected by the probe: it swallowed the alias after a `;` and leaked a leadi
     from every copied source/header; `_typedef_aliases_for_decl` **includes** the
     defining header (falling back to verbatim text for a `.c`-defined alias) for the
     aliases a mock declaration references (transitively, to a fixpoint).
-  * A guard-less defining header that carries an alias with an **inline body**
-    (anonymous `struct`/`union`/`enum`) is the one shape the include-sharing cannot
+  * A defining header that is **not safe to include twice** — one that repeats an
+    inline `struct`/`union`/`enum` definition because no include guard encloses it
+    (anonymous or tag-named body; a guard-like `#ifndef` that does not enclose the
+    definition does not count) — is the one shape the include-sharing cannot
     collapse; its mock scenarios are refused with a precise limitation
     (`refused_mocks`) and the affected scenarios are skipped, rather than emitting
-    an uncompilable test whose `limitations == []` (plan §C). A guard-less *scalar*
-    alias stays admitted (duplicate scalar typedef is legal C) — verified
-    end-to-end in the image.
+    an uncompilable test whose `limitations == []` (plan §C). A header whose only
+    typedefs are plain/pointer stays admitted, as does a `#pragma once` header or a
+    header whose every inline body is guarded — verified end-to-end in the image.
 
 ## Consequences
 
@@ -167,11 +194,12 @@ was rejected by the probe: it swallowed the alias after a `;` and leaked a leadi
 * `mtm/cscan.py` (`scan_typedefs`, `typedef_statement_map`, `_TYPEDEF_RE`,
   `_AGGREGATE_REF_RE`, `_TYPEDEF_STMT_RE`), `mtm/gen.py`
   (`split_declaration`, `mock_controls`, `_typedef_aliases_for_decl`,
-  `_decl_alias_tokens`, `_header_has_guard`, `generate_suite`).
-* `tests/test_pr2_runner.py` (eight regression tests: opaque alias, pointer-typedef
+  `_decl_alias_tokens`, `_header_shares_safely`, `_guard_spans`, `generate_suite`).
+* `tests/test_pr2_runner.py` (ten §C regression tests: opaque alias, pointer-typedef
   depth, interface-header alias, anonymous-aggregate sharing, guard-less aggregate
   limitation, guard-less enum limitation + guarded-enum compile, guard-less inline
-  tag-body limitation, combined-line alias + in-image execution), `tests/test_pr2_units.py`
-  (opaque-alias scanner test).
+  tag-body limitation, guard-like-block-not-enclosing-the-body limitation,
+  `#pragma once` inline body shareable, combined-line alias + in-image execution),
+  `tests/test_pr2_units.py` (opaque-alias scanner test).
 * PR 3 §A/§B/§C and DoD 3 in `docs/plan/implementation.md`;
-  `worklog/log/2026-10-18-pr3.md` (sessions 4–6).
+  `worklog/log/2026-10-18-pr3.md` (sessions 4–9).
