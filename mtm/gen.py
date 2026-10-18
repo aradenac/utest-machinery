@@ -1050,12 +1050,15 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     # interface header must see every alias its declaration names (else `unknown
     # type name 'P'` and every mock scenario dies as an opaque build failure), but
     # it must not *re-declare* an alias the test's own unit header also defines: a
-    # duplicate scalar/pointer typedef is legal C, while a duplicate *anonymous
-    # aggregate* typedef names a different type and is a hard `conflicting types`
-    # error under `-Werror`. So the interface header `#include`s the defining
-    # copied header (one guarded definition per TU) and falls back to verbatim
-    # text only for an alias with no includable header (e.g. one written in a .c).
+    # duplicate scalar/pointer typedef is legal C, while a duplicate of an alias
+    # whose statement has an **inline body** (`typedef struct {…} S;`,
+    # `typedef enum {…} e_t;`) re-declares *different* types and is a hard
+    # `conflicting types`/`redeclaration of enumerator` error under `-Werror`. So
+    # the interface header `#include`s the defining copied header (one guarded
+    # definition per TU) and falls back to verbatim text only for an alias with no
+    # includable header (e.g. one written in a .c).
     alias_header: dict[str, str] = {}
+    alias_inline_body: set[str] = set()
     guarded_headers: dict[str, bool] = {}
     for name in sorted(copied):
         if not name.endswith((".c", ".h")):
@@ -1065,6 +1068,11 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             typedefs.setdefault(alias, typedef)
         for alias, statement in typedef_statement_map(text).items():
             alias_statements.setdefault(alias, statement)
+            # An inline `{ … }` body (struct/union/enum definition) is what makes a
+            # duplicate unsafe; a tag reference (`struct Tag`) or a plain/pointer
+            # typedef duplicates legally and needs no guard.
+            if "{" in statement:
+                alias_inline_body.add(alias)
             if name.endswith(".h"):
                 alias_header.setdefault(alias, name)
         if name.endswith(".h"):
@@ -1103,25 +1111,26 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         alias_includes, alias_defs = _typedef_aliases_for_decl(decl, alias_statements,
                                                                alias_header)
         # The include-based alias sharing needs the defining header's own guard to
-        # give the TU one definition. A guard-less header that defines an
-        # *aggregate* alias is the one shape that cannot be shared safely: the test
-        # includes it both here and directly, and the second anonymous-aggregate
-        # definition is a hard `conflicting types` error. (A duplicate *scalar*
-        # alias is legal C, so the guard-less scalar case is admitted.) Refuse with
-        # a named limitation rather than emit an opaque build failure — a leftover
-        # of the required shapes that §C demands be recorded, not silently broken.
+        # give the TU one definition. A guard-less header that defines an alias with
+        # an **inline body** (anonymous `struct`/`union`/`enum`) is the one shape
+        # that cannot be shared safely: the test includes it both here and directly,
+        # and the second definition is a hard `conflicting types` / `redeclaration
+        # of enumerator` error. (A duplicate scalar/pointer typedef is legal C, so
+        # the guard-less scalar case is admitted.) Refuse with a named limitation
+        # rather than emit an opaque build failure — a shape §C demands be recorded,
+        # not silently broken.
         unguarded = sorted({
             alias_header[a] for a in _decl_alias_tokens(decl, alias_statements,
                                                         alias_header)
             if a in alias_header
             and not guarded_headers.get(alias_header[a], True)
-            and getattr(typedefs.get(a), "aggregate", False)})
+            and a in alias_inline_body})
         if unguarded:
             refused_mocks[symbol] = (
-                f"mocked symbol {symbol!r} declares a parameter through an "
-                f"aggregate typedef defined in {unguarded!r}, which has no include "
-                "guard; sharing it with the unit's own header would redefine the "
-                "anonymous aggregate")
+                f"mocked symbol {symbol!r} declares a parameter through a typedef "
+                f"with an inline body (struct/union/enum) defined in {unguarded!r}, "
+                "which has no include guard; sharing it with the unit's own header "
+                "would redefine the anonymous type")
             continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"

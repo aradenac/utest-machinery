@@ -2444,6 +2444,58 @@ def test_a_guardless_aggregate_alias_header_is_a_named_limitation(tmp_path):
     assert ok.test_functions, ok.limitations
 
 
+def test_a_guardless_enum_alias_header_is_a_named_limitation(tmp_path):
+    """The neighbouring shape of the guard-less aggregate case: an anonymous
+    **enum** alias with an inline body is exactly as unsharable as an anonymous
+    struct/union (a repeat names the enumerators twice — ``redeclaration of
+    enumerator``). The classifier only recognised ``struct|union`` inline bodies,
+    so the guard check missed it and emitted an interface header that ``#include``d
+    the unguarded header — uncompilable C with ``limitations == []``. It must be a
+    named limitation, like the struct/union case."""
+    bench, out = _mock_bench(
+        tmp_path, "guardless-enum",
+        "typedef enum { E_A, E_B } e_t;\nint use(int a) { return a; }\n",
+        "#include <stdint.h>\ntypedef enum { E_A, E_B } e_t;\n"  # deliberately no guard
+        "void dep_send(e_t e);\nint use(int a);\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions == [], out.test_functions
+    assert any("no include guard" in lim for lim in out.limitations), out.limitations
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
+    # A *guarded* enum alias is shared via `#include` and must compile (a real
+    # gcc compile of the include order the generated test uses).
+    import shutil
+    import subprocess
+
+    bench2, ok = _mock_bench(
+        tmp_path, "guarded-enum",
+        "int use(int a) { dep_send(E_A); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+        "typedef enum { E_A, E_B } e_t;\nvoid dep_send(e_t e);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert ok.test_functions, ok.limitations
+    body = (bench2 / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").read_text()
+    assert '#include "foo.h"' in body and "typedef enum" not in body, body
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-enum"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_send.h"\n#include "foo.h"\n'
+                      "static e_t g;\nint main(void) { (void)g; return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench2 / ".mtm" / "gen" / "src"),
+             "-I", str(bench2 / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
 def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     """An alias with no *header* that defines it has no includable definition, so
     the interface header must spell it verbatim. This exercises the fallback path
