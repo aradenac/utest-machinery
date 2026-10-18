@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .ceedling import REVISION_DIRNAME
+from .cscan import scan_typedefs
 from .inventory import Inventory, resolve_scope_paths
 from .plan import Plan, Scenario
 
@@ -102,7 +103,7 @@ class Generated:
 # --- C signature parsing ----------------------------------------------------
 
 
-def split_params(params: str) -> list[CParam]:
+def split_params(params: str, typedefs: dict[str, Any] | None = None) -> list[CParam]:
     """Split a C parameter list into ``CParam``s by top-level commas."""
     params = params.strip()
     if params in ("", "void"):
@@ -116,15 +117,15 @@ def split_params(params: str) -> list[CParam]:
         elif ch == ")":
             depth -= 1
         if ch == "," and depth == 0:
-            result.append(parse_param(current))
+            result.append(parse_param(current, typedefs))
             current = ""
         else:
             current += ch
-    result.append(parse_param(current))
+    result.append(parse_param(current, typedefs))
     return result
 
 
-def parse_param(text: str) -> CParam:
+def parse_param(text: str, typedefs: dict[str, Any] | None = None) -> CParam:
     """Parse one C parameter declarator into a :class:`CParam`.
 
     The pointer *depth* is preserved (``int **pp`` → depth 2) and the **pointee**
@@ -134,6 +135,15 @@ def parse_param(text: str) -> CParam:
     *p``) is ignored by C for compatibility and does **not** belong to the pointee,
     so keeping it in the base would change the type (``char * const *`` would
     become the incompatible ``const char **``).
+
+    *typedefs* (from :func:`~mtm.cscan.scan_typedefs`) resolves a **pointer alias**
+    so the reported depth is the parameter's real indirection count: with
+    ``typedef int *P``, the declarator ``P *pp`` is an ``int **`` (depth 2), not an
+    ``int *`` (depth 1) — the difference between emitting a compilable call that
+    observes the pointee and an uncompilable ``P v = (P)scalar`` that observes a
+    stale local (the F3 defect). An alias to a **function-pointer/array** type is
+    marked opaque and left unresolved so the caller refuses the shape (a named
+    limitation) instead of guessing a depth.
     """
     text = text.strip()
     segments = text.split("*")
@@ -144,23 +154,57 @@ def parse_param(text: str) -> CParam:
             return CParam(type="", name="", depth=0)
         if len(tokens) >= 2 and tokens[-1] not in _CTYPE_WORDS \
                 and not _looks_like_type(tokens[-1]):
-            return CParam(type=" ".join(tokens[:-1]).strip(), name=tokens[-1], depth=0)
+            return _resolve_typedef(
+                CParam(type=" ".join(tokens[:-1]).strip(), name=tokens[-1], depth=0),
+                typedefs)
         if len(tokens) == 1:
-            return CParam(type=tokens[0], name="", depth=0)
-        return CParam(type=text, name="", depth=0)
+            return _resolve_typedef(CParam(type=tokens[0], name="", depth=0), typedefs)
+        return _resolve_typedef(CParam(type=text, name="", depth=0), typedefs)
     # depth >= 1: the pointee type is the first segment (qualifiers kept, storage
     # class dropped); the declared name is the trailing token of the last segment.
     base_tokens = [t for t in segments[0].split() if t not in _STORAGE_CLASS]
     tail = segments[-1].split()
     name = tail[-1] if tail else ""
-    return CParam(type=" ".join(base_tokens).strip(), name=name, depth=depth)
+    return _resolve_typedef(
+        CParam(type=" ".join(base_tokens).strip(), name=name, depth=depth), typedefs)
+
+
+def _resolve_typedef(param: CParam, typedefs: dict[str, Any] | None) -> CParam:
+    """Fold a pointer ``typedef`` alias in *param* into a real base + depth.
+
+    ``typedef`` aliases hide the ``*`` inside a *name*, so a declarator that uses
+    one is parsed with the wrong depth and an unknown base type. Substituting the
+    alias's own base and adding its depth recovers the true type. A **pointer**
+    alias (``typedef int *P``) contributes its depth wherever the alias is the
+    pointee; an **opaque** alias (function pointer / array) is left untouched so
+    the shape is refused downstream rather than mis-rendered. A plain (non-pointer)
+    alias is left as-is: its name is a valid base token for the emitter (e.g.
+    ``mode_t``) and contributes no depth.
+    """
+    if not typedefs:
+        return param
+    alias_name = ""
+    alias = None
+    for token in param.type.split():
+        if token in typedefs and typedefs[token].depth >= 1:
+            alias_name, alias = token, typedefs[token]
+            break
+    if alias is None:
+        return param
+    base = param.type
+    if alias.base:
+        # Replace the alias name with its base, keeping any pointee qualifiers
+        # (`const P *p` → `const int *` with one extra level).
+        base = " ".join(alias.base if w == alias_name else w
+                        for w in param.type.split()).strip()
+    return CParam(type=base, name=param.name, depth=param.depth + alias.depth)
 
 
 def _looks_like_type(token: str) -> bool:
     return token.endswith("_t") or token in _CTYPE_WORDS
 
 
-def _unsupported_param_shape(params: list[CParam]) -> str | None:
+def _unsupported_param_shape(params: list[CParam], typedefs: dict[str, Any] | None = None) -> str | None:
     """A reason a parameter list cannot be materialised faithfully, or ``None``.
 
     The generator renders each argument as a cast to the parameter's type and,
@@ -173,10 +217,15 @@ def _unsupported_param_shape(params: list[CParam]) -> str | None:
     an admitted-but-uncompilable/crashing bench (``implementation.md``:
     "unsupported shapes are recorded limitations, never silent passes").
 
+    A parameter using a **function-pointer or array ``typedef``** (an alias whose
+    declarator has no ``*`` this scanner can honour) is refused by the same rule:
+    it has no honest indirection depth, so emitting a cast would be a guess.
+
     An **unnamed** parameter (``int foo(int)``, ``int foo(char *)``) is *not*
     refused: that is legal C and renders fine as ``(type)value`` — refusing it
     would be a false refusal of a common prototype form.
     """
+    opaque = {name for name, t in (typedefs or {}).items() if getattr(t, "opaque", False)}
     for param in params:
         if "..." in param.type:
             return "a variadic (`...`) parameter is not supported"
@@ -185,12 +234,15 @@ def _unsupported_param_shape(params: list[CParam]) -> str | None:
             # type or name (`int a[3]` → name `a[3]`; `int (*cb)(int)` → name
             # `(cb)(int)`); the generator cannot render such an argument.
             return ("a function-pointer or array parameter is not supported")
+        if opaque and any(tok in opaque for tok in param.type.split()):
+            return ("a function-pointer/array `typedef` used as a parameter type "
+                    "has no honourable indirection depth and is not supported")
     return None
 
 
-def func_params(signature: str) -> list[CParam]:
+def func_params(signature: str, typedefs: dict[str, Any] | None = None) -> list[CParam]:
     m = re.search(r"\(([^)]*)\)", signature)
-    return split_params(m.group(1)) if m else []
+    return split_params(m.group(1), typedefs) if m else []
 
 
 def return_type(signature: str) -> str:
@@ -510,6 +562,14 @@ def split_declaration(decl: str) -> tuple[str, list[CParam]] | None:
     ``None`` when the declaration has a shape this generator does not support
     (variadics, a function-pointer/array parameter, or an unparseable header),
     so the caller records a limitation instead of emitting wrong code.
+
+    Called without a typedef map (``typedefs=None``): this is used for a
+    *dependency's* declaration, whose aliases a mocked symbol must satisfy
+    through the same header the mock is generated from, so a hidden pointer
+    typedef is left unresolved and refused by
+    :func:`_unsupported_param_shape`/the mock control surface rather than
+    guessed. The unit's own parameter path resolves typedefs explicitly (the
+    selected headers are scanned by the caller).
     """
     decl = _strip_c_comments(decl or "").strip().rstrip(";")
     if not decl:
@@ -691,7 +751,8 @@ def _is_c_expression(value: Any) -> bool:
 def _case_problem(case, controls: dict[str, dict[str, Any]],
                   params: list[CParam], aggregates: set[str] | None = None,
                   declared_mocks: list[str] | None = None,
-                  determined: bool = True) -> str | None:
+                  determined: bool = True,
+                  typedefs: dict[str, Any] | None = None) -> str | None:
     """Why *case* cannot be materialised faithfully, or ``None`` if it can.
 
     The plan is model output: it may ask for a control this generator does not
@@ -705,7 +766,7 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
     # callee dereferences it (a crash misread as an IMPLEMENTATION_DEFECT). Checked
     # before the arity test so the reason names the real cause, not a misleading
     # argument count (the scanner counts a trailing `...` as a parameter).
-    shape_problem = _unsupported_param_shape(params)
+    shape_problem = _unsupported_param_shape(params, typedefs)
     if shape_problem is not None:
         return shape_problem
     # The argument count must match the real signature: `signatures` come from the
@@ -958,6 +1019,21 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         shutil.copy2(candidate, src_dir / candidate.name)
         out.files[f"{SOURCE_DIRNAME}/{candidate.name}"] = "source"
 
+    # 2b. Resolve the C type aliases the compiled project sees, so a pointer
+    #     hidden behind a `typedef` (e.g. `typedef int *P; ... P *pp`) is
+    #     materialised at its real indirection depth instead of emitting an
+    #     uncompilable `P v = (P)scalar` that observes a stale local (the F3
+    #     defect). Scan every copied source/header — an alias may live in any of
+    #     them — and the shims, which the test also includes.
+    typedefs: dict[str, Any] = {}
+    for name in sorted(copied):
+        if name.endswith((".c", ".h")):
+            for alias, typedef in scan_typedefs(src_dir / name).items():
+                typedefs.setdefault(alias, typedef)
+    for name in shim_names:
+        for alias, typedef in scan_typedefs(shim_dir / name).items():
+            typedefs.setdefault(alias, typedef)
+
     # 3. One interface header per mocked symbol: CMock generates the mock from
     #    the header, so it declares only that symbol and the types it needs.
     interfaces: dict[str, str] = {}
@@ -1030,7 +1106,7 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             continue
         code, names, skipped = _emit_test_file(
             unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates,
-            unit_includes=unit_includes)
+            unit_includes=unit_includes, typedefs=typedefs)
         path = test_dir / f"test_{Path(unit.path).stem}.c"
         path.write_text(code, encoding="utf-8")
         out.files[f"{TEST_DIRNAME}/{path.name}"] = "test"
@@ -1221,7 +1297,8 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                     interfaces: dict[str, str], declarations: dict[str, str],
                     shim_names: list[str] | None = None,
                     aggregates: set[str] | None = None,
-                    unit_includes: list[str] | None = None) -> tuple[str, list[str], list[str]]:
+                    unit_includes: list[str] | None = None,
+                    typedefs: dict[str, Any] | None = None) -> tuple[str, list[str], list[str]]:
     unit_includes = list(unit_includes or [])
     lines: list[str] = [
         f"/* Generated Unity tests for {unit.path} — materialised from the plan. */",
@@ -1245,7 +1322,7 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
     for scenario in scenarios:
         fn = scenario.function
         signature = signatures.get(fn, "")
-        params = func_params(signature)
+        params = func_params(signature, typedefs)
         void_ret = return_is_void(signature)
         test_name = test_name_for(scenario.unit_id, scenario.id)
         controls: dict[str, dict[str, Any]] = {}
@@ -1273,7 +1350,8 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                 problem = _case_problem(case, {s: {k: v for k, v in c.items() if k != "out_types"}
                                                for s, c in controls.items()}, params, aggregates,
                                         declared_mocks=declared_mocks,
-                                        determined=scenario_determined)
+                                        determined=scenario_determined,
+                                        typedefs=typedefs)
                 if problem:
                     break
         if problem is not None:

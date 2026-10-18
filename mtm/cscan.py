@@ -180,5 +180,79 @@ def scan_prototypes(path: Path) -> list[tuple[str, str]]:
     return found
 
 
+#: A ``typedef`` whose declarator has no brace (so the aggregation typedefs in
+#: :mod:`mtm.gen` handle the struct/union/array forms) and ends at the line's
+#: ``;``. Group ``decl`` is ``<type specifiers + stars> <name>``.
+_TYPEDEF_RE = re.compile(r"(?m)^[ \t]*typedef\s+(?P<decl>[^;{}\n]+?)\s*;")
+
+
+class Typedef:
+    """A resolved ``typedef``: its aliased **pointee base** and ``*`` depth.
+
+    ``depth == -1`` marks a declarator this scanner will not resolve (a
+    function-pointer or array typedef): using such an alias as a parameter type
+    must be refused rather than mis-rendered, so the depth is kept as an explicit
+    "opaque" marker instead of guessed.
+    """
+
+    __slots__ = ("base", "depth", "opaque")
+
+    def __init__(self, base: str, depth: int, opaque: bool = False):
+        self.base = base
+        self.depth = depth
+        self.opaque = opaque
+
+
+def scan_typedefs(path: Path) -> dict[str, Typedef]:
+    """Map each ``typedef`` alias in *path* to its resolved :class:`Typedef`.
+
+    A pointer ``typedef`` is the shape the C type→argument chain must respect: a
+    parameter declared ``P *pp`` with ``typedef int *P`` is an ``int **`` and must
+    be materialised at depth 2, not depth 1 (the F3 defect). Resolving the alias
+    lets the generator keep the *depth* rather than emit ``P v = (P)scalar``,
+    which does not compile. A function-pointer/array typedef is recorded as
+    opaque so a parameter using it is refused with a named limitation.
+    """
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    clean = strip_comments_and_strings(raw)
+    found: dict[str, Typedef] = {}
+    for m in _TYPEDEF_RE.finditer(clean):
+        decl = m.group("decl").strip()
+        if not decl or "(" in decl or "[" in decl:
+            name_m = re.search(r"([A-Za-z_]\w*)\s*$", decl)
+            if name_m:
+                found[name_m.group(1)] = Typedef("", -1, opaque=True)
+            continue
+        segments = decl.split("*")
+        depth = len(segments) - 1
+        base_tokens = [t for t in segments[0].split()]
+        tail = segments[-1].split()
+        if not tail:
+            continue
+        name = tail[-1]
+        # A trailing token that is itself only the name; the base is the leading
+        # segment minus storage-class specifiers (a `typedef` declarator never
+        # carries a storage class, but `_STORAGE_CLASS` tokens are harmless here).
+        base = " ".join(t for t in base_tokens if t != name).strip()
+        if not base and depth == 0:
+            base = "int"
+        found[name] = Typedef(base, depth)
+    return found
+
+
+def scan_typedefs_of(paths: "list[Path] | tuple[Path, ...]") -> dict[str, Typedef]:
+    """Merge :func:`scan_typedefs` over several header/declaration files.
+
+    Later files do not silently override an earlier alias to a *different*
+    meaning; the first definition wins so an include-order surprise cannot change
+    a depth mid-suite (the suite compiles one project, so one meaning per alias).
+    """
+    merged: dict[str, Typedef] = {}
+    for path in paths:
+        for name, typedef in scan_typedefs(path).items():
+            merged.setdefault(name, typedef)
+    return merged
+
+
 def _line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
