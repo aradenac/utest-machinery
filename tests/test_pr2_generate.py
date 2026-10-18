@@ -253,6 +253,22 @@ def test_generate_without_scope_is_a_clean_error(bench: Path):
     assert record["code"] == "INPUT_MISSING"
 
 
+def test_plan_refuses_a_stale_plan_whose_snapshot_no_longer_matches(fixture_bench):
+    """`mtm plan` must not present a plan derived from other inputs as current."""
+    bench = fixture_bench("saturation")
+    state = bench / ".mtm" / "state" / "generate"
+    # Write a plan with a snapshot hash that does not match the inventory.
+    (state).mkdir(parents=True, exist_ok=True)
+    import json as _json
+    (state / "inventory.json").write_text(_json.dumps(
+        {"snapshot_hash": "aaaa", "selected": [], "units": []}))
+    (state / "plan.json").write_text(_json.dumps(
+        {"snapshot_hash": "bbbb", "scenarios": [], "model": {}}))
+    record, code = run_mtm_json("plan", cwd=bench)
+    assert code == 40
+    assert record["code"] == "SNAPSHOT_MISMATCH"
+
+
 def test_dry_run_does_not_call_the_model_or_write_tests(fixture_bench):
     bench = fixture_bench("saturation")
     record, code = run_mtm_json("generate", "--dry-run", "--provider", "mock", cwd=bench)

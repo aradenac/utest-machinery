@@ -45,6 +45,11 @@ def fixture_bench(tmp_path: Path):
     return _make
 
 
+def _scopes(bench: Path) -> list[dict]:
+    import yaml
+    return yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
+
+
 def _generate(bench: Path, runner):
     """Run generate with an injected runner, returning the GenerateResult."""
     import yaml
@@ -243,8 +248,102 @@ def test_blocked_unit_is_excluded_from_the_project_but_stays_in_denominator(
     assert any("BLOCKED" in lim for lim in result.suite["limitations"])
 
 
-# --- B5: a scope change rebuilds the revision (no stale artefacts) -----------
+# --- review pass: basename collision, oracle mapping, stale artifacts --------
 
+
+def test_two_units_sharing_a_basename_are_refused_not_silently_overwritten(
+        fixture_bench):
+    """A flat C revision cannot hold two `sensor.c`/`sensor.h`; a C `#include` cannot
+    disambiguate them either. Colliding units must be refused with a recorded
+    limitation rather than one silently overwriting the other while the manifest
+    reports an inflated scenario count."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = fixture_bench("mocked-sensor")
+    import yaml
+    scopes = yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
+    other = bench / "beta"
+    other.mkdir()
+    shutil.copy(bench / "sensor.c", other / "sensor.c")
+    shutil.copy(bench / "sensor.h", other / "sensor.h")
+    run_mtm_json("scope", "add", "beta/sensor.c", "--kind", "source", cwd=bench)
+    run_mtm_json("scope", "add", "beta/sensor.h", "--kind", "source", cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({
+        "scenarios": [{
+            "id": "S1", "title": "t", "function": "sample_sensor",
+            "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+            "cases": [{"args": [1], "expected": "SENSOR_OK",
+                       "mocks": {"platform_read_sensor": {"ret": 0, "reading": 1}}}],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
+        }],
+    }), inventory, LLMIdentity(provider="test", model="t"))
+    generated = generate_suite(bench, plan, inventory)
+    # Neither colliding unit is emitted (names cannot be disambiguated): the
+    # shortfall is recorded, never silently absorbed into one unit's suite.
+    assert list((bench / ".mtm" / "gen" / "test").glob("test_sensor.c")) == []
+    assert any("basename" in lim for lim in generated.limitations)
+    assert generated.test_functions == []
+
+
+def test_finding_maps_back_to_its_oracle_for_ids_with_dashes_and_underscores():
+    """The finding→scenario link must survive an id containing `-` or `_`; the old
+    reverse-split returned a truncated id and an empty oracle statement."""
+    from mtm.gen import test_name_for
+    from mtm.plan import Scenario, Oracle, TestCase, Plan
+    from mtm.generate import _findings
+
+    plan = Plan(snapshot_hash="x", model={}, scenarios=[
+        Scenario(id="S1_boundary", title="t", function="f", unit_id="unit-abc",
+                 requirement_ids=[], technique="", mocks=[], mock_declarations={},
+                 cases=[TestCase()],
+                 oracle=Oracle(kind="SPECIFIED", statement="the ceiling applies")),
+        Scenario(id="S2-a", title="t", function="f", unit_id="unit-abc",
+                 requirement_ids=[], technique="", mocks=[], mock_declarations={},
+                 cases=[TestCase()],
+                 oracle=Oracle(kind="SPECIFIED", statement="the floor applies")),
+    ])
+
+    class _Run:
+        failures = [
+            (test_name_for("unit-abc", "S1_boundary"), "Expected 10 Was 9"),
+            (test_name_for("unit-abc", "S2-a"), "Expected 1 Was 0"),
+        ]
+
+    findings = _findings(_Run(), plan)
+    assert findings[0]["scenario_id"] == "S1_boundary"
+    assert findings[0]["expected_behavior"] == "the ceiling applies"
+    assert findings[1]["scenario_id"] == "S2-a"
+    assert findings[1]["expected_behavior"] == "the floor applies"
+
+
+def test_an_early_exit_clears_the_previous_plans_derived_artifacts(fixture_bench):
+    """A BLOCKED / dry-run run must not leave a previous input set's plan.json
+    looking current for the new inputs."""
+    from mtm.generate import run_generate
+    from mtm.llm import MockProvider
+
+    bench = fixture_bench("mocked-sensor")
+    first = run_generate(bench, _scopes(bench), provider=MockProvider(),
+                         image="img:test", runner=lambda *a, **k: _run(
+                             True, 0, stdout="1 Tests 0 Failures 0 Ignored\nOK\n",
+                             ran=True, total=1, passed=1, failed=0))
+    assert first.plan is not None
+    state = bench / ".mtm" / "state" / "generate"
+    assert (state / "plan.json").is_file()
+
+    (bench / "sensor.c").write_text("int sample_sensor(void) { return ??? ; }\n")
+    second = run_generate(bench, _scopes(bench), provider=MockProvider(),
+                          image="img:test", runner=lambda *a, **k: _run(True, 0))
+    assert second.status == "BLOCKED"
+    assert not (state / "plan.json").is_file()
+
+
+# --- B5: a scope change rebuilds the revision (no stale artefacts) -----------
 
 def test_revision_is_rebuilt_so_a_scope_change_leaves_no_stale_test(fixture_bench):
     """Generate, then narrow the scope and generate again.

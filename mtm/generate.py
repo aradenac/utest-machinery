@@ -74,6 +74,23 @@ def _state_dir(bench_root: Path) -> Path:
     return path
 
 
+def _clear_derived(state: Path) -> None:
+    """Remove the derived artefacts a fresh run will rewrite.
+
+    ``inventory.json``/``feasibility.json`` are re-written unconditionally at the
+    start of a run, but ``plan.json``/``suite.json``/``smoke.json`` are not on the
+    early-exit paths. Deleting them here means those paths leave no stale plan
+    behind, so a later ``mtm plan`` never presents a previous input set's plan as
+    the current one.
+    """
+    for name in (PLAN_FILE, SUITE_FILE, SMOKE_FILE):
+        target = state / name
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def run_generate(
     bench_root: Path,
     selected: list[dict[str, Any]],
@@ -90,6 +107,11 @@ def run_generate(
     classification logic without Docker); it defaults to the real in-image run.
     """
     state = _state_dir(bench_root)
+    # Derived artefacts are cleared before every run, so a run that stops early
+    # (BLOCKED, dry-run) cannot leave a previous input set's plan/suite/smoke
+    # looking current for the new inputs. `plan`/`status` read these files without
+    # a snapshot check, so a stale one would be presented as authoritative.
+    _clear_derived(state)
     inventory = build_inventory(bench_root, selected)
     inventory_path = write_json_atomic(state / INVENTORY_FILE, inventory.to_dict())
 
@@ -252,29 +274,24 @@ def _findings(run: CeedlingRun, plan: Plan) -> list[dict[str, Any]]:
 
     A generated test that fails means the **implementation contradicts the
     SDD-grounded oracle** — a finding (``IMPLEMENTATION_DEFECT``), preserved as
-    evidence, never repaired by editing the oracle (R04).
+    evidence, never repaired by editing the oracle (R04). The test-function name
+    is resolved through the plan's own (unit_id, scenario_id) → name mapping, so a
+    scenario id containing ``-`` or ``_`` is never mis-split and the oracle link
+    stays correct.
     """
+    from .gen import test_name_for
+
+    by_name = {
+        test_name_for(s.unit_id, s.id): s for s in plan.scenarios
+    }
     findings: list[dict[str, Any]] = []
     for name, reason in run.failures:
-        scenario_id = _scenario_for_test(name)
+        scenario = by_name.get(name)
         findings.append({
             "test": name,
             "category": "IMPLEMENTATION_DEFECT",
-            "scenario_id": scenario_id,
-            "expected_behavior": _oracle_statement(plan, scenario_id),
+            "scenario_id": scenario.id if scenario else "",
+            "expected_behavior": scenario.oracle.statement if scenario else "",
             "observed": reason,
         })
     return findings
-
-
-def _scenario_for_test(test_name: str) -> str:
-    # test_<unit>_<SID> -> <SID>
-    parts = test_name.split("_")
-    return parts[-1] if parts else test_name
-
-
-def _oracle_statement(plan: Plan, scenario_id: str) -> str:
-    for scenario in plan.scenarios:
-        if scenario.id == scenario_id:
-            return scenario.oracle.statement
-    return ""

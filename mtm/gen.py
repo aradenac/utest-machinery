@@ -322,9 +322,12 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
 
     *excluded_units* are feasibility-BLOCKED unit ids: they are left out of the
     executable project (so they cannot fail the whole build) while remaining
-    visible in the feasibility report and denominator (R03).
+    visible in the feasibility report and denominator (R03). A unit excluded for a
+    *basename collision* (below) is added to the same exclusion set, so it too is
+    driven out of the executable scope and recorded as a limitation.
     """
-    excluded = excluded_units or set()
+    excluded = set(excluded_units or set())
+    blocked_ids = set(excluded)
     revision = Path(bench_root) / REVISION_DIRNAME
     if revision.exists():
         shutil.rmtree(revision)
@@ -355,14 +358,34 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     #    units) into the private source directory. The originals are never moved
     #    or edited; a copy keeps Ceedling's write output far from the inputs and
     #    makes each revision self-contained (no stale artefacts).
-    copied: set[str] = set()
-    blocked_headers: set[str] = set()
+    #
+    #    A flat revision directory cannot hold two files of the same basename, and
+    #    a C `#include "x.h"` cannot be disambiguated between two directories that
+    #    both provide `x.h`. Detect that collision and refuse the affected units
+    #    with a recorded limitation, rather than silently overwriting one unit and
+    #    reporting an inflated scenario count (the file-namespace equivalent of the
+    #    generator's refusal contract).
+    by_basename: dict[str, set[str]] = {}
+    for entry in inventory.selected:
+        candidate = bench_root / str(entry.get("path", ""))
+        if candidate.is_file() and candidate.suffix.lower() in (".c", ".h"):
+            by_basename.setdefault(candidate.name, set()).add(str(candidate.resolve()))
+    colliding = {name for name, paths in by_basename.items() if len(paths) > 1}
     for unit in inventory.units:
-        if unit.id in excluded:
-            blocked_headers.add(Path(unit.path).stem)
+        if Path(unit.path).name in colliding and unit.id not in excluded:
+            excluded = excluded | {unit.id}
+            out.limitations.append(
+                f"unit {unit.id} ({unit.path}) shares the basename "
+                f"{Path(unit.path).name!r} with another selected file; a flat C "
+                "revision cannot disambiguate the include, so it was excluded "
+                "from the executable suite")
+
+    copied: set[str] = set()
     for entry in inventory.selected:
         candidate = bench_root / str(entry.get("path", ""))
         if not candidate.is_file() or candidate.suffix.lower() not in (".c", ".h"):
+            continue
+        if candidate.name in colliding:
             continue
         if candidate.suffix.lower() == ".c":
             owner = next((u for u in inventory.units if Path(u.path).name == candidate.name), None)
@@ -424,9 +447,9 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
 
     test_names: list[str] = []
     # Every excluded unit is recorded, whether or not the plan mentioned it, so a
-    # blocked source is never silently dropped from the run (R03).
+    # blocked (or collision-excluded) source is never silently dropped (R03).
     for unit in inventory.units:
-        if unit.id in excluded:
+        if unit.id in blocked_ids:
             out.limitations.append(
                 f"unit {unit.id} ({unit.path}) is BLOCKED and was excluded from "
                 "the executable suite")
@@ -452,6 +475,16 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
 
 def _ident(symbol: str) -> str:
     return re.sub(r"\W", "_", symbol)
+
+
+def test_name_for(unit_id: str, scenario_id: str) -> str:
+    """The Unity test function name for a scenario (one place, one rule).
+
+    Both the emitter and the finding→scenario mapper use this, so a scenario id
+    containing ``-`` or ``_`` is never mis-split when a finding is attributed back
+    to its oracle (the id is not reversed; the name is looked up in the plan).
+    """
+    return f"test_{unit_id.replace('unit-', 'u')}_{scenario_id}".replace("-", "_")
 
 
 def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -> str:
@@ -589,7 +622,7 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
         signature = signatures.get(fn, "")
         params = func_params(signature)
         void_ret = return_is_void(signature)
-        test_name = f"test_{scenario.unit_id.replace('unit-', 'u')}_{scenario.id}".replace("-", "_")
+        test_name = test_name_for(scenario.unit_id, scenario.id)
         controls: dict[str, dict[str, Any]] = {}
         problem: str | None = None
         for symbol in scenario.mocks:

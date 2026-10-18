@@ -797,12 +797,26 @@ def cmd_plan(args: Any, ctx: "Context") -> dict[str, Any]:
             action="Run 'mtm generate' to plan and generate the test bench.",
             stage="plan",
         )
+    # Guard against presenting a stale plan: its snapshot must match the current
+    # inventory, otherwise the inputs changed since this plan was written and the
+    # plan is not authoritative for them (SYS-008).
+    inventory = read_json(state / "inventory.json")
+    plan_hash = plan.get("snapshot_hash", "")
+    current_hash = (inventory or {}).get("snapshot_hash", "")
+    if current_hash and plan_hash and plan_hash != current_hash:
+        raise MtmError(
+            code=Code.SNAPSHOT_MISMATCH,
+            message="The stored plan does not match the current selected inputs.",
+            action="Re-run 'mtm generate' to plan against the current inputs.",
+            stage="plan",
+        )
     scenarios = plan.get("scenarios", [])
     generated = set((suite or {}).get("test_functions", []))
+    from .gen import test_name_for
+
     rows = []
     for scenario in scenarios:
-        unit = scenario.get("unit_id", "")
-        test_name = f"test_{unit.replace('unit-', 'u')}_{scenario.get('id')}".replace("-", "_")
+        test_name = test_name_for(scenario.get("unit_id", ""), str(scenario.get("id", "")))
         rows.append({
             "id": scenario.get("id"),
             "function": scenario.get("function"),
