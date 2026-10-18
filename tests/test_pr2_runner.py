@@ -2881,6 +2881,152 @@ def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     assert "typedef unsigned short Q;" in body, body
 
 
+# --- AP-08 / IMP-18: a real declaration is authoritative over an LLM proposal --
+
+
+#: The exact IMP-18 divergent field: it carries BOTH a `typedef` and a prototype,
+#: and the prototype's return type contradicts the real selected `sensor.h`
+#: (`int platform_read_sensor(uint16_t *reading);`).
+_IMP18_DIVERGENT = (
+    "typedef enum { SENSOR_OK=0, SENSOR_ERROR=1, SENSOR_OUT_OF_RANGE=2 } sensor_status_t;\n"
+    "sensor_status_t platform_read_sensor(uint16_t *reading);"
+)
+
+
+def _imp18_scenarios() -> list[dict]:
+    divergent = _IMP18_DIVERGENT
+    def scen(sid, req, expected, mocks):
+        return {"id": sid, "title": "t", "function": "sample_sensor",
+                "requirement_ids": [req], "mocks": ["platform_read_sensor"],
+                "mock_declarations": {"platform_read_sensor": divergent},
+                "cases": [{"args": [0], "expected": expected,
+                           "mocks": {"platform_read_sensor": mocks},
+                           "expect_out": {}, "expect_calls": {"platform_read_sensor": 1}}],
+                "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    return [scen("S1", "SEN-002", "SENSOR_ERROR", {"ret": 1, "reading": 0}),
+            scen("S2", "SEN-003", "SENSOR_OK", {"ret": 0, "reading": 500}),
+            scen("S3", "SEN-004", "SENSOR_OUT_OF_RANGE", {"ret": 0, "reading": 5000})]
+
+
+def test_a_real_selected_prototype_beats_a_divergent_llm_declaration(tmp_path):
+    """AP-08 / IMP-18: an LLM `mock_declarations` entry never overrides a real
+    declaration resolved from the selected build context.
+
+    IMP-18's reproduction: the header declares ``int platform_read_sensor(uint16_t
+    *reading);`` while the plan's field proposed ``sensor_status_t …`` (and carried a
+    ``typedef`` too). The default (LLM-first) order produced ``INCOMPLETE`` with five
+    "no usable declaration" limitations and ``generated=0``. The real ``int``
+    prototype must win, the three scenarios must materialise, and no limitation may
+    remain.
+    """
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "imp18"
+    bench.mkdir()
+    source = (EXAMPLES / "mocked-sensor" / "sensor.c").read_text()
+    header = (EXAMPLES / "mocked-sensor" / "sensor.h").read_text()
+    (bench / "sensor.c").write_text(source)
+    (bench / "sensor.h").write_text(header)
+    (bench / "sdd.md").write_text((EXAMPLES / "mocked-sensor" / "sdd.md").read_text())
+    run_mtm_json("init", str(bench))
+    for n, kind in (("sensor.c", "source"), ("sensor.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": _imp18_scenarios()}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
+
+    # The three scenarios materialise; the LLM's contradiction leaves no limitation.
+    assert len(out.test_functions) == 3, out.limitations
+    assert out.limitations == [], out.limitations
+    body = (bench / ".mtm" / "gen" / "interface"
+            / "mtm_dep_platform_read_sensor.h").read_text()
+    assert "int platform_read_sensor(uint16_t *reading);" in body, body
+    assert "sensor_status_t platform_read_sensor" not in body, body
+    # Provenance: the declaration came from the real selected context, not the LLM.
+    assert out.types["declaration_sources"]["platform_read_sensor"] in (
+        "clang", "selected-header"), out.types
+
+
+def test_an_llm_declaration_is_used_only_when_no_real_declaration_exists(tmp_path):
+    """Contrast (the mandated fallback): with **no** declaration in the selected
+    context, an unambiguous LLM prototype is used — never invented. Here the header
+    does not mention ``dep_write`` at all, so clang resolves nothing for it and the
+    plan's single-prototype field stands."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+    import yaml
+
+    bench = tmp_path / "llm-fallback"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int use(int a) { return dep_write(a); }\n")
+    # `foo.h` declares only the SUT — `dep_write` is nowhere real.
+    (bench / "foo.h").write_text("#ifndef FOO_H\n#define FOO_H\nint use(int a);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **FOO-001**: `use` SHALL return the read.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(
+        bench, yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", []))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_write"],
+        "mock_declarations": {"dep_write": "int dep_write(int a);"},
+        "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {"ret": 1}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
+    assert out.test_functions, out.limitations
+    assert out.types["declaration_sources"]["dep_write"] == "llm", out.types
+    body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
+    assert "int dep_write(int a);" in body, body
+
+
+def test_an_ambiguous_llm_declaration_field_is_a_named_limitation(tmp_path):
+    """Contrast (the refusal): with no real declaration and a ``mock_declarations``
+    field that is **not one unambiguous prototype** (IMP-18 recorded such a field),
+    the generator must record a precise named limitation and invent no signature."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+    import yaml
+
+    bench = tmp_path / "ambiguous-field"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int use(int a) { return dep_write(a); }\n")
+    (bench / "foo.h").write_text("#ifndef FOO_H\n#define FOO_H\nint use(int a);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **FOO-001**: `use` SHALL return the read.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(
+        bench, yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", []))
+    # Two different prototypes for the same symbol: ambiguous, so unusable.
+    ambiguous = ("int dep_write(int a);\n"
+                 "long dep_write(long a);")
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_write"],
+        "mock_declarations": {"dep_write": ambiguous},
+        "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {"ret": 1}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
+    assert out.test_functions == [], out.test_functions
+    assert any("no usable declaration" in lim and "not one unambiguous prototype" in lim
+               for lim in out.limitations), out.limitations
+    # No interface header for the refused mock: nothing dangling, no invented C.
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").exists()
+
+
 def test_a_typedef_after_a_declaration_on_the_same_line_is_still_resolved(tmp_path):
     """A ``typedef`` that does not start its line (``int g(void); typedef
     unsigned short vendor_t;``) must still be attributed to a defining *header*, so

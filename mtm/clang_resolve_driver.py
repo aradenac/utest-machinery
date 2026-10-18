@@ -205,8 +205,12 @@ def _resolve_one(clang: Any, tu: Any, root: str) -> dict[str, Any]:
             "variadic": cursor.type.is_function_variadic(),
             "return": _type_fact(clang, cursor.result_type, [], typedefs, root),
             "params": [
-                _type_fact(clang, arg.type, [t.spelling for t in arg.get_tokens()],
-                           typedefs, root)
+                # `name` is the declaration's own parameter name, so the generator
+                # can reconstruct the prototype text from clang facts (CMock's
+                # `ReturnThruPtr_<name>` and the plan's mock controls key on it).
+                {**_type_fact(clang, arg.type, [t.spelling for t in arg.get_tokens()],
+                              typedefs, root),
+                 "name": arg.spelling}
                 for arg in cursor.get_arguments()
             ],
         }

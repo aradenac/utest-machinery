@@ -102,6 +102,12 @@ class TypeFact:
     record: dict[str, str] | None = None
     #: True when the type is a function/array shape the generator cannot render.
     opaque: bool = False
+    #: The declaration's own parameter name (``""`` for a return type or any type
+    #: fact that is not a parameter). Carried so the generator can reconstruct a
+    #: function's declaration **text** from the authoritative facts — CMock's
+    #: ``ReturnThruPtr_<name>`` and the plan's per-parameter mock controls are
+    #: keyed by that name, so a reconstructed prototype must keep the real one.
+    name: str = ""
     aliases: list[AliasFact] = field(default_factory=list)
 
 
@@ -189,7 +195,7 @@ def _type_to_dict(t: TypeFact) -> dict[str, Any]:
     return {
         "spelling": t.spelling, "canonical": t.canonical, "kind": t.kind,
         "base": t.base, "depth": t.depth, "qualifiers": t.qualifiers,
-        "record": t.record, "opaque": t.opaque,
+        "record": t.record, "opaque": t.opaque, "name": t.name,
         "aliases": [
             {"name": a.name, "file": a.file, "line": a.line,
              "base": a.base, "depth": a.depth, "record": a.record,
@@ -337,6 +343,7 @@ def _type_from_json(data: dict[str, Any]) -> TypeFact:
         qualifiers=list(data.get("qualifiers", [])),
         record=data.get("record"),
         opaque=bool(data.get("opaque", False)),
+        name=str(data.get("name", "")),
         aliases=[_alias_from_json(a) for a in data.get("aliases", [])],
     )
 

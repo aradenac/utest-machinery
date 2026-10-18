@@ -338,6 +338,81 @@ def test_plan_retains_inspectable_evidence(fixture_bench):
     assert stored["raw_response"]["scenarios"]
 
 
+# --- AP-08 / IMP-18: real declaration wins, end to end in the product image --
+
+#: The IMP-18 divergent field verbatim in spirit: the plan's `mock_declarations`
+#: entry carries a `typedef` **and** a prototype whose return type contradicts the
+#: real `sensor.h` (`int platform_read_sensor(uint16_t *reading);`).
+_IMP18_LLM_FIELD = (
+    "typedef enum { SENSOR_OK=0, SENSOR_ERROR=1, SENSOR_OUT_OF_RANGE=2 } sensor_status_t;\n"
+    "sensor_status_t platform_read_sensor(uint16_t *reading);"
+)
+
+
+def _imp18_recording() -> dict:
+    def scen(sid, req, expected, mocks):
+        return {"id": sid, "title": "t", "function": "sample_sensor",
+                "requirement_ids": [req], "mocks": ["platform_read_sensor"],
+                "mock_declarations": {"platform_read_sensor": _IMP18_LLM_FIELD},
+                "cases": [{"args": [0], "expected": expected,
+                           "mocks": {"platform_read_sensor": mocks},
+                           "expect_out": {}, "expect_calls": {"platform_read_sensor": 1}}],
+                "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    return {
+        "fixture": "mocked-sensor-imp18",
+        "match": {"functions": ["sample_sensor"], "requirements": ["SEN-002", "SEN-003"]},
+        "identity": {"model": "recorded-deepseek-v4.1-flash", "prompt_version": "plan-v2"},
+        "response": {"scenarios": [
+            scen("S1", "SEN-002", "SENSOR_ERROR", {"ret": 1, "reading": 0}),
+            scen("S2", "SEN-003", "SENSOR_OK", {"ret": 0, "reading": 500}),
+            scen("S3", "SEN-004", "SENSOR_OUT_OF_RANGE", {"ret": 0, "reading": 5000}),
+        ]},
+    }
+
+
+@pytest.mark.docker
+def test_imp18_real_prototype_wins_and_the_suite_compiles_and_runs(
+        fixture_bench, product_image, tmp_path):
+    """AP-08 / IMP-18 / AP-02: on a copy of ``examples/mocked-sensor`` whose plan
+    (driven through the **recorded provider**, no live LLM) proposes a *divergent*
+    ``platform_read_sensor`` declaration, the generator must use the **real**
+    ``int`` prototype from ``sensor.h``, materialise the scenarios (``generated > 0``,
+    no per-symbol limitation), and the resulting bench must **compile and run** in
+    the real product image — the owner's mandated proof, made deterministic."""
+    from mtm.generate import run_generate
+    from mtm.llm import MockProvider
+    import yaml as _yaml
+
+    bench = fixture_bench("mocked-sensor")
+    # A deterministic recorded response: the only recording, so no tie with the
+    # shipped `mocked-sensor.json` (which supplies no `mock_declarations`).
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    (rec_dir / "imp18.json").write_text(json.dumps(_imp18_recording()))
+
+    scopes = _yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
+
+    result = run_generate(bench, scopes, provider=MockProvider(rec_dir),
+                          image=product_image)
+    # Scenarios materialised: the real prototype won; the LLM contradiction left
+    # no limitation for the symbol.
+    assert result.status == "SUCCEEDED", (result.status, result.suite.get("limitations"))
+    assert result.exit_code == 0, result.smoke
+    assert len(result.suite["test_functions"]) == 3, result.suite
+    assert not any("platform_read_sensor" in lim for lim in result.suite["limitations"]), \
+        result.suite["limitations"]
+    assert result.suite["types"]["declaration_sources"]["platform_read_sensor"] in (
+        "clang", "selected-header"), result.suite["types"]
+    # The real `int` signature, not the LLM's `sensor_status_t`.
+    header = (bench / REVISION / "interface" / "mtm_dep_platform_read_sensor.h").read_text()
+    assert "int platform_read_sensor(uint16_t *reading);" in header, header
+    assert "sensor_status_t platform_read_sensor" not in header, header
+    # Compiled and executed in the product image.
+    assert result.smoke["built"] is True and result.smoke["ran"] is True, result.smoke
+    assert result.smoke["unity"]["total"] == 3, result.smoke
+    assert result.smoke["unity"]["failed"] == 0, result.smoke
+
+
 def test_invariant_generation_is_reproducible(fixture_bench):
     from mtm.gen import generate_suite
     from mtm.inventory import build_inventory
