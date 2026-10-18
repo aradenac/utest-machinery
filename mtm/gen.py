@@ -291,18 +291,23 @@ _STORAGE_CLASS = {"extern", "static", "inline", "register", "auto", "typedef",
 _QUALIFIERS = {"const", "volatile", "restrict"}
 
 
-def _type_key(raw: str, name: str = "") -> str:
-    """A comparison key for a raw C type/declarator that preserves C significance.
+def _type_key(raw: str, name: str = "", *, drop_top: bool = True) -> str:
+    """A comparison key for a raw C type/declarator, one ``|``-joined segment per
+    ``*`` level (so pointer **depth** is preserved).
 
-    Storage class and the declared *name* are dropped. Pointer **depth** is
-    preserved. A **pointee** qualifier is kept — it is part of the type
-    (`const char *` != `char *`; gcc: "conflicting types") — while a **pointer-level**
-    or by-value top-level qualifier is dropped, both being ignored for
-    compatibility (`int *const p` == `int *p`, `const int x` == `int x`). Pointee
-    base tokens are compared order-insensitively (`unsigned long` == `long unsigned`).
+    C's rule (6.7.6.3p15): for function-type compatibility a **parameter** is taken
+    as having the *unqualified* version of its outermost type — so a top-level
+    qualifier on a parameter or on the pointer it is (``const int x`` == ``int x``,
+    ``int * const p`` == ``int *p``) is ignored. Every *other* level keeps its
+    qualifier **by identity and position**: an inner-pointer or pointee qualifier
+    is part of the type (``const char *`` != ``char *``; ``char * const *`` !=
+    ``char **``; ``const int *`` != ``volatile int *``) — dropping or collapsing
+    those admits a real conflict that then dies as an opaque build failure.
 
-    Operates on the *raw* declarator text (from which the ``*`` position is still
-    visible); a key built from ``parse_param``'s output would lose it.
+    Within a segment, storage class is dropped, the base tokens are compared
+    order-insensitively (``unsigned long`` == ``long unsigned``) and the qualifier
+    set is sorted (``const volatile`` == ``volatile const``). The declared *name*
+    is removed. A return type uses ``drop_top=False`` (no parameter adjustment).
 
     A deliberate textual approximation, **not** a full C type system: a
     typedef-alias spelling of the same type (`size_t` vs `unsigned long`) is still
@@ -312,14 +317,16 @@ def _type_key(raw: str, name: str = "") -> str:
     if name:
         text = re.sub(rf"\b{re.escape(name)}\s*$", "", text).strip()
     segments = text.split("*")
-    depth = len(segments) - 1
-    base_tokens = [t for t in re.split(r"\s+", segments[0].strip())
-                   if t and t not in _STORAGE_CLASS]
-    # A top-level qualifier is significant only on a pointee (depth > 0); on a
-    # by-value type or a pointer-level qualifier it is ignored by C.
-    keep_qual = depth > 0 and any(t in _QUALIFIERS for t in base_tokens)
-    base = "+".join(sorted(t for t in base_tokens if t not in _QUALIFIERS))
-    return ("const" if keep_qual else "") + base + "*" * depth
+    keys: list[str] = []
+    for index, segment in enumerate(segments):
+        tokens = [t for t in re.split(r"\s+", segment.strip())
+                  if t and t not in _STORAGE_CLASS]
+        quals = sorted(t for t in tokens if t in _QUALIFIERS)
+        base = sorted(t for t in tokens if t not in _QUALIFIERS)
+        if drop_top and index == len(segments) - 1:
+            quals = []  # the parameter's outermost qualifier is ignored by C
+        keys.append("+".join(quals) + "/" + "+".join(base))
+    return "|".join(keys)
 
 
 def _raw_params(params: str) -> list[str]:
@@ -353,9 +360,9 @@ def _signature_key(signature: str) -> tuple | None:
 
     Parameter names are dropped and types normalised by :func:`_type_key`, so a
     header repeating the same declaration with different parameter names, a
-    spurious by-value or pointer-level `const`, or an `extern` storage class is
-    not a conflict, while a genuine type difference (arity, pointee qualifier,
-    pointer depth, base type) still is. Parsed independently of
+    spurious outermost `const`, or an `extern` storage class is not a conflict,
+    while a genuine type difference (arity, any non-outermost qualifier, pointer
+    depth, base type, return type) still is. Parsed independently of
     ``split_declaration`` (which deliberately refuses *pointer returns* and other
     shapes the **generator** cannot emit): a pointer-returning prototype is a
     perfectly comparable declaration, and treating it as unparseable would silently
@@ -367,7 +374,7 @@ def _signature_key(signature: str) -> tuple | None:
     m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
     if not m or "..." in m.group("params"):
         return None
-    ret_key = _type_key(m.group("ret"))
+    ret_key = _type_key(m.group("ret"), drop_top=False)
     keys: list[str] = []
     for raw in _raw_params(m.group("params")):
         if "(" in raw or "[" in raw:

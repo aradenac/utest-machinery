@@ -1349,9 +1349,12 @@ def test_a_pointer_returning_stem_header_with_an_incompatible_arity_is_refused(t
     from mtm.llm import LLMIdentity
     from mtm.plan import parse_plan
 
-    # The key must exist (not None) for pointer returns.
-    assert _signature_key("int *foo_a(int x)") == ("int*", ("int",))
-    assert _signature_key("int *foo_a(void)") == ("int*", ())
+    # The key must exist (not None) for pointer returns, and separate an arity
+    # mismatch while accepting a matching declaration (behavioural, not tied to
+    # the key's internal format).
+    assert _signature_key("int *foo_a(int x)") is not None
+    assert _signature_key("int *foo_a(int x)") != _signature_key("int *foo_a(void)")
+    assert _signature_key("int *foo_a(int x)") == _signature_key("int *foo_a(int y)")
 
     bench = tmp_path / "ptr-return-incompatible"
     bench.mkdir()
@@ -1415,39 +1418,53 @@ def test_compatible_signature_spellings_are_never_falsely_refused(tmp_path):
     assert _signature_key("int foo_a(void)") == _signature_key("int foo_a()")
 
 
-def test_compatible_qualifiers_and_storage_class_are_never_falsely_refused(tmp_path):
-    """E2-residual contrast (fresh PR_RECHECK): a header repeating the same
-    declaration with a top-level ``const``, an ``extern`` storage class, or
-    differing whitespace is C-compatible and must generate, not be refused as an
-    "incompatible signature". A genuine difference (arity, param type, return
-    type) is still refused."""
-    from mtm.gen import _signature_key
+def test_signature_compatibility_rule_matrix(tmp_path):
+    """E2-residual: the ONE rule the conflict check implements, as a documented
+    matrix — so it is not re-litigated case by case (a convergence-guardian and a
+    fresh verifier each caught a distinct over-reach while it was ad hoc).
 
-    # Compatible: qualifiers/storage class do not change the function type.
-    assert _signature_key("int sensor_read(int x)") == \
-        _signature_key("int sensor_read(const int x)")
-    assert _signature_key("int sensor_read(int x)") == \
-        _signature_key("extern int sensor_read(int x);")
-    assert _signature_key("int foo_a(int *p)") == _signature_key("int foo_a(int * p)")
-    # A qualifier on a POINTER parameter is part of the type (`char *` and
-    # `const char *` differ; gcc reports "conflicting types"), so it must stay a
-    # conflict — dropping it reopened the E2 opaque-build class (found by the
-    # convergence-guardian).
-    assert _signature_key("int foo_a(char *p)") != \
-        _signature_key("int foo_a(const char *p)")
-    # A POINTER-LEVEL qualifier is ignored by C (`int *const p` == `int *p`;
-    # gcc compiles the re-declaration), so it must NOT be refused (found by the
-    # fresh verifier).
-    assert _signature_key("int foo_a(int *p)") == \
-        _signature_key("int foo_a(int * const p)")
-    # Pointer DEPTH is significant.
-    assert _signature_key("int foo_a(int *p)") != \
-        _signature_key("int foo_a(int **p)")
-    # Still refused: a real type difference.
-    assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int *x)")
-    assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int x, int y)")
+    Rule (C 6.7.6.3p15): a *parameter* is taken as having the unqualified version
+    of its OUTERMOST type, so a top-level qualifier (by-value, or on the pointer
+    itself) is ignored; every other level keeps its qualifier **by identity and
+    position**. Storage class is ignored everywhere and base tokens compare
+    order-insensitively. A return type is not a parameter, so it keeps even its
+    outermost qualifier.
 
-    # End to end: the `const int` bench now generates (previously refused).
+    Textual approximation (recorded limitation): a typedef alias of the same type
+    (`size_t` vs `unsigned long`) is treated as a difference.
+    """
+    from mtm.gen import _signature_key as key
+
+    # (a, b, same?)
+    matrix = [
+        # ignored: storage class, and the OUTERMOST qualifier of a parameter
+        ("int f(int x)", "int f(const int x)", True),           # by-value const
+        ("int f(int x)", "int f(volatile int x)", True),        # by-value volatile
+        ("int f(int x)", "extern int f(int x);", True),         # storage class
+        ("int f(int x)", "static int f(int x);", True),
+        ("int f(int *p)", "int f(int * const p)", True),        # pointer-level const
+        ("int f(int *p)", "int f(int * restrict p)", True),     # pointer-level restrict
+        # compatible: name, token order, qualifier order
+        ("int f(int a)", "int f(int b)", True),
+        ("int f(unsigned long n)", "int f(long unsigned n)", True),
+        ("int f(const volatile int *p)", "int f(volatile const int *p)", True),
+        ("int f(int)", "int f(int x)", True),                   # unnamed param
+        # significant: any non-outermost qualifier, by identity and position
+        ("int f(char *p)", "int f(const char *p)", False),      # pointee const
+        ("int f(const int *p)", "int f(volatile int *p)", False),  # pointee identity
+        ("int f(char **p)", "int f(char * const *p)", False),   # INNER pointer const
+        ("int f(int *p)", "int f(int **p)", False),             # pointer depth
+        # significant: arity, base type, return type
+        ("int f(int x)", "int f(long x)", False),
+        ("int f(int x)", "int f(int x, int y)", False),
+        ("int f(int x)", "long f(int x)", False),
+        ("int f(int *p)", "long f(int *p)", False),
+    ]
+    for a, b, same in matrix:
+        got = key(a) == key(b)
+        assert got == same, f"{a!r} vs {b!r}: same={got}, expected {same}"
+
+    # End to end: the `const int` bench generates (outermost qualifier ignored)…
     from mtm.gen import generate_suite
     from mtm.inventory import build_inventory
     from mtm.llm import LLMIdentity
@@ -1591,11 +1608,13 @@ def test_real_image_builds_a_previously_refused_compatible_declaration(
 
 
 def test_a_pointer_parameter_qualifier_conflict_is_refused(tmp_path):
-    """E2-residual contrast (found by the convergence-guardian): a qualifier on a
-    POINTER parameter is part of the type, so a header declaring `int f(char *p)`
-    against a source defining `int f(const char *p)` is a genuine conflict (gcc:
-    "conflicting types"). It must be refused with a limitation — normalising the
-    qualifier away admitted it and reopened the opaque-build class E2 removes."""
+    """E2-residual contrast (found by the convergence-guardian, then the fresh
+    verifier): a qualifier below the parameter's outermost level is part of the
+    type, so a header disagreeing with the source on it is a genuine conflict
+    (gcc: "conflicting types") and must be refused with a limitation. Normalising
+    a pointee qualifier away — or collapsing all pointee qualifiers to one token,
+    or dropping an inner-pointer qualifier — admitted a real conflict that then
+    died as the opaque build failure E2 removes."""
     from mtm.gen import _signature_key, generate_suite
     from mtm.inventory import build_inventory
     from mtm.llm import LLMIdentity
@@ -1603,12 +1622,53 @@ def test_a_pointer_parameter_qualifier_conflict_is_refused(tmp_path):
 
     assert _signature_key("int foo_a(char *p)") != \
         _signature_key("int foo_a(const char *p)")
+    assert _signature_key("int foo_a(const int *p)") != \
+        _signature_key("int foo_a(volatile int *p)")
+    assert _signature_key("int foo_a(char **p)") != \
+        _signature_key("int foo_a(char * const *p)")
 
-    bench = tmp_path / "ptr-qualifier-conflict"
+    for label, source, header in (
+            ("pointee-const", "int foo_a(const char *p) { return p[0]; }\n",
+             "int foo_a(char *p);"),
+            ("pointee-identity", "int foo_a(const int *p) { return *p; }\n",
+             "int foo_a(volatile int *p);"),
+            ("inner-pointer", "int foo_a(char **p) { return 0; }\n",
+             "int foo_a(char * const *p);")):
+        bench = tmp_path / f"qualifier-conflict-{label}"
+        bench.mkdir()
+        (bench / "foo.c").write_text(source)
+        (bench / "foo.h").write_text(
+            f"#ifndef FOO_H\n#define FOO_H\n{header}\n#endif\n")
+        (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+        run_mtm_json("init", str(bench))
+        for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+            run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+        inventory = build_inventory(bench, _scopes(bench))
+        plan = parse_plan(json.dumps({"scenarios": [
+            {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+             "mocks": [], "cases": [{"args": ["x"], "expected": 1}],
+             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+            inventory, LLMIdentity(provider="test", model="t"))
+        out = generate_suite(bench, plan, inventory)
+        assert out.test_functions == [], (label, out.test_functions)
+        assert any("incompatible" in lim for lim in out.limitations), (label, out.limitations)
+
+
+def test_a_matching_pointee_qualified_declaration_generates(tmp_path):
+    """Contrast for the conflict above: an *outermost* qualifier stays ignorable
+    while a matching non-outermost qualifier is not a conflict, so the same
+    declarations that are refused when they disagree must generate when they
+    agree."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "matching-pointee-qualifier"
     bench.mkdir()
-    (bench / "foo.c").write_text("int foo_a(const char *p) { return p[0]; }\n")
+    (bench / "foo.c").write_text("int foo_a(volatile int *p) { return *p; }\n")
     (bench / "foo.h").write_text(
-        "#ifndef FOO_H\n#define FOO_H\nint foo_a(char *p);\n#endif\n")
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(volatile int *p);\n#endif\n")
     (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
     run_mtm_json("init", str(bench))
     for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
@@ -1620,5 +1680,4 @@ def test_a_pointer_parameter_qualifier_conflict_is_refused(tmp_path):
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
         inventory, LLMIdentity(provider="test", model="t"))
     out = generate_suite(bench, plan, inventory)
-    assert out.test_functions == [], out.test_functions
-    assert any("incompatible" in lim for lim in out.limitations), out.limitations
+    assert out.test_functions, out.limitations
