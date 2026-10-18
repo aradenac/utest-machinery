@@ -2429,7 +2429,7 @@ def test_a_guardless_aggregate_alias_header_is_a_named_limitation(tmp_path):
                     "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert out.test_functions == [], out.test_functions
-    assert any("no include guard" in lim for lim in out.limitations), out.limitations
+    assert any("repeats an inline struct/union/enum" in lim for lim in out.limitations), out.limitations
     # No interface header was written for the refused mock, so nothing dangling.
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
     # A guard-less *scalar* alias is still admitted (duplicate scalar typedef is OK).
@@ -2462,7 +2462,7 @@ def test_a_guardless_enum_alias_header_is_a_named_limitation(tmp_path):
          "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert out.test_functions == [], out.test_functions
-    assert any("no include guard" in lim for lim in out.limitations), out.limitations
+    assert any("repeats an inline struct/union/enum" in lim for lim in out.limitations), out.limitations
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
     # A *guarded* enum alias is shared via `#include` and must compile (a real
     # gcc compile of the include order the generated test uses).
@@ -2515,7 +2515,7 @@ def test_a_guardless_header_with_an_inline_tag_body_is_a_named_limitation(tmp_pa
          "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert out.test_functions == [], out.test_functions
-    assert any("no include guard" in lim for lim in out.limitations), out.limitations
+    assert any("repeats an inline struct/union/enum" in lim for lim in out.limitations), out.limitations
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
     # The guarded form shares and compiles.
     import shutil
@@ -2541,6 +2541,75 @@ def test_a_guardless_header_with_an_inline_tag_body_is_a_named_limitation(tmp_pa
             ["gcc", "-std=c99", "-Wall", "-Werror",
              "-I", str(bench2 / ".mtm" / "gen" / "src"),
              "-I", str(bench2 / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_a_guard_like_block_not_enclosing_the_definition_is_still_unsafe(tmp_path):
+    """F-A4-review (independent PRE_PR, CONFIRMED MANDATORY): the share-safety check
+    must prove the inline body is *inside* an include guard, not merely that the
+    header contains some ``#ifndef X``/``#define X`` pair. A **mid-file feature
+    toggle** (``#ifndef FEATURE_X … #endif``) or a definition written **before** the
+    real guard both leave the ``{…}`` repeated on a second inclusion, so such a
+    header must be treated as unshareable: previously ``_header_has_guard`` returned
+    True, the interface header ``#include``d it, and the generated test's TU failed
+    with ``conflicting types for 'S'`` while ``limitations == []`` — uncompilable C,
+    the shape §C forbids. Both shapes must now be refused with a named limitation."""
+    for name, header in (
+        ("feature-toggle", "#ifndef FEATURE_X\n#define FEATURE_X 0\n#endif\n"
+                           "#include <stdint.h>\ntypedef struct { int v; } S;\n"
+                           "void dep_send(S *s);\nint use(int a);\n"),
+        ("def-before-guard", "#include <stdint.h>\ntypedef struct { int v; } S;\n"
+                             "#ifndef FOO_H\n#define FOO_H\n"
+                             "void dep_send(S *s);\nint use(int a);\n#endif\n"),
+    ):
+        bench, out = _mock_bench(
+            tmp_path, name,
+            "int use(int a) { S s = {0}; dep_send(&s); return a; }\n", header,
+            {"id": "S1", "title": "t", "function": "use",
+             "requirement_ids": ["FOO-001"], "mocks": ["dep_send"],
+             "cases": [{"args": [1], "expected": 1,
+                        "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+        assert out.test_functions == [], (name, out.test_functions)
+        assert any("repeats an inline struct/union/enum" in lim
+                   for lim in out.limitations), (name, out.limitations)
+        assert not (bench / ".mtm" / "gen" / "interface"
+                    / "mtm_dep_dep_send.h").exists(), name
+
+
+def test_a_pragma_once_header_with_an_inline_body_stays_shareable(tmp_path):
+    """The complementary safe case the guard check must NOT false-refuse:
+    ``#pragma once`` is the idiomatic, Ceedling-common way to make a header
+    double-includable. Its inline-body alias can be shared through the interface
+    header without a repeat defect, so its mock scenario must still be generated
+    (previously ``_header_has_guard`` saw no ``#ifndef`` and refused it, dropping
+    working coverage). Verified by a real compile of the generated include order."""
+    import shutil
+    import subprocess
+
+    bench, out = _mock_bench(
+        tmp_path, "pragma-once-body",
+        "int use(int a) { S s = {0}; dep_send(&s); return a; }\n",
+        "#pragma once\n#include <stdint.h>\ntypedef struct { int v; } S;\n"
+        "void dep_send(S *s);\nint use(int a);\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1,
+                    "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-pragma"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_send.h"\n#include "foo.h"\n'
+                      "static S g;\nint main(void) { (void)g; return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
              "-c", str(tu), "-o", str(comp / "tu.o")],
             capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr

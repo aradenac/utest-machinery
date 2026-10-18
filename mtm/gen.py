@@ -1058,7 +1058,6 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     # definition per TU) and falls back to verbatim text only for an alias with no
     # includable header (e.g. one written in a .c).
     alias_header: dict[str, str] = {}
-    guarded_headers: dict[str, bool] = {}
     unsafe_headers: set[str] = set()
     for name in sorted(copied):
         if not name.endswith((".c", ".h")):
@@ -1071,16 +1070,14 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             if name.endswith(".h"):
                 alias_header.setdefault(alias, name)
         if name.endswith(".h"):
-            guarded_headers[name] = _header_has_guard(text)
-            # A header that *defines* a struct/union/enum with an inline body
-            # cannot be included twice in one TU: the second inclusion repeats the
-            # `{…}` definition (`redefinition of 'struct S'`) whether the body is
-            # anonymous (`typedef struct {…} S;`, `typedef enum {…} e_t;`) or tag-
-            # named (`struct S {…}; … typedef struct S S_t;`). This is a
-            # *header-level* property: it holds for a tag-reference alias whose own
-            # statement has no body, because the body lives in the same header. A
-            # header with only plain/pointer typedefs stays safe to duplicate.
-            if _header_defines_inline_type(text):
+            # A header cannot be shared (included twice in one TU) when re-inclusion
+            # repeats an inline `struct`/`union`/`enum` definition — whether the body
+            # is anonymous (`typedef struct {…} S;`) or tag-named
+            # (`struct S {…}; … typedef struct S S_t;`), and whether it is guarded
+            # *around the definition* or not. This is a *header-level* property
+            # (`_header_shares_safely`); a header with only plain/pointer typedefs, or
+            # whose every inline body lies inside an include guard, stays safe.
+            if not _header_shares_safely(text):
                 unsafe_headers.add(name)
     for name in shim_names:
         for alias, typedef in scan_typedefs(shim_dir / name).items():
@@ -1115,29 +1112,26 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         # also sees); only an alias with no includable header is spelled verbatim.
         alias_includes, alias_defs = _typedef_aliases_for_decl(decl, alias_statements,
                                                                alias_header)
-        # The include-based alias sharing needs the defining header's own guard to
-        # give the TU one definition. A guard-less header that **defines an inline
-        # `struct`/`union`/`enum`** is the one shape that cannot be shared safely:
-        # the test includes it both here and directly, and the second definition is
-        # a hard `redefinition`/`conflicting types`/`redeclaration of enumerator`
-        # error. This covers an anonymous body (`typedef struct {…} S;`) *and* a
-        # tag-named one (`struct S {…}; typedef struct S S_t;`) — the alias's own
-        # statement has no body, but the header still repeats it. A header with only
-        # plain/pointer typedefs duplicates legally and is admitted. Refuse with a
-        # named limitation rather than emit an opaque build failure — a shape §C
-        # demands be recorded, not silently broken.
+        # The include-based alias sharing needs the defining header to be safe to
+        # include twice in one TU: the test includes it both directly (via its own
+        # unit header) and through this private header. A header that repeats an
+        # inline `struct`/`union`/`enum` definition on re-inclusion (`unsafe_headers`)
+        # makes that second definition a hard `redefinition`/`conflicting types`/
+        # `redeclaration of enumerator` error — whether the body is anonymous
+        # (`typedef struct {…} S;`) or tag-named (`struct S {…}; typedef struct S S_t;`),
+        # and regardless of any guard-like `#ifndef` that does *not* enclose the
+        # definition. Refuse with a named limitation rather than emit an opaque build
+        # failure — a shape §C demands be recorded, not silently broken.
         unguarded = sorted({
             alias_header[a] for a in _decl_alias_tokens(decl, alias_statements,
                                                         alias_header)
-            if a in alias_header
-            and not guarded_headers.get(alias_header[a], True)
-            and alias_header[a] in unsafe_headers})
+            if a in alias_header and alias_header[a] in unsafe_headers})
         if unguarded:
             refused_mocks[symbol] = (
                 f"mocked symbol {symbol!r} declares a parameter through a typedef "
-                f"defined in {unguarded!r}, which has no include guard and defines "
-                "an inline struct/union/enum; sharing it with the unit's own header "
-                "would redefine that type")
+                f"defined in {unguarded!r}, which repeats an inline struct/union/enum "
+                "definition on re-inclusion (no include guard enclosing it); sharing "
+                "it with the unit's own header would redefine that type")
             continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
@@ -1342,37 +1336,66 @@ def _typedef_aliases_for_decl(decl: str, alias_statements: dict[str, str],
     return includes, statements
 
 
-def _header_has_guard(text: str) -> bool:
-    """Whether *text* opens with an ``#ifndef``/``#define`` include guard.
+def _header_shares_safely(text: str) -> bool:
+    """Whether *text* may be included twice in one TU without redefining a type.
 
-    A guarded header can be included more than once in one translation unit (the
-    guard collapses the repeats); an unguarded one repeats its declarations, which
-    is poisonous for an anonymous-aggregate ``typedef`` (``conflicting types``).
+    True for a ``#pragma once`` header, for a header with **no** inline
+    ``struct``/``union``/``enum`` body, and for a header whose **every** inline body
+    lies inside an include guard (``#ifndef X`` … ``#endif`` with a matching
+    ``#define X``, or ``#if !defined(X)``).
+
+    A guard-like ``#ifndef`` that does *not* enclose the definition does not protect
+    it: a mid-file feature toggle (``#ifndef FEATURE_X … #endif``) or a definition
+    written **before** the real guard both leave the ``{…}`` body repeated on a
+    second inclusion, so the header must not be treated as shareable — doing so
+    emits uncompilable C (``conflicting types``) with ``limitations == []``, the
+    shape plan §C forbids. Checking the *pair* ``defines-an-inline-body`` AND
+    ``has-some-guard`` (two independent weaker properties) is unsound for exactly
+    that reason; this function checks the implication instead.
     """
     from .cscan import strip_comments_and_strings
 
     clean = strip_comments_and_strings(text)
-    m = re.search(r"(?m)^[ \t]*#\s*ifndef[ \t]+([A-Za-z_]\w*)", clean)
-    if not m:
-        return False
-    guard = m.group(1)
-    return re.search(rf"(?m)^[ \t]*#\s*define[ \t]+{re.escape(guard)}\b", clean) is not None
+    if re.search(r"(?m)^[ \t]*#\s*pragma\s+once\b", clean):
+        return True
+    spans = _guard_spans(clean)
+    defs = list(re.finditer(r"\b(?:struct|union|enum)\b[^;{}]*\{", clean))
+    for m in defs:
+        pos = m.start()
+        if not any(start <= pos < end for start, end in spans):
+            return False
+    return True
 
 
-def _header_defines_inline_type(text: str) -> bool:
-    """Whether *text* defines a ``struct``/``union``/``enum`` with an inline body.
+def _guard_spans(clean: str) -> list[tuple[int, int]]:
+    """Spans ``[start, end)`` of real include-guard regions in comment/string-stripped
+    C *clean*.
 
-    Such a header cannot be included twice in one TU: the second inclusion repeats
-    the ``{…}`` definition (``redefinition of 'struct S'`` / ``redeclaration of
-    enumerator``), regardless of whether the body is anonymous or tag-named. A
-    header whose only type declarations are plain/pointer typedefs is idempotent.
-    Detected on the comment/string-stripped text so a ``{`` inside a comment or a
-    string literal is not mistaken for a body.
+    A real guard is an ``#ifndef X`` / ``#if !defined(X)`` whose matching ``#endif``
+    encloses a ``#define X`` — so re-inclusion is collapsed. Nesting is tracked with
+    a stack, so a guard containing inner conditionals is measured to the right
+    ``#endif``.
     """
-    from .cscan import strip_comments_and_strings
-
-    clean = strip_comments_and_strings(text)
-    return re.search(r"\b(?:struct|union|enum)\b[^;{}]*\{", clean) is not None
+    spans: list[tuple[int, int]] = []
+    stack: list[list] = []  # [start, macro_or_None]
+    for m in re.finditer(r"(?m)^[ \t]*#[ \t]*(\w+)([^\n]*)", clean):
+        kw, rest = m.group(1), m.group(2)
+        if kw in ("if", "ifdef", "ifndef"):
+            macro = None
+            if kw == "ifndef":
+                macro = re.match(r"\s+([A-Za-z_]\w*)", rest)
+                macro = macro.group(1) if macro else None
+            elif kw == "if":
+                nd = re.search(r"!\s*defined\s*\(?\s*([A-Za-z_]\w*)", rest)
+                macro = nd.group(1) if nd else None
+            stack.append([m.start(), macro])
+        elif kw == "endif" and stack:
+            start, macro = stack.pop()
+            if macro and re.search(
+                    rf"(?m)^[ \t]*#[ \t]*define[ \t]+{re.escape(macro)}\b",
+                    clean[start:m.end()]):
+                spans.append((start, m.end()))
+    return spans
 
 
 def _project_yml() -> str:
