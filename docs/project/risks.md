@@ -175,6 +175,8 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Vérification d'efficacité :** lors de l'étape 3, comparer au RETEX de PR #14 le nombre de corrections/revues, la date de première détection utile, les rapports réellement utilisés sur la bonne révision, les campagnes complètes répétées sans raison et la charge de convergence. Une revue qui détecte un vrai défaut reste utile ; la réduction des tours n'est pas un objectif aveugle. Conserver les preuves dans Beads, worklog et PR existants ; pas de second tracker.
 
+**Retex intermédiaire supplémentaire (18/10/2026) :** proposition mise en œuvre dans les consignes de développement : décomposition dynamique en lots par le lead, revues parallèles de snapshots stables et hooks Claude Code légers sur livraison de rapports / fin de tâches / déclaration finale. Les hooks ne jugent ni le code ni les critères métier et ne lancent pas de campagne de tests. **C'est une mesure de processus déployée, pas une efficacité démontrée** ; sa valeur doit être mesurée sur les prochaines sessions et la compatibilité réelle CCR/DeepSeek reste à confirmer.
+
 **Statut :** 🟡 **En attente de confirmation** — règles intégrées à main, efficacité réelle non encore observée.
 
 ### Revue et mesure d'efficacité
