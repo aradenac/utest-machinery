@@ -2442,3 +2442,43 @@ def test_a_guardless_aggregate_alias_header_is_a_named_limitation(tmp_path):
          "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert ok.test_functions, ok.limitations
+
+
+def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
+    """An alias with no *header* that defines it has no includable definition, so
+    the interface header must spell it verbatim. This exercises the fallback path
+    (and guards a self-introduced ``KeyError``: the guard check must not index the
+    alias→header map for an alias that has no defining header)."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+    import yaml
+
+    bench = tmp_path / "c-defined-alias"
+    bench.mkdir()
+    # `Q` is defined only in the .c; `foo.h` is valid C that does not reference it.
+    (bench / "foo.c").write_text(
+        "typedef unsigned short Q;\n"
+        "int use(int a) { return a ? 1 : 2; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint use(int a);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `use` returns 1 for a nonzero argument.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(
+        bench, yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", []))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_write"],
+        "mock_declarations": {"dep_write": "int dep_write(Q q);"},
+        "cases": [{"args": [5], "expected": 1, "mocks": {"dep_write": {}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)  # must not raise
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
+    assert "typedef unsigned short Q;" in body, body

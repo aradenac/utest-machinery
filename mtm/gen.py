@@ -1113,7 +1113,8 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         unguarded = sorted({
             alias_header[a] for a in _decl_alias_tokens(decl, alias_statements,
                                                         alias_header)
-            if not guarded_headers.get(alias_header[a], True)
+            if a in alias_header
+            and not guarded_headers.get(alias_header[a], True)
             and getattr(typedefs.get(a), "aggregate", False)})
         if unguarded:
             refused_mocks[symbol] = (
