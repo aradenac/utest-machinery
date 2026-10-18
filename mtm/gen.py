@@ -235,7 +235,9 @@ def _is_c_expression(value: Any) -> bool:
 
 
 def _case_problem(case, controls: dict[str, dict[str, Any]],
-                  params: list[CParam], aggregates: set[str] | None = None) -> str | None:
+                  params: list[CParam], aggregates: set[str] | None = None,
+                  declared_mocks: list[str] | None = None,
+                  determined: bool = True) -> str | None:
     """Why *case* cannot be materialised faithfully, or ``None`` if it can.
 
     The plan is model output: it may ask for a control this generator does not
@@ -243,6 +245,27 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
     control would make the mock return defaults and turn a planned expectation
     into a spurious test finding, i.e. a fabricated defect report.
     """
+    # The argument count must match the real signature: `signatures` come from the
+    # deterministic scanner, not the model. A mismatch would emit an uncompilable
+    # call and kill the whole bench as an opaque TOOL_FAILURE while still counting
+    # the scenario as generated — the same refusal contract the collision and
+    # unsupported-control cases already follow.
+    if len(case.args) != len(params):
+        return (f"the case supplies {len(case.args)} argument(s) but {len(params)} "
+                "are declared; a case must give exactly one value per parameter")
+    # A determined case that declares a dependency but configures no expectation
+    # for it would leave CMock's strict mock unarmed: the first real call fails as
+    # "called more times than expected", which would be misreported as an
+    # IMPLEMENTATION_DEFECT when it is a harness gap. (`expect_calls: 0` is the
+    # documented way to assert the dependency is NOT called.)
+    if determined:
+        for symbol in (declared_mocks or []):
+            if symbol not in controls:
+                continue
+            if symbol not in (case.mocks or {}) and (case.expect_calls or {}).get(symbol) != 0:
+                return (f"the case declares the mock {symbol!r} but sets no expectation "
+                        f"for it; give `mocks`/`expect_calls` for {symbol!r} (use "
+                        "`expect_calls: 0` to assert it is not called)")
     for symbol, config in (case.mocks or {}).items():
         control = controls.get(symbol)
         if control is None:
@@ -650,9 +673,13 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
             control["out_types"] = {p.name: _base_type(p) for p in split[1]} if split else {}
             controls[symbol] = control
         if problem is None:
+            declared_mocks = [s for s in scenario.mocks if s in controls]
+            scenario_determined = not scenario.oracle.is_undetermined
             for case in scenario.cases:
                 problem = _case_problem(case, {s: {k: v for k, v in c.items() if k != "out_types"}
-                                               for s, c in controls.items()}, params, aggregates)
+                                               for s, c in controls.items()}, params, aggregates,
+                                        declared_mocks=declared_mocks,
+                                        determined=scenario_determined)
                 if problem:
                     break
         if problem is not None:

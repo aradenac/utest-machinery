@@ -367,6 +367,81 @@ def test_scenario_ids_normalising_to_one_test_name_are_refused_not_duplicated(
     assert any("normalisation" in lim for lim in generated.limitations)
 
 
+def _plan_for(bench, scenarios: list[dict]):
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": scenarios}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    return plan, inventory
+
+
+def test_argument_count_mismatch_is_refused_not_emitted_as_a_broken_call(fixture_bench):
+    """A case must supply exactly one value per parameter. A mismatch would emit
+    an uncompilable call and kill the whole bench as an opaque TOOL_FAILURE while
+    still counting the scenario as generated — an unsupported shape is refused
+    with a limitation, like every other unmaterialisable case."""
+    from mtm.gen import generate_suite
+
+    bench = fixture_bench("saturation")
+
+    def scen(cases):
+        return {"id": "S1", "title": "t", "function": "saturate_u16",
+                "requirement_ids": ["SAT-002"], "mocks": [], "cases": cases,
+                "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+
+    # Too many, and too few, both refused with the arity named.
+    for bad in ({"args": [11, 10, 999], "expected": 10}, {"args": [], "expected": 10}):
+        plan, inventory = _plan_for(bench, [scen([bad])])
+        out = generate_suite(bench, plan, inventory)
+        assert out.test_functions == []
+        assert any("argument" in lim for lim in out.limitations)
+
+    # The exact-arity contrast materialises and runs as a real test.
+    plan, inventory = _plan_for(bench, [scen([{"args": [11, 10], "expected": 10}])])
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == ["test_u52800a7b1b2b_S1"] or len(out.test_functions) == 1
+    assert not out.limitations
+
+
+def test_a_declared_mock_without_a_per_case_expectation_is_refused(fixture_bench):
+    """A determined case that lists a dependency in `mocks` but sets no
+    expectation for it would leave CMock's strict mock unarmed; the first real
+    call then fails as "called more times than expected", which would be
+    misreported as an IMPLEMENTATION_DEFECT. It is refused instead. The
+    documented `expect_calls: 0` (assert not called) remains valid."""
+    from mtm.gen import generate_suite
+
+    bench = fixture_bench("mocked-sensor")
+
+    def scen(cases):
+        return {"id": "S1", "title": "t", "function": "sample_sensor",
+                "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+                "cases": cases,
+                "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+
+    # Declared but unconfigured -> refused, and told why.
+    plan, inventory = _plan_for(bench, [scen([{"args": [1], "expected": "SENSOR_OK"}])])
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("platform_read_sensor" in lim and "expectation" in lim
+               for lim in out.limitations)
+
+    # Configured -> materialised; and `expect_calls: 0` (not called) is accepted.
+    plan, inventory = _plan_for(bench, [scen([{
+        "args": [1], "expected": "SENSOR_OK",
+        "mocks": {"platform_read_sensor": {"ret": 0, "reading": 1}}}])])
+    out = generate_suite(bench, plan, inventory)
+    assert len(out.test_functions) == 1 and not out.limitations
+
+    plan, inventory = _plan_for(bench, [scen([{
+        "args": [1], "expected": "SENSOR_OK", "expect_calls": {"platform_read_sensor": 0}}])])
+    out = generate_suite(bench, plan, inventory)
+    assert len(out.test_functions) == 1 and not out.limitations
+
+
 def test_finding_maps_back_to_its_oracle_for_ids_with_dashes_and_underscores():
     """The finding→scenario link must survive an id containing `-` or `_`; the old
     reverse-split returned a truncated id and an empty oracle statement."""

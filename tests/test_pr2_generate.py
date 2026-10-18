@@ -109,23 +109,42 @@ def test_adapted_unit_with_absent_header_is_built_from_a_private_shim(fixture_be
     assert not (EXAMPLES / "vendor-adapter" / "vendor_adc.h").exists()
 
 
-@pytest.mark.docker
-def test_unknown_oracle_stays_undetermined(fixture_bench, product_image):
+def _offline_generate(bench: Path):
+    """Run the full generate pipeline offline (injected runner, no Docker).
+
+    The plan/oracle assertions below need the grounded plan, which is written
+    before any execution; the stub runner stands in for Ceedling so the whole
+    pipeline (including the plan write and the ``mtm plan`` read) runs in the
+    fast CI matrix, not only where the image exists.
+    """
+    import yaml
+    from mtm.ceedling import CeedlingRun
+    from mtm.generate import run_generate
+    from mtm.llm import MockProvider
+
+    def runner(bench_root, *, image_ref):  # noqa: ARG001
+        return CeedlingRun(ok=True, returncode=0, stdout="1 Tests 0 Failures 0 Ignored\n",
+                           stderr="", argv=["ceedling", "test:all"], timed_out=False,
+                           ran=True, total=1, passed=1, failed=0, failures=[])
+
+    scopes = yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
+    return run_generate(bench, scopes, provider=MockProvider(), image="img:test", runner=runner)
+
+
+def test_unknown_oracle_stays_undetermined(fixture_bench):
     bench = fixture_bench("underspecified")
-    record, code = run_mtm_json("generate", "--provider", "mock", cwd=bench)
-    assert code == 0, record  # the undefined cases do not fail the SDD
+    _offline_generate(bench)
     plan, code = run_mtm_json("plan", cwd=bench)
     assert code == 0
     assert plan["undetermined"] >= 1
     assert any(p.get("proposal") for p in plan["proposals"])
 
 
-@pytest.mark.docker
-def test_conflicting_sdd_boundary_is_undetermined_not_arbitrary_pass(fixture_bench, product_image):
+def test_conflicting_sdd_boundary_is_undetermined_not_arbitrary_pass(fixture_bench):
     bench = fixture_bench("conflicting-sdd")
-    record, code = run_mtm_json("generate", "--provider", "mock", cwd=bench)
-    assert code == 0, record
-    plan, _ = run_mtm_json("plan", cwd=bench)
+    _offline_generate(bench)
+    plan, code = run_mtm_json("plan", cwd=bench)
+    assert code == 0
     # Exactly one scenario (the equality boundary) is undetermined.
     undetermined = [s for s in plan["scenarios"] if s["oracle_kind"] == "UNDETERMINED"]
     assert len(undetermined) == 1
