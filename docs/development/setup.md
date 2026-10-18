@@ -34,7 +34,7 @@ For auditability include a refreshed `.beads/issues.jsonl` export in each PR (is
 
 ## One-prompt verified development workflow
 
-From the repository root in an interactive WSL terminal, enable Claude Code's experimental Agent Teams **per session** (no global configuration change):
+From the repository root in an interactive WSL terminal, you **may** enable experimental Agent Teams per session (no global configuration change); this is optional for the workflow:
 
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ccr "Claude DeepSeek Flash" cli
 
