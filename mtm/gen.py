@@ -131,16 +131,59 @@ def return_is_void(signature: str) -> bool:
     return return_type(signature).strip() in _VOID
 
 
-def _unit_header(unit, scenarios: list[Scenario] | None = None,
-                 copied: set[str] | None = None, src_dir: Path | None = None) -> str:
-    """The header a test file should include for *unit*, or ``""``.
+def _unit_includes(unit, scenarios: list[Scenario] | None, copied: set[str] | None,
+                   src_dir: Path | None, iface_dir: Path, out: "Generated") -> list[str] | None:
+    """The include(s) a test file must use for *unit*, in order, or ``None`` to skip.
 
-    A header is only usable if it actually declares a function under test — a
-    selected ``.h`` that declares an unrelated dependency would leave the SUT call
-    with no visible prototype. Prefer the same-stem header (``foo.c`` → ``foo.h``);
-    otherwise any copied local ``.h`` that declares one of the unit's functions
-    under test. Returns ``""`` when none qualifies, so the caller can synthesise a
-    private declaration instead of including a header that does not declare the SUT.
+    Ceedling links ``<stem>.c`` into a test executable **only when the test
+    includes ``<stem>.h``**. So the test must always end up including a header
+    named after the source stem; a test that includes only a *differently named*
+    header that happens to declare the SUT (``sensor.c`` includes ``api.h``) still
+    compiles but never links ``sensor.c`` — an opaque ``undefined reference``. The
+    resolution is:
+
+    * a real copied ``<stem>.h`` that declares a function under test → include it;
+    * a real copied ``<stem>.h`` that does **not** declare it → refuse (``None``):
+      the private header would need the same name and cannot be added without
+      shadowing the selected one;
+    * otherwise → synthesise a private ``<stem>.h`` from the scanner's prototypes
+      (so the SUT links) and, for fidelity, also include any real header that
+      declares it. Returns ``None`` (with a recorded limitation) when no
+      declarations can be produced.
+    """
+    stem = Path(unit.path).stem
+    if not stem:
+        return []  # no source file to link; the caller emits a declaration-only test
+    stem_header = f"{stem}.h"
+    declaring = _declaring_header(unit, scenarios, copied, src_dir)
+    if copied is not None and stem_header in copied:
+        # A selected `<stem>.h` exists. It either declares the SUT (use it) or it
+        # does not — then we cannot add our own same-named header without shadowing
+        # the selected one, so refuse rather than emit a mislinked test.
+        if declaring == stem_header:
+            return [stem_header]
+        out.limitations.append(
+            f"unit {unit.id} ({unit.path}) cannot be linked: a selected "
+            f"{stem_header!r} exists but does not declare its functions under test")
+        return None
+    include_names: list[str] = []
+    if declaring:
+        include_names.append(declaring)
+    synth = _synthesise_unit_header(unit, scenarios, iface_dir, out)
+    if not synth:
+        return None
+    if synth not in include_names:
+        include_names.append(synth)
+    return include_names
+
+
+def _declaring_header(unit, scenarios: list[Scenario] | None,
+                      copied: set[str] | None, src_dir: Path | None) -> str:
+    """The best copied header that declares a function under test, or ``""``.
+
+    Prefers the same-stem header (``foo.c`` → ``foo.h``); otherwise a local ``.h``
+    the source already includes that declares one of the unit's functions under
+    test. A ``.h`` that declares only unrelated symbols is never chosen.
     """
     from .cscan import scan_prototypes
 
@@ -519,24 +562,19 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         unit = units.get(unit_id)
         if unit is None or unit_id in excluded:
             continue
-        # Resolve the header the test includes against what was actually copied,
-        # and only if it declares a function under test. A fabricated name or an
-        # unrelated header (e.g. a `dep.h` that declares only a dependency) would
-        # leave the SUT call without a visible prototype and make Ceedling fail as
-        # an opaque build error; a private declaration header, grounded in the
-        # scanner's own prototypes for this unit, is materialised instead.
-        unit_header = _unit_header(unit, scenarios, copied, src_dir)
-        if not unit_header:
-            unit_header = _synthesise_unit_header(unit, scenarios, iface_dir, out, copied)
-            if not unit_header:
-                # No header can declare the SUT's functions under test without
-                # shadowing a real one: emitting a call with no visible prototype
-                # would be an opaque build fault. The limitation is already
-                # recorded; skip the unit so the rest of the scope still runs.
-                continue
+        # The test must include a header named after the source stem, else
+        # Ceedling never links `<stem>.c` into the test executable (an opaque
+        # `undefined reference`); a SUT declared only in a differently named header
+        # still needs the stem header added. See `_unit_includes`.
+        unit_includes = _unit_includes(unit, scenarios, copied, src_dir, iface_dir, out)
+        if unit_includes is None:
+            # No include set can both declare the SUT and link the source: the
+            # limitation is already recorded, so skip the unit and let the rest of
+            # the scope run rather than emit a mislinked test.
+            continue
         code, names, skipped = _emit_test_file(
             unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates,
-            unit_header=unit_header)
+            unit_includes=unit_includes)
         path = test_dir / f"test_{Path(unit.path).stem}.c"
         path.write_text(code, encoding="utf-8")
         out.files[f"{TEST_DIRNAME}/{path.name}"] = "test"
@@ -556,38 +594,34 @@ def _ident(symbol: str) -> str:
 
 
 def _synthesise_unit_header(unit, scenarios: list[Scenario], iface_dir: Path,
-                            out: "Generated", copied: set[str]) -> str:
-    """Materialise a private declaration header for a unit with no usable header.
+                            out: "Generated") -> str:
+    """Materialise a private ``<stem>.h`` declaring the unit's functions under test.
 
-    A test must include *something* that declares the functions under test, and
     Ceedling (``test_<stem>.c``) links the source ``<stem>.c`` **only when the test
-    includes ``<stem>.h``** — so the private header must carry the source's stem,
-    not a synthetic name, or the translation unit never links. The declarations
-    are taken from the deterministic scanner's own prototypes for that unit (never
+    includes ``<stem>.h``**, so the private header must carry the source's stem,
+    not a synthetic name, or the translation unit never links. The declarations are
+    taken from the deterministic scanner's own prototypes for this unit (never
     invented) and written under the private interface directory (on the include
     path, never into the source directory or the inputs). Returns the include name,
-    or ``""`` when the stem name is already occupied by a non-declaring header.
+    or ``""`` when no prototype for a function under test could be produced.
     """
     stem = Path(unit.path).stem
     header_name = f"{stem}.h"
-    if header_name in copied:
-        # A real `<stem>.h` exists but does not declare the SUT (else the caller
-        # would have used it). Naming the private header the same would shadow it;
-        # the unit cannot be linked faithfully, so refuse rather than mislead.
-        out.limitations.append(
-            f"unit {unit.id} ({unit.path}) cannot be linked: a selected "
-            f"{header_name!r} exists but does not declare its functions under test")
-        return ""
     wanted = {sc.function for sc in scenarios}
     decls = [f"{fn['signature']};" for fn in getattr(unit, "functions", []) or []
              if fn.get("name") in wanted and fn.get("signature")]
+    if not decls:
+        out.limitations.append(
+            f"unit {unit.id} ({unit.path}) cannot be materialised: no scanned "
+            "prototype exists for its functions under test")
+        return ""
     guard = f"MTM_UNIT_{_ident(stem).upper()}_H"
     body = (
-        f"/* Private declarations for {unit.path} — no selected header declares its\n"
-        " * functions under test, so the prototypes are taken verbatim from the\n"
-        " * input scanner (never invented). Named after the source stem so Ceedling\n"
-        " * links the translation unit. This header is NEVER written into the source\n"
-        " * directory. */\n"
+        f"/* Private declarations for {unit.path} — its functions under test are\n"
+        " * declared so the test can call them and Ceedling links the translation\n"
+        " * unit (a `<stem>.h` include is required for that). Prototypes are taken\n"
+        " * verbatim from the input scanner (never invented). This header is NEVER\n"
+        " * written into the source directory. */\n"
         f"#ifndef {guard}\n#define {guard}\n#include <stdint.h>\n\n"
         + "\n".join(decls) + f"\n\n#endif /* {guard} */\n"
     )
@@ -726,8 +760,8 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                     interfaces: dict[str, str], declarations: dict[str, str],
                     shim_names: list[str] | None = None,
                     aggregates: set[str] | None = None,
-                    unit_header: str | None = None) -> tuple[str, list[str], list[str]]:
-    unit_header = unit_header if unit_header is not None else _unit_header(unit)
+                    unit_includes: list[str] | None = None) -> tuple[str, list[str], list[str]]:
+    unit_includes = list(unit_includes or [])
     lines: list[str] = [
         f"/* Generated Unity tests for {unit.path} — materialised from the plan. */",
         '#include "unity.h"',
@@ -736,10 +770,13 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
         "#include <stddef.h>",
     ]
     used_mocks = sorted({s for sc in scenarios for s in sc.mocks if s in interfaces})
-    # Private shim headers first, then the CMock mock headers, then the unit.
+    # Private shim headers first, then the CMock mock headers, then the unit's
+    # declaration header(s) — the stem header must be present so Ceedling links
+    # `<stem>.c` into the test executable.
     lines += [f'#include "{name}"' for name in (shim_names or [])]
     lines += [f'#include "{_mock_header_name(s, interfaces)}"' for s in used_mocks]
-    lines += [f'#include "{unit_header}"', ""]
+    lines += [f'#include "{name}"' for name in unit_includes]
+    lines += [""]
 
     names: list[str] = []
     skipped: list[str] = []

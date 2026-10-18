@@ -753,6 +753,82 @@ def test_a_source_with_an_unrelated_local_include_still_gets_its_own_declaration
     assert "int foo(int x);" in decl
 
 
+def test_a_sut_declared_by_a_non_stem_header_still_includes_the_stem_header(
+        tmp_path):
+    """D3 residual: `sensor.c` includes `api.h`, which declares the SUT
+    (`sensor_read`), and there is no `sensor.h`.
+
+    Choosing `api.h` alone would let the test *compile* but Ceedling would never
+    link `sensor.c` (it links `<stem>.c` only when the test includes `<stem>.h`),
+    so the run dies as an opaque `undefined reference`. Both headers must appear:
+    `api.h` for the real declaration, `sensor.h` (synthesised, stem-named) to
+    force the link."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "non-stem-header"
+    bench.mkdir()
+    (bench / "sensor.c").write_text(
+        '#include "api.h"\nint sensor_read(int x) { return x + 1; }\n')
+    (bench / "api.h").write_text(
+        "#ifndef API_H\n#define API_H\nint sensor_read(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **SEN-001**: `sensor_read` SHALL return x+1.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("sensor.c", "source"), ("api.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [{
+        "id": "S1", "title": "t", "function": "sensor_read",
+        "requirement_ids": ["SEN-001"], "mocks": [],
+        "cases": [{"args": [2], "expected": 3}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    test_src = (bench / ".mtm" / "gen" / "test" / "test_sensor.c").read_text()
+    assert '"api.h"' in test_src          # the real declaration (fidelity)
+    assert '"sensor.h"' in test_src       # the stem header that forces the link
+    assert (bench / ".mtm" / "gen" / "interface" / "sensor.h").is_file()
+    assert not (bench / ".mtm" / "gen" / "src" / "sensor.h").exists()
+
+
+def test_a_real_non_declaring_stem_header_is_refused_not_shadowed(tmp_path):
+    """D3 contrast: a *selected* `foo.h` that does not declare the SUT cannot be
+    worked around (a private `foo.h` would shadow it), so the unit is refused with
+    a limitation rather than mislinked — and the rest of the scope still runs."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "non-declaring-stem"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo(int x) { return x + 1; }\n")
+    # A `foo.h` exists but declares an unrelated symbol, not `foo`.
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint other(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo` SHALL return x+1.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [{
+        "id": "S1", "title": "t", "function": "foo",
+        "requirement_ids": ["FOO-001"], "mocks": [],
+        "cases": [{"args": [1], "expected": 2}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("cannot be linked" in lim for lim in out.limitations)
+
+
 
 def test_finding_maps_back_to_its_oracle_for_ids_with_dashes_and_underscores():
     """The finding→scenario link must survive an id containing `-` or `_`; the old

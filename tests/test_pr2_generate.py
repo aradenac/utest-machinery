@@ -167,6 +167,54 @@ def test_headerless_unit_is_linked_and_executed_from_its_private_declaration(
     assert hashlib.sha256((bench / "foo.c").read_bytes()).hexdigest() == digest
 
 
+@pytest.mark.docker
+def test_sut_declared_by_a_non_stem_header_is_linked_and_executed(
+        tmp_path, product_image):
+    """D3 residual, end-to-end: `sensor.c` includes `api.h` (which declares the
+    SUT `sensor_read`) and there is no `sensor.h`.
+
+    Including only `api.h` compiles but Ceedling never links `sensor.c` (it links
+    `<stem>.c` only when the test includes `<stem>.h`), so the run dies as an
+    opaque `undefined reference`. The generator must add a stem header so the
+    translation unit is linked; the suite then executes for real."""
+    import json as _json
+
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "non-stem-header"
+    bench.mkdir()
+    (bench / "sensor.c").write_text(
+        '#include "api.h"\nint sensor_read(int x) { return x + 1; }\n')
+    (bench / "api.h").write_text(
+        "#ifndef API_H\n#define API_H\nint sensor_read(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **SEN-001**: `sensor_read` SHALL return x+1.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("sensor.c", "source"), ("api.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(_json.dumps({"scenarios": [{
+        "id": "S1", "title": "t", "function": "sensor_read",
+        "requirement_ids": ["SEN-001"], "mocks": [],
+        "cases": [{"args": [2], "expected": 3}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    test_src = (bench / REVISION / "test" / "test_sensor.c").read_text()
+    assert '"api.h"' in test_src and '"sensor.h"' in test_src
+
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran is True, run.diagnostics
+    assert run.executed >= 1, run.diagnostics
+    assert run.failed == 0, run.diagnostics
+
+
 def _offline_generate(bench: Path):
     """Run the full generate pipeline offline (injected runner, no Docker).
 
