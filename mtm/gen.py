@@ -371,14 +371,24 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         if candidate.is_file() and candidate.suffix.lower() in (".c", ".h"):
             by_basename.setdefault(candidate.name, set()).add(str(candidate.resolve()))
     colliding = {name for name, paths in by_basename.items() if len(paths) > 1}
+    colliding_units: list[tuple[str, str, str]] = []  # (unit_id, path, colliding name)
     for unit in inventory.units:
-        if Path(unit.path).name in colliding and unit.id not in excluded:
+        if unit.id in excluded:
+            continue
+        # A unit is tainted by a collision if its own source basename collides, or
+        # if a header it includes (local include) names a colliding file: the
+        # compiled revision would silently bind it to an arbitrary one of them.
+        own = Path(unit.path).name
+        tainted = own if own in colliding else next(
+            (inc for inc in unit.includes_local if Path(inc).name in colliding), None)
+        if tainted:
+            colliding_units.append((unit.id, unit.path, tainted))
             excluded = excluded | {unit.id}
-            out.limitations.append(
-                f"unit {unit.id} ({unit.path}) shares the basename "
-                f"{Path(unit.path).name!r} with another selected file; a flat C "
-                "revision cannot disambiguate the include, so it was excluded "
-                "from the executable suite")
+    for unit_id, path, name in colliding_units:
+        out.limitations.append(
+            f"unit {unit_id} ({path}) is tainted by the basename collision on "
+            f"{name!r}; a flat C revision cannot disambiguate the include, so it "
+            "was excluded from the executable suite")
 
     copied: set[str] = set()
     for entry in inventory.selected:
