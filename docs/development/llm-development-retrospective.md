@@ -1,151 +1,89 @@
-# RETEX — Développer un produit avec des LLM : converger vite vers le **bon résultat**
+# RETEX — Comment développer efficacement un logiciel avec des LLM ?
 
-> **Périmètre :** retour d'expérience transversal sur la collaboration **commanditaire / Product Owner (PO) → assistant d'analyse et de conception → GitHub et documentation → agent de développement → vérification → revue externe → arbitrage du PO**. Il ne s'agit **pas** d'un RETEX sur le seul générateur de tests C, ni d'une règle supplémentaire pour uTest Machinery.
->
-> **État des preuves :** observations de PR réelles et de laboratoires isolés disponibles au **18 octobre 2026** ; conclusions générales et pistes d'amélioration signalées séparément. Les chiffres ne constituent pas une comparaison statistique à méthode constante. Le [guide de l'agent](agent-development-workflow.md) décrit le fonctionnement technique en vigueur dans ce dépôt.
+**Question :** si je démarre demain un autre projet, avec un langage, un métier et des objectifs différents, comment organiser les LLM pour obtenir le **bon produit le plus vite possible** ?
 
-## 1. La cible : la convergence, pas la production de code
+Ce document retient les leçons **de méthode** issues d'une pratique de développement assisté par LLM. Ce n'est ni un journal d'incidents, ni une recommandation de modèle particulier, ni une spécification de projet. Les bénéfices sont des constats qualitatifs et des hypothèses à éprouver ; aucun gain chiffré de productivité n'est établi.
 
-L'objectif n'est ni le maximum de lignes générées, ni le minimum de tokens, ni une démonstration spectaculaire d'autonomie. Il est de **réduire le temps écoulé entre une intention métier et un changement effectivement acceptable**, conforme au besoin, aux décisions du PO, à l'architecture retenue, aux contraintes techniques et à des preuves de fonctionnement reproductibles.
+## 1. Le verdict : une chaîne d'outils complémentaire, pas un « super-agent »
 
-Une PR peut être *verte* et **ne pas être prête** ; une implémentation très courte peut être insuffisante ; une multitude d'agents peut consommer plus de temps en coordination qu'elle n'en épargne. Le bon optimum est un **diff minimalement suffisant** (comportement + tests + documentation/preuves nécessaires), avec une détection précoce des mauvaises hypothèses et une possibilité de reprendre le travail sans perdre les décisions.
-
-**Boucle complète à optimiser :**
+**Oui, l'organisation « ChatGPT web + agent de développement local + dépôt Git partagé + gestion des tâches + tests locaux + CI » est pertinente.** Elle sépare la **définition du bon produit** de son **implémentation**, tout en laissant des artefacts vérifiables entre les deux. Le dépôt partagé est la mémoire commune durable ; la conversation ne doit pas être la seule source de vérité.
 
 ```mermaid
 flowchart LR
-  A["PO : intention / critères / arbitrage"] --> B["Assistant : reformulation et options"]
-  B --> C["Docs versionnées : exigences + architecture"]
-  C --> D["Agent développeur : plan + implémentation"]
-  D --> E["Tests, preuves, critique indépendante"]
-  E --> F["PR et revue externe"]
-  F -->|"Retour précis"| B
-  F -->|"Correctifs sur la même PR"| D
-  F -->|"Décision / approbation"| A
+  P["Humain / PO\nobjectif et arbitrages"] <--> C["ChatGPT web\ncadrage, conception,\narchitecture, PR et revue"]
+  C <--> G["Dépôt Git partagé\nspecs, code, décisions, PR"]
+  G <--> A["Agent local\nplan, code, tests et preuves"]
+  A --> T["Tests locaux\nvraies interfaces"]
+  T --> G
+  G --> I["CI rapide\nreproductibilité"]
+  I --> R["Revue + décision humaine"]
+  R --> P
 ```
 
-Chaque passage ajoute une possibilité de malentendu, de dérive de périmètre, de preuve insuffisante ou de relecture trop tardive. Accélérer uniquement le codage ne garantit donc rien sur le délai final.
-
-## 2. Ce qui est effectivement observé (pas encore prouvé universellement)
-
-| Source | Observation documentée | Portée et limite |
+| Acteur / outil | Sa valeur principale | À ne pas lui demander |
 | --- | --- | --- |
-| [PR #5](https://github.com/aradenac/utest-machinery/pull/5), jalon initial | Plusieurs revues ont été nécessaires ; la [revue des risques](../project/risks.md) en retrace **quatre** avant avis favorable. Les findings concernaient notamment le parcours CLI→Docker, `status` qui détruisait son propre diagnostic, `init --force`, les droits d'accès et une wheel dépourvue de schémas. | Tests et CI localement verts **ne démontraient pas tous les parcours utilisateur ni les invariants de cycle de vie**. On ne peut pas attribuer ces défauts à une cause LLM unique. |
-| [PR #14](https://github.com/aradenac/utest-machinery/pull/14), génération C/SDD | Relectures portant sur sélection réelle des sources `READY/ADAPTED/BLOCKED`, résultats mixtes outil/test, mocks, arité, oracles SDD, mode réel vs mock, transitions de compilation et modifications d'architecture. | PR **encore ouverte** lors de ce RETEX ; certaines corrections ont été annoncées et testées par l'auteur mais leur réception externe finale ne peut pas être présumée. |
-| [PR #15](https://github.com/aradenac/utest-machinery/pull/15) et [PR #16](https://github.com/aradenac/utest-machinery/pull/16) | Introduction d'un `contract-reviewer` isolé en PRE_PR puis PR_RECHECK, sans second backlog et avec prise en compte des commentaires GitHub. | La mise en place d'une consigne ne prouve pas son efficacité globale ; premiers défauts supplémentaires signalés sur PR #14. |
-| Expérience 6, laboratoire WSL isolé | Reviewer parallèle et échanges natifs opérationnels ; **30 tests** finaux verts. Une partie des corrections a porté sur des noms Python non conformes au domaine « identifiant ASCII » de la spécification. | Le reviewer peut créer de la **surqualité hors périmètre** et du rework, même lorsqu'il détecte de vrais défauts. Test de coordination, pas mesure de productivité. |
-| Expérience 7, laboratoire WSL isolé | Un seul `/develop-verified` a orchestré développeur, reviewer, evidence keeper, challenger et vérification finale automatique ; **21/21 tests** et **12/12 contrôles indépendants** verts, Beads réel et worklog versionné. Le vérificateur final a rendu deux `CHANGES_REQUIRED` documentaires (brouillon de PR absent, puis affirmation excessive), puis `READY` à la **troisième** passe. | Le test valide une faisabilité de coordination locale, **pas** un gain comparatif de temps. Worklog ~37 Ko pour deux corrections ; multiples snapshots de preuves/draft, donc surcharge de synchronisation observable. |
-| [PR #17](https://github.com/aradenac/utest-machinery/pull/17) et [PR #18](https://github.com/aradenac/utest-machinery/pull/18) | Registre d'impacts actualisé, puis versionnement d'un workflow `/develop-verified` intégrant revue continue, evidence keeper, guardian, challenger et revue finale isolée. | L'installation GitHub et la CI documentaire n'attestent **pas** encore un usage productif complet du nouveau skill sur une PR fonctionnelle réelle. |
+| **Humain / PO** | Exprimer le besoin, corriger la trajectoire, choisir les compromis et accepter les résultats | Décrire chaque détail d'implémentation ou rejouer les tests de l'agent |
+| **ChatGPT web** | Transformer des échanges en objectifs, options, exigences, architecture, plan et contenu GitHub ; aider à relire les PR | Déduire des exigences non exprimées, confondre proposition et décision, certifier un test local qu'il n'a pas exécuté |
+| **Agent local** | Lire le vrai code, implémenter, exécuter les outils et tests, corriger les erreurs, produire une PR avec preuves | Changer silencieusement le besoin ou l'architecture, s'auto-déclarer accepté |
+| **Git + PR** | Point de passage partagé, versionné et révisable entre conversation, conception et exécution | Servir uniquement de stockage de code : les décisions importantes et critères doivent aussi y être retrouvables |
+| **Beads (ou autre issue tracker)** | Suivre tâche active, dépendances, état des findings, décisions utiles et preuves de réception | Devenir un deuxième cahier des charges ou un copier-coller de chaque log |
+| **Tests locaux + CI** | Tests locaux complets et rapides à itérer ; CI courte pour reproduire indépendamment les contrôles essentiels | Faire croire qu'une CI verte prouve tous les parcours et contraintes du produit |
 
-**Contrainte de lecture :** une source GitHub, un worklog et un rapport d'agent peuvent attester des faits différents. Un correctif *annoncé* n'est pas une correction *reproduite* ; une commande *décrite* n'est pas une commande *exécutée* ; des scénarios « indépendants » dérivés du même contrat restent soumis à ses ambiguïtés.
+Cette répartition est efficace **si le transfert entre acteurs est explicite**. Deux conversations LLM ne partagent ni automatiquement les mêmes hypothèses ni les mêmes preuves. Git, issues et PR réduisent cette rupture ; ils ne la suppriment pas.
 
-## 3. La chaîne de responsabilité : six contrats de passage
+## 2. Ce qui fonctionne : à conserver
 
-| Interface | Responsabilité de l'émetteur | Réception avant de poursuivre |
+- **Discuter librement du produit avec un assistant de conception.** Le PO peut décrire un résultat, réagir à une proposition, demander des alternatives, changer d'avis. Cette souplesse est plus productive qu'exiger un cahier des charges parfait dès le premier message.
+- **Écrire les décisions dans le dépôt.** Une spécification concise, une architecture et des critères d'acceptation versionnés permettent au développeur de repartir d'un contrat vérifiable, sans dépendre de la longueur ou de la mémoire du chat web.
+- **Faire intervenir l'agent local sur un périmètre approuvé.** Il connaît l'état réel du dépôt, peut construire, tester, inspecter le diff et corriger immédiatement. Un prompt de mission clair peut déclencher plan, implémentation, vérification et préparation de PR.
+- **Découper par incréments utilisables.** Une capacité visible et ses cas d'erreur, livrée dans une PR cohérente, est plus facile à accepter qu'un empilement de couches techniques ou dix PR artificiellement minuscules.
+- **Employer Beads pour la continuité de travail.** Un ticket garde le *quoi*, l'état courant, les décisions pertinentes, les écarts ouverts et les preuves associées aux critères. C'est particulièrement utile quand l'agent change de session, perd son contexte ou reprend une PR après plusieurs revues.
+- **Séparer tests locaux et CI.** L'agent développeur doit faire tourner *avant publication* les vérifications pertinentes, y compris un vrai parcours d'utilisation lorsque nécessaire. La CI refait rapidement des checks déterministes et sans secrets ; elle ne sert pas de premier environnement de débogage.
+- **Réviser les contrats indépendamment de l'auteur du correctif.** Un reviewer à contexte neuf peut trouver un cas oublié ; les commentaires de PR donnent une boucle de correction traçable. L'acceptation finale reste humaine.
+- **Versionner les consignes de l'agent.** Une instruction courte sur son autonomie, les contraintes, la preuve attendue et les règles Git vaut mieux que répéter le protocole complet à chaque mission.
+
+## 3. Les principaux ralentissements et leurs remèdes
+
+| Écueil | Pourquoi il ralentit | Réponse pratique |
 | --- | --- | --- |
-| **PO → assistant de conception** | Donner objectif, utilisateurs, contraintes explicites, priorités et droits de décision. Peut changer d'avis et arbitrer une option. | Reformulation de l'intention, séparation **exigence / hypothèse / option / question**, identification des décisions qui ont besoin d'accord ; ne pas inventer des contraintes pour remplir une fiche. |
-| **Assistant → documentation GitHub** | Structurer le problème : périmètre, architecture, contrats, cas d'échec, livrables, jalons et méthodes de vérification. Garder un minimum de duplication documentaire. | Les choix acceptés sont **versionnés** dans les bons documents ; un prototype, une proposition ou un commentaire n'est pas par défaut une exigence normative. |
-| **Documentation → agent développeur** | Fournir le scope courant et une définition observable du succès ; distinguer nouvelles features et corrections d'une PR existante. | Avant codage : plan court, interfaces sensibles, critères par méthode de test, contraintes de modifications de fichiers et dépendances ; pas de nouvelle architecture sans justification/accord requis. |
-| **Agent → preuves** | Implémenter puis confronter le résultat à des cas nominaux, négatifs, mixtes, des transitions et de vraies frontières d'intégration lorsque pertinentes. | Commandes/résultats **effectivement observés**, reliés à une révision ; `NOT_DEMONSTRATED` explicite pour tout critère obligatoire non prouvé. |
-| **Preuves → revue de PR** | Livrer diff propre, tests, décisions significatives, limites et liens Beads/worklog ; laisser une vérification à contexte neuf critiquer le candidat complet. | Commentaires matériels examinés un par un, causes générales et cas voisins testés ; différencier REVIEWED, FIXED, VERIFIED, ACCEPTED. La CI rapide n'est pas une preuve d'intégration complète. |
-| **Revue → PO / fusion** | Exposer désaccords techniques, risques résiduels et recommandations sans maquiller le statut. | Le PO arbitre le scope et autorise explicitement la fusion ou le jalon suivant ; la revue LLM n'est pas une approbation humaine automatique. |
+| **Le PO et l'assistant pensent être d'accord, mais la décision reste dans le chat.** | L'agent et la revue travaillent sur des contrats différents ; le même sujet est rediscuté. | À chaque arbitrage réel, mettre à jour la **source normative** dans Git ; distinguer clairement *décidé*, *proposé* et *à clarifier*. |
+| **L'assistant invente des besoins « raisonnables ».** | Un périmètre trop large fait perdre du temps et augmente la maintenance. | Formuler objectif, entrées/sorties, contraintes **demandées** et critères de succès ; présenter le reste comme des options, pas des obligations. |
+| **Trop de conception ou de documentation avant un premier usage.** | Le travail s'étend sans retour concret ; plusieurs documents redisent les mêmes choses. | Spécifier juste assez pour développer et vérifier le prochain incrément ; documenter les contrats durables, pas chaque discussion. |
+| **Une PR passe les tests mais échoue à l'usage.** | Les tests de fonctions ignorent installation, configuration, permissions, vrais services et transitions d'état. | Exiger au moins un **parcours représentatif de bout en bout** pour chaque frontière nouvelle ; distinguer mode mock et système réel. |
+| **Les correctifs répondent au symptôme de la revue.** | Les variantes voisines réapparaissent, provoquant plusieurs cycles de relecture. | Pour chaque finding : identifier l'**invariant violé**, corriger la cause et tester quelques cas contrastés/mixtes pertinents. |
+| **Le reviewer ajoute des exigences qu'aucun utilisateur n'a demandées.** | Surqualité, abstractions et cas limites artificiels. | Classer les retours : défaut prouvé / manque de preuve / ambiguïté / suggestion facultative. Le PO tranche les extensions de scope. |
+| **Les preuves sont recopiées partout ou deviennent périmées.** | Beads, journal, PR et commentaires se contredisent ; la revue porte sur une autre révision. | **Beads = état et critères ; worklog éventuel = historique ; PR = livraison.** Lier les preuves aux commits/hashes ; réévaluer après changement. |
+| **Trop d'agents discutent au lieu de converger.** | Coordination, tokens et retours redondants dépassent la valeur des findings. | Un **lead responsable**, des rôles limités, des reviewers déclenchés aux jalons ; un agent `idle` est normal. Ajouter un guardian seulement si dérive ou boucles récurrentes. |
+| **Le web et l'agent local ont des visions divergentes du dépôt.** | Instructions obsolètes, branches non réconciliées, PR commentée sur un ancien commit. | GitHub comme point de synchronisation : consulter `main`, branche, PR, commentaires et état Beads **avant** chaque reprise ; ne pas se fier au résumé du chat. |
+| **Outils ou modèles instables, permissions mal définies.** | Relances inutiles, appels qui échouent, résultats non reproductibles et accès hôte non souhaité. | Vérifier routage/version/droits en début de session, sandboxer, borner retries et prévoir un repli honnête ; ne jamais déclarer une délégation ou un test réussi sans résultat. |
 
-**Point de vigilance :** dans cette organisation, l'assistant de conception peut aussi manipuler GitHub et relire une PR. Ce cumul accélère le travail, mais crée un **risque d'auto-validation** : on ne doit pas traiter la réévaluation de ses propres spécifications ou sa propre PR comme une preuve d'indépendance. Le PO demeure l'arbitre du besoin ; la vérification externe du code et des hypothèses critiques doit conserver une distance suffisante.
+Le ralentissement **le plus coûteux** n'est souvent pas l'écriture du code : c'est découvrir tard que le travail ne correspondait pas à la bonne exigence, ou qu'une vérification avait testé autre chose que le parcours attendu.
 
-## 4. Ce qui fonctionne et mérite d'être conservé
+## 4. Si je recommence un projet demain : méthode de démarrage
 
-| Pratique | Pourquoi elle aide | Condition pour qu'elle reste utile |
-| --- | --- | --- |
-| **Dialogue PO ↔ assistant par petits arbitrages explicites** | Clarifie vite les intentions floues, facilite alternatives, prototypes et révisions sans figer trop tôt un choix. | À chaque arbitrage, réconcilier les **documents normatifs**, pas uniquement le dernier échange de chat. |
-| **Specs et architecture avant les grandes PR** | Stabilise les interfaces, contraintes et attentes, rend les revues plus objectives et évite le bricolage opportuniste. | Autoriser l'évolution explicite du besoin ; ne pas transformer une conjecture de l'assistant en spécification acceptée. |
-| **Un jalon de valeur à la fois, une PR complète** | Réduit le nombre de branches concurrentes et rend les corrections comparables à une base approuvée. | Corriger la **même PR** tant qu'elle est ouverte ; ne pas entamer silencieusement la suite. |
-| **Séparation entre source normative, mémoire et livraison** | `docs/` pour l'autorité, worklog pour la chronologie, Beads pour l'état/preuves synthétiques, PR pour le diff et la revue. | Maintenir des pointeurs et états courants, **sans recopier tous les logs partout** (IMP-08). |
-| **Critère → preuve exécutée (AP-01)** | Empêche le « vert » générique de masquer un contrat encore non démontré. | Associer commande, résultat, version et **pertinence** du test ; pas seulement `exit=0`. |
-| **Invariants et tests contrastés (AP-03)** | Révèle ce que le happy path rate : état après échec, précédences de résultats mixtes, changement de scope, reprise, lecture/écriture. | Choisir les quelques séquences critiques ; ne pas créer une matrice exhaustive sans valeur. |
-| **Vérification de la frontière réelle (AP-02)** | Évite de confondre test unitaire du composant avec parcours installable/utilisable depuis la CLI. | Un test mock/CI peut coexister avec une **preuve locale sur le vrai runtime** ; ne jamais assimiler les deux. |
-| **Reviewer indépendant puis recheck de PR** | Peut proposer des contre-exemples non anticipés par l'auteur et vérifier l'effet des correctifs. | Lire d'abord le contrat ; exiger preuve et révision ; garder la revue externe après celle du sous-agent. |
-| **Skills et rôles spécialisés** | Réduit le nombre de prompts manuels et délègue la tenue des preuves sans interrompre l'implémentation. | Un seul écrivain Beads, orchestration explicite, tâches à périmètre clair et repli honnête si Teams échoue. |
-| **CI courte, déterministe, sans secret** | Détecte rapidement les régressions reproductibles à coût faible ; la CI ne devient pas le laboratoire de débogage. | Les tests lourds, environnements réels et appels LLM protégés sont vérifiés localement/explicitement. |
+**1 — Définir le produit, pas la solution.** Avec ChatGPT web, préciser les utilisateurs, le problème, le premier résultat réellement utilisable, les contraintes explicites et ce qui ne doit *pas* être fait. Faire proposer des choix d'architecture si nécessaire, puis les arbitrer en tant que PO. Le chat sert à raisonner ; les décisions acceptées vont dans Git.
 
-## 5. Ce qui n'a pas bien fonctionné — et le mécanisme causal à surveiller
+**2 — Créer un dépôt minimal mais durable.** Au départ, suffisent généralement : un `README` de vision/usage ; une courte page de **besoins et critères d'acceptation** ; les **choix d'architecture** qui ont un impact réel ; un **plan d'incréments** ; un `CLAUDE.md` / `AGENTS.md` ou équivalent pour les règles de l'agent. Adapter la quantité de documents à la taille du projet : un utilitaire de deux jours ne nécessite pas le dispositif d'un produit industriel.
 
-| Anti-pattern observé | Coût sur la convergence | Réaction préventive transférable |
-| --- | --- | --- |
-| **Demande initiale interprétée trop largement** | Scope accru, nouvelles contraintes ou architecture non demandées ; multiplication de corrections sans valeur produit. | Contrat d'intention compact : *objectif, entrées, sorties, contraintes, non-objectifs explicites, critères observables* ; poser les arbitrages réellement bloquants, sinon expliciter l'hypothèse. |
-| **Une décision reste dans la conversation, pas dans les specs** | La branche de développement et la revue ne partagent plus le même contrat ; débat « décision autorisée ou non ». | Formaliser la décision retenue, son alternative et l'impact sur docs/plan/Beads ; comparer les instructions à `main` avant livraison. |
-| **Tests verts pris pour acceptation** | Parcours réel cassé malgré CI verte : CLI→Docker, installation en wheel, état après plusieurs lectures (`status`), erreurs mixtes. | Définir par critère une preuve couvrant la **vraie frontière**, et tester des séquences/états, pas seulement des fonctions isolées. |
-| **Correctif symptomatique après commentaire de PR** | Apparition de variantes voisines au tour suivant ; rework et multiples revues (IMP-12). | Identifier l'invariant général, ses classes nominale/contraire/mixte et la régression produite par le correctif ; rejouer la suite ciblée. |
-| **Reviewer inventant des cas obligatoires hors domaine** | Expérience 6 : complexité ajoutée autour de noms Python invalides pour l'entrée spécifiée. | Catégoriser finding = **défaut prouvé, robustesse justifiée, ambiguïté, facultatif** ; refuser l'ajout de nouveaux contrats non approuvés. |
-| **Outils supplémentaires avant preuve de nécessité (R20)** | Glue, wrappers, nouveaux modèles de données et maintenance coûteuse ; PR plus grosse et plus lente à relire. | Comparer à l'outil déjà utilisé et à la solution la plus simple ; justifier toute nouvelle couche, faire inspecter le diff par un guardian. |
-| **Mélange entre résultat simulé et résultat réel** | Fausse confiance sur un provider LLM, Docker, mocks ou résultat d'outil (IMP-14). | Rendre le mode explicite et tracer la frontière testée ; jamais de fallback silencieux présenté comme réussite. |
-| **Preuve ou PR rédigée sur une révision périmée** | En expérience 7, deux refus de réception pour absence du draft et surdéclaration des vérifications ; relectures répétées. | **Terminer la PR candidate avant final verifier**, pinner les hashes, invalider seulement les preuves affectées par une modification ; enregistrer les vérifications avec leur véritable auteur. |
-| **Journal trop bavard et confirmations en boucle** | Worklog ~37 Ko dans le laboratoire ; coordination coûteuse et information utile diluée. | Journaliser des **événements et changements d'état**, non des paraphrases ; Beads garde le statut courant, worklog l'historique ; une reprise lit la dernière révision attestée. |
-| **Validation « indépendante » par les mêmes auteurs/modèles** | Risque d'erreur partagée et d'auto-congratulation, même avec plusieurs sous-agents. | Contexte neuf, contre-exemples construits avant la lecture des claims, tests déterministes et revue humaine lorsque les enjeux le justifient. |
-| **Publication d'informations de l'environnement interne** | PR #5 : route/gateway privé exposé dans un dépôt public, indépendamment de l'absence de token. | Revue de diffusion avant commit ; variables de configuration et exemples génériques au lieu d'URL, tokens, chemins et topologie. |
+**3 — Créer les tâches et les liaisons.** Dans **Beads** (ou GitHub Issues/autre outil), conserver un item par incrément ou correction significative, son état, les dépendances, les décisions courtes et les critères/observations de réception. **Les specs restent dans les docs** ; Beads sert à savoir *où l'on en est* et à reprendre après interruption. Un journal chronologique séparé peut être utile pour les travaux complexes, pas obligatoire pour tous les projets.
 
-Ces mécanismes sont observés ou corroborés par le [registre R/IMP/AP](../project/risks.md). Leur **fréquence, le gain de prévention et l'attribution au modèle** ne sont pas mesurés rigoureusement.
+**4 — Donner une mission complète à l'agent local.** Lui faire lire les docs et l'issue, vérifier l'état de Git, proposer un **plan bref** et les preuves à produire *avant* de coder. Ensuite il implémente, teste, corrige et prépare **une PR**. Le PO ne doit pas micromanager chaque ligne ; il intervient sur les arbitrages de produit ou les changements majeurs.
 
-## 6. Améliorations recommandées, par effet attendu sur le délai
+**5 — Vérifier en deux temps.** D'abord l'agent exécute localement les tests ciblés et, quand nécessaire, un scénario **réel de bout en bout**. Ensuite la CI rejoue un sous-ensemble rapide, reproductible et adapté au risque. Une CI verte sans preuve locale suffisante ne clôt pas le besoin.
 
-### Priorité A — éviter les retours de correction coûteux
+**6 — Relire la PR comme un contrat.** Avec ChatGPT web et/ou un reviewer indépendant, examiner la conformité au besoin, les écarts d'architecture, les cas oubliés, le diff inutile et les preuves réellement exécutées. Pour chaque problème : commentaire GitHub précis → correction **sur la même PR** → nouveaux tests → nouvelle revue. L'agent ne fusionne pas de son propre chef.
 
-1. **Définition de « prêt à coder ».** Le PO et l'assistant formulent le résultat observable, les exclusions pertinentes, le niveau d'autonomie de l'agent et les arbitrages déjà conclus ; les critères d'acceptation couvrent la vraie interface utilisateur et les risques majeurs. Si la spec est ambiguë, ne pas prétendre que le reviewer peut en déduire une obligation unique.
-2. **Critique du plan avant la première grosse modification.** Demander au reviewer des contre-exemples et des dépendances d'intégration **pendant** que le développeur prépare l'implémentation ; éviter de découvrir tard une mauvaise frontière Docker, un oracle invalide ou une règle de persistance.
-3. **Review des corrections au niveau du contrat.** Le même finding est un *symptôme* ; tester ses variantes voisines avant de redemander une revue GitHub.
-4. **Une PR candidate complète avant la revue finale fraîche.** Regrouper code, tests, instructions pertinentes, Beads, worklog, preuves, brouillon PR ; sinon le verifier renverra une demande de correction documentaire prévisible.
+**7 — Capitaliser seulement l'enseignement réutilisable.** Après un détour coûteux, décider si la cause relève d'une spécification ambiguë, d'une mauvaise séparation des responsabilités, d'un manque de test ou d'un outil fragile. Corriger **le bon endroit** (spec, instruction agent, suite de tests, workflow), plutôt qu'ajouter une règle partout.
 
-### Priorité B — limiter la dérive et l'empêtrement
+## 5. Règles de pilotage pour converger vite
 
-1. **Guardian événementiel**, non un agent qui scrute chaque fichier en continu : après plan, changement structurel, plusieurs échecs identiques, diff anormal ou prépublication. Son message utile se limite à **preuve → contrat → impact → correction minimale**.
-2. **Politique de sortie de boucle :** si les mêmes tests échouent et les mêmes corrections se répètent sans nouvelle preuve, réexaminer hypothèse/architecture ou arrêter sur un blocage motivé. Ne pas imposer un quota de tokens qui coupe arbitrairement une résolution presque achevée.
-3. **Diff justifié plutôt que petit diff :** chaque changement important sert une exigence, un défaut reproduit, un invariant, une nécessité architecturale ou une preuve. Les tests et journaux exigés ne sont pas du « bruit », mais les assertions redondantes et couches spéculatives le sont.
-4. **Contexte et reprises :** checkpoints persistants par révision ; le lead peut compacter/reprendre sans redemander au PO ses arbitrages ni faire confiance à une synthèse non vérifiée.
+- **Le PO décide quoi et pourquoi ; l'agent décide comment dans le cadre approuvé.** ChatGPT web aide à faire le pont, mais ne remplace pas l'arbitrage du PO.
+- **Le plus petit changement *suffisant* gagne.** Le diff justifié inclut les tests, les correctifs d'erreur et les documents nécessaires ; il exclut les abstractions anticipées et les cas hors scope.
+- **La preuve doit précéder la déclaration « prêt ».** Un critère obligatoire non démontré reste explicitement ouvert. La revue finale ne doit intervenir qu'après préparation complète du candidat (code, tests, décisions, Beads, description de PR).
+- **L'indépendance est graduelle.** Un deuxième LLM apporte un autre contexte et des contre-exemples, pas une garantie d'impartialité ; conserver des tests déterministes et une décision humaine.
+- **Ne pas automatiser par principe.** Reviewer parallèle, keeper, guardian et skills ont de la valeur lorsqu'ils évitent plus de reprises qu'ils ne coûtent de coordination. Commencer simple, ajouter un rôle sur un problème répété et mesuré.
+- **Mesurer le bon résultat :** temps de l'intention approuvée à une PR réellement acceptable, nombre de tours de revue, défauts découverts tardivement et charge de synchronisation. Tokens et lignes de code sont des coûts secondaires, pas la définition du succès.
 
-### Priorité C — démontrer que l'organisation est vraiment meilleure
+### Bilan en une phrase
 
-Ne pas ajouter une nouvelle couche permanente d'agents parce que les expériences isolées ont abouti. Tester le workflow sur **plusieurs PR réelles**, en comparant des tâches de portée analogue et en isolant autant que possible le coût de l'agent, la durée des outils et l'attente humaine.
-
-| Mesure | Définition pratique | Comment éviter l'illusion |
-| --- | --- | --- |
-| **Délai jusqu'à PR acceptable** | Début de demande approuvée → PR ayant preuves complètes, aucun finding bloquant fondé connu et réception externe favorable | Noter l'attente humaine séparément ; une PR seulement ouverte ou CI verte n'est pas « acceptable » |
-| **Tours de revue externe** | Nombre de cycles `changes requested → corrective diff → re-review` pour le **même** scope | Compter les cycles, pas seulement les commits ou messages |
-| **Défauts échappés** | Findings sévères découverts après gate interne, distingués de nouvelles exigences | Normaliser par difficulté/taille des changements ; ne pas confondre changement de scope et bug |
-| **Qualité des preuves** | Critères applicables avec test réel pertinent + révision, vs `NOT_DEMONSTRATED`, preuves obsolètes ou simulées | Auditer un échantillon de preuves de bout en bout |
-| **Diff et complexité injustifiés** | Fichiers, abstractions et tests ajoutés sans lien établi avec le contrat ou les corrections | Revue qualitative ; **aucun seuil arbitraire** de lignes |
-| **Temps perdu en coordination** | Tours agent↔agent, redemandes de preuve, revues d'un brouillon incomplet, reprises après hash périmé | Séparer travail productif, revue utile et retours administratifs |
-| **Surcoût et fiabilité d'orchestration** | Temps/tokens, échecs de délégation, indisponibilité de provider, redémarrage, défauts d'isolement | Mesurer sans modifier les contraintes de confidentialité ; le coût token seul n'est pas l'objectif |
-
-**Hypothèse falsifiable :** les sous-agents réduisent le délai de convergence *si* leur détection précoce évite plus de rework qu'ils ne créent de coordination. L'expérience 7 ne suffit ni à confirmer ni à infirmer cette hypothèse.
-
-## 7. Kit de démarrage **portable** pour un futur projet
-
-Conserver le **principe**, pas automatiquement les outils de ce dépôt :
-
-1. **Contrat PO court :** destinataire, résultat attendu, contraintes réelles, exclusions validées, exemples de succès/échec, autorité d'arbitrage. L'assistant distingue constat, proposition et décision. Aucun « template complet » imposé si le besoin est simple.
-2. **Documents normatifs concis :** vision/usage, architecture et interfaces, spécifications et critères observables, plan de jalons avec gates. Un responsable clair pour chaque source de vérité.
-3. **Protocole de collaboration :** une demande approuvée à la fois, un auteur de PR, un reviewer indépendant, un mécanisme pour les corrections sur la même PR, règles de fusion explicites.
-4. **Workflow d'exécution :** entrée unique, plan critiquable, tests pertinents, preuves par révision, réception indépendante fraîche, repli honnête en cas de délégation impossible. Plusieurs agents uniquement si leur charge justifie leur coordination.
-5. **Traçabilité minimale suffisante :** statut courant + preuves, décisions durables et historique des tentatives ; ne pas dupliquer les mêmes textes dans tickets, PR et journaux.
-6. **Gates de sécurité proportionnés :** test de l'environnement de destination, revue de divulgation, séparation des credentials, mode mock/real explicite, droits d'écriture bornés. Ni une consigne « read-only » ni l'absence de logs ne remplacent une isolation technique.
-7. **Mesurer et ajuster :** temps jusqu'à PR réellement acceptée, reworks, défauts tardifs et surcharge documentaire. Si le guardian ou le keeper ne crée pas de valeur démontrée, simplifier leur usage plutôt que complexifier le processus.
-
-**Exemple générique :** le PO demande une correction d'un état affiché à tort comme échec. L'assistant formalise l'invariant « consultation non mutante ; état non terminal distinct d'échec », pointe les exigences existantes, propose un critère « deux lectures après incident → diagnostic inchangé », puis l'agent corrige le système. La revue vérifie l'invariant et le parcours utilisateur, pas seulement un `if` ; le PO arbitre si un nouveau comportement de reprise doit être ajouté. La PR est validée sur une révision précise, sans transformer la suggestion de reprise en exigence implicite.
-
-## 8. Ce qu'il ne faut pas conclure trop tôt
-
-- **« Plus d'agents = plus de vitesse » : non démontré.** Coordination, lectures concurrentes de fichiers partiellement écrits et répétitions de preuves peuvent annuler le gain.
-- **« Une revue par un deuxième LLM est indépendante » : partiellement seulement.** Le contexte peut être neuf, mais les biais de modèle, les sources de contrat et les outils peuvent être communs.
-- **« Un bon skill remplace la revue externe » : faux.** La vérification automatisée est un filtre, pas l'arbitrage du PO ni la responsabilité du relecteur.
-- **« Tests verts + CI verte = livraison conforme » : faux.** Des frontières d'installation, de permissions, de persistance ou de mock/real peuvent rester non vérifiées.
-- **« Un diff minimal = meilleure qualité » : faux.** La minimalité utile conserve les tests et preuves nécessaires.
-- **« Toutes les contraintes du projet doivent être reprises ailleurs » : faux.** Copier intégralement des politiques dans plusieurs agents ou dépôts accroît le risque de contradiction.
-
-## 9. Décision de méthode à emporter
-
-**Conserver :** dialogue PO interactif, arbitrages explicites, spécifications versionnées, jalons de valeur, preuves par contrat et par révision, vraie vérification d'intégration, revues de code et refus de fusion automatique par un agent.
-
-**Corriger :** l'acceptation fondée sur la CI seule, les patchs symptomatiques, l'invention d'exigences par le reviewer, le brouillon de PR préparé après sa vérification, les preuves recopiées et vieillies, et les arbitrages laissés dans une conversation non réconciliée avec les docs.
-
-**Expérimenter et mesurer :** revue critique dès le plan, guardian déclenché aux jalons, evidence keeper à écriture exclusive, challenger d'oracles selon le risque, revue finale isolée automatique et indicateurs de délai jusqu'à **PR réellement acceptable**.
-
-Le dépôt versionne aujourd'hui ce choix de workflow via [PR #18](https://github.com/aradenac/utest-machinery/pull/18). Son efficacité produit sur plusieurs PR reste une **question ouverte** : ce RETEX n'est ni une certification d'une méthode universelle ni une modification des [statuts de risques et impacts](../project/risks.md).
+**La bonne exploitation des LLM consiste à faire dialoguer librement l'humain avec un assistant de conception, formaliser leurs décisions dans un dépôt partagé, déléguer l'exécution à un agent local autonome mais borné, et accepter le travail sur des preuves réelles — pas sur l'assurance d'un modèle ni sur une CI simplement verte.**
