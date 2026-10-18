@@ -29,7 +29,7 @@ From specification-driven checks to structural coverage and defect-detection str
 </tr>
 </table>
 
-*Delivery roadmap: the functional Ceedling/Unity/CMock bench is the current foundation; offline coverage, sanitizers and host diagnostics belong to milestone 3; mutation and fuzzing belong to milestone 4. Profiles apply only when supported by the selected code and tools. See the [verification strategy](docs/architecture/verification-strategy.md).*
+*Delivery roadmap: Ceedling/Unity/CMock remains the functional bench; milestone 3 adds offline verification and a narrow **Clang/libclang semantic C type adapter** with native CMock header preprocessing (architectural decision approved, **not yet delivered**). Mutation and fuzzing remain milestone 4. Apply only supported profiles and record exclusions. See the [revised milestone 3 plan](docs/plan/implementation.md) and [verification strategy](docs/architecture/verification-strategy.md).*
 
 ## How can embedded C run without the target hardware?
 
@@ -82,7 +82,7 @@ flowchart LR
 - [LLM development RETEX — PO to GitHub, coding and review (cross-project lessons)](docs/development/llm-development-retrospective.md)
 - [Workflow errors and recovery](docs/architecture/workflow-failures.md)
 
-**Delivery status:** milestones 1–2 are merged: CLI/Docker/Dagu control and functional C bench generation with Ceedling/Unity/CMock are implemented and exercised on selected fixtures. `mtm verify`, `mtm interpret` and `mtm report` remain future milestones. Reference fixtures and green CI are not proof of universal C/SDD support or product conformance.
+**Delivery status:** milestones 1–2 are merged and exercised on selected fixtures. Milestone 3 (`mtm verify`, C fidelity and qualification) is under development in [draft PR #35](https://github.com/aradenac/utest-machinery/pull/35); its revised Clang/CMock architecture is an **approved plan, not an implemented feature**. `mtm interpret`/`mtm report` remain later milestones. Fixture success and green CI do not prove universal C/SDD support or product conformance.
 
 **Working boundary:** native C execution on Linux under WSL via Docker. QEMU/Renode and on-target testing are a future, separate stage.
 

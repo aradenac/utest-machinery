@@ -69,7 +69,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  I["Selected translation units + build context"] --> P["Preprocess / inspect macros, includes and types"]
+  I["Selected translation units + build context"] --> P["Clang/libclang: preprocessed declarations and semantic C types"]
   P --> R["Resolve external symbols + target intrinsics"]
   R --> M["Generate mocks/shims in bench (if justified)"]
   M --> C["Host compile + link + smoke execute"]
@@ -126,6 +126,10 @@ Requirements below express **observable behavior**; schemas are specified in [da
 | SYS-037 | All bundled testing/workflow tools SHALL be free to use internally, with reproducible versions and recorded license information. |
 
 ## Technical boundaries
+
+**C semantic authority — architectural decision (18 October 2026).** For type-sensitive generation and mock interfaces, the pinned **Clang 18/libclang 18** front end is the authoritative source of declarations, resolved `typedef` chains, parameter/return types, pointer depth, qualifiers and record/enum identity **in the selected host-compilation/adaptation context**. Load only the explicitly selected inputs and approved include roots, macro definitions, compiler arguments and selected compilation database if provided; store effective options/tool version/diagnostics with generation provenance. Use the small standard libclang API via version-matched bindings to feed the existing generator, **not** a new project-wide AST, type database, C grammar, or custom preprocessor. A lightweight lexical scanner may suggest discovery candidates but cannot certify type fidelity. Missing SDK/header/ABI context yields an actionable unit-level `BLOCKED` or explicit unsupported shape, rather than guessed declarations; an unavailable/broken tool yields a tool failure. Keep originals read-only and avoid claiming embedded-target equivalence from host analysis.
+
+**Mock generation boundary.** Retain native Ceedling/Unity/CMock and prefer their existing mockable header + mock-only preprocessor support (`:use_test_preprocessor: :mocks`) when preprocessing is needed, with the **same effective C compilation context**. Avoid synthetic duplication of inline aggregate/enum type bodies; use original declarations in private generation outputs as far as safely expressible. Do **not** implement textual include-guard analyses, iterative `#ifdef/#else/#undef` exceptions or a second semantic type resolver. A diagnostic emitted by real preprocessing/compilation is evidence of an invalid **generated harness or context**, not an implementation defect in the SUT. No automatic repair of approved SDD oracles; supported test cases still require correctly typed call/observation/assertion plus actual C compilation and behaviorally discriminating execution. Preserve the approved representable pointer/void domain; unsupported shapes must be named and excluded **before** a correctness verdict, with their impact counted.
 
 - Native execution uses original C translation units when feasible; if isolated extraction is unavoidable, retain hashes, transformations and fidelity assumptions. Hardware-dependent units may remain BLOCKED, never omitted from selected-scope statistics.
 - Generated oracles carry exact SDD anchors and review state; the LLM may propose a correction to code or specification but may not silently modify either. From milestone 3, an independent semantic assessment of **concrete** expected observations is kept separately from their generated provenance and from raw PASS/FAIL. Semantic uncertainty or contradiction cannot be hidden by a passing test or repaired by adapting the oracle to observed C behavior.
