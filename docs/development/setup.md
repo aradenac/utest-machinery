@@ -53,7 +53,7 @@ This workflow is **not** the product's in-container LLM runtime. It is also not 
 
 ### Native delivery and liveness hooks
 
-The versioned skill installs **session-scoped** Python-standard-library command hooks from [`.claude/hooks/develop-verified.py`](../../.claude/hooks/develop-verified.py). Check `/hooks` and run a real Team smoke test to verify which events are delivered under the configured Claude Code/CCR. No global settings, timers, monitoring daemon or added package is needed.
+The main skill installs session-scoped `SubagentStop`, `TaskCompleted` and `Stop` hooks; **project-local** [`.claude/settings.json`](../../.claude/settings.json) installs `TeammateIdle` for teammate sessions that load project settings. All use the versioned Python-standard-library [hook](../../.claude/hooks/develop-verified.py). Check `/hooks` in the real Team/CCR environment. No global settings, timers, monitoring daemon or added package is needed.
 
 - `SubagentStop`: asks once for a meaningful handback if an isolated subagent tries to stop with a very short answer (with `stop_hook_active` guard).
 - `TeammateIdle`: only when the coordinator has installed an **active mission receipt** at `.claude/.runtime-reports/<team-name>/missions/<teammate-name>.json`. Checks a report's `MISSION_ID`, `FINGERPRINT`, `STATUS` headers. If missing/wrong, requests one short completion report, tracked by an ignored one-time nudge marker; a second idle passes instead of creating a loop. IDLE alone is normal; absent receipt is a no-op. The report must be written atomically, and the coordinator must reconcile the receipt to inactive when the result is consumed.
