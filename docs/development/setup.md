@@ -31,3 +31,18 @@ Create a protected GitHub Environment (e.g. `llm-integration`) and store `SCW_BE
 Beads is **development tracking** in this repository, not a dependency inside the user product/Docker. On first feature PR: install/pin `bd` in user/local scope, run `bd init --skip-agents` (do not overwrite `CLAUDE.md`), map the [feature milestones](../plan/implementation.md) to Beads tasks/dependencies, and reconcile already merged work. Track PR state and notes with `bd` commands.
 
 For auditability include a refreshed `.beads/issues.jsonl` export in each PR (issues/comments/dependencies); in modern Beads this is an **export**, not the canonical Dolt history. Use the documented `bd dolt push/pull` with the repository's Git remote for full cross-machine synchronization where supported, and `bd backup` if a restorable backup is needed. Version-pin the setup and document the tested recovery procedure in the first PR. Avoid server/Dolt services unless the default embedded mode demonstrably fails the use case.
+
+## One-prompt verified development workflow
+
+From the repository root in an interactive WSL terminal, enable Claude Code's experimental Agent Teams **per session** (no global configuration change):
+
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ccr "Claude DeepSeek Flash" cli
+
+Then use ONE command, for example:
+
+    /develop-verified Implement the next approved milestone
+    /develop-verified Address all substantive findings on PR #14
+
+The versioned .claude/skills/develop-verified/SKILL.md orchestrates the lead, two parallel teammates (implementation-reviewer and evidence-keeper), a focused convergence-guardian, an optional test-challenger, and automatic fresh final verification using the existing /verify-feature / contract-reviewer. You do **not** need a separate verifier prompt. Only the lead edits implementation and PR; only the keeper updates Beads/worklog. The contract reviewer remains independent of the live reviewer. Evidence is tied to the actual revision; an edit invalidates applicable earlier acceptance claims.
+
+This is a **developer workflow**, not a runtime service or mandatory product installation step. Experiments in a separate disposable WSL lab demonstrated team messaging, Beads 1.3.1/worklog writes and fresh-subagent review, but not this exact integrated repository end-to-end flow, actual GitHub PR publication, or improved efficiency versus a baseline; verify these in subsequent real use. The worklog is mandatory *development memory*, not application/router debug logging. Do not enable verbose logging or persist credentials. If the experimental team fails with CCR, the skill reports degraded parallelism and uses fresh isolated reviews; it must never fabricate successful delegation. Follow CLAUDE.md's merge boundary: PR then STOP, never auto-merge or start another milestone.

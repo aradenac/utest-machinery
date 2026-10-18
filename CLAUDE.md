@@ -2,6 +2,12 @@
 
 Claude Code loads this file automatically. Start by reading [README](README.md), the [architecture](docs/architecture/architecture.md), [implementation plan](docs/plan/implementation.md), [LLM policy](docs/architecture/automation-policy.md), and [qualification plan](docs/qualification/ci-and-manual-tests.md). Do not reread everything on every tool call; inspect the relevant parts.
 
+## Single-entry verified development
+
+For a new approved milestone or substantive corrections to the same open PR, invoke /develop-verified with the mission once. Its versioned entry point (.claude/skills/develop-verified/SKILL.md) orchestrates plan/acceptance, parallel implementation critique and evidence maintenance, checkpointed convergence control (scope/diff/stalls), risk-focused test challenge, **automatic** fresh independent /verify-feature (PRE_PR or PR_RECHECK), and PR/CI delivery. Manual /verify-feature remains available but is not an additional required user prompt when the orchestrator ran it and recorded the result. See docs/development/setup.md for the per-session Agent Teams flag and CCR command.
+
+Existing responsibilities still govern: only lead edits product code/tests/PR; delegated keeper alone writes Beads/worklog when running, with lead fallback if delegation is unavailable; reviewer/guardian/challenger are read-only. Do not allow competing Beads writers. Worklog records state changes and evidence provenance concisely rather than repeated status narration. Do not create a second tracker or duplicate acceptance matrices. Every significant diff must have a contract/defect/risk/necessary-proof justification; minimize unnecessary changes without dropping required quality evidence. Fresh independent final review is **after complete candidate PR evidence** and before first PR publication or re-requesting review. A final verifier cannot be replaced by the continuous reviewer. A failure, missing mandatory proof, unverified PR feedback, or inaccessible fresh subagent blocks READY even if tests or /goal are green. No app/router debug logging. Risk register remains independent-review-only.
+
 ## Start of every development session
 
 1. Inspect `git status`, current branch, merged PRs, code and existing checks. Reconcile the documented feature milestones with **what has actually merged**. Never infer completion from a checklist alone.
