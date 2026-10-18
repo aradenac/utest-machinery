@@ -26,3 +26,17 @@ note is corrected. Nothing here declares product behavior or implemented status.
   result, metric or status that was not actually observed.
 - Pin exact versions, digests and tags; no floating references.
 - Keep secrets out: reference a variable name, never a value. Presence checks only.
+- **Log meaningful deltas, not repeated reports.** Keep the first observed failure, an
+  attempted correction that changed the approach, material decisions/arbitrations,
+  final outcomes and unresolved blockers. A routine checkpoint with no new fact
+  does not need a new narrative or a copy of an agent's full response.
+- **Link to existing evidence rather than copying it.** For a test result, retain a
+  short verdict and the exact revision plus a reference to its authoritative
+  command/result/artifact in Beads, a commit or a PR discussion. Keep the
+  chronological fact that evidence was later superseded, but do not paste full
+  logs, acceptance matrices or repeated test listings into every session note.
+- **Do not lose auditability to save tokens.** Preserve meaningful failed
+  approaches, owner decisions, why a result became obsolete, and evidence
+  provenance. Beads holds current acceptance status and concise proof pointers;
+  this worklog holds the history; the PR links to both. Neither is a replacement
+  for normative `docs/`.
