@@ -103,6 +103,25 @@ was rejected by the probe: it swallowed the alias after a `;` and leaked a leadi
 `;` into the verbatim statement). Scope stays a statement-level scanner — a
 `typedef` inside a function body on its own line keeps its pre-existing behaviour.
 
+**F-A5 correction — the predicate must reason over branches, not text spans (fourth
+independent PRE_PR review).** The reviewer on `7718932` returned CHANGES_REQUIRED
+with a mandatory *narrower residual of the F-A4 class*: `_header_shares_safely`
+accepted a `#define X` merely *appearing* between an `#ifndef X` and its `#endif`,
+without preprocessor semantics. Two shapes read as guarded while a second inclusion
+still repeats the inline body — an **`#else`/`#elif` branch that repeats the body**
+(taken on the second inclusion) and a **`#define X` that is dead** (nested under
+`#if 0`, so the guard never collapses). **F-A5 decision — restrict the claim instead
+of chasing spans:** replace `_header_shares_safely` + `_guard_spans` with a
+**sound-by-construction** predicate that proves safety only for a *simple* guard
+(`_simple_guard_span`: prologue of comments/includes, `#ifndef X` / `#if !defined(X)`
+**immediately** followed by `#define X`, a matching `#endif` with **no**
+`#else`/`#elif` at the guard's own level) with every inline body inside it, and
+refuses everything else as a **named limitation** (§C permits recording a precise
+exclusion). `#pragma once`, a no-inline-body header and a nested inner `#if` inside
+the guard stay admitted. **Escalation (binding):** fourth mandatory hole in this
+class (F-A1→F-A2→F-A4→F-A5); if the next review finds another, the lead escalates to
+owner arbitration rather than opening a fifth corrective pass.
+
 **F-A4 correction — share-safety must prove the body is *inside* a guard (third
 independent PRE_PR review).** The reviewer on `d7eb00e` returned CHANGES_REQUIRED
 with a mandatory finding the lead reproduced and accepted: `_header_has_guard`
@@ -194,12 +213,13 @@ escalate to owner arbitration.
 * `mtm/cscan.py` (`scan_typedefs`, `typedef_statement_map`, `_TYPEDEF_RE`,
   `_AGGREGATE_REF_RE`, `_TYPEDEF_STMT_RE`), `mtm/gen.py`
   (`split_declaration`, `mock_controls`, `_typedef_aliases_for_decl`,
-  `_decl_alias_tokens`, `_header_shares_safely`, `_guard_spans`, `generate_suite`).
-* `tests/test_pr2_runner.py` (ten §C regression tests: opaque alias, pointer-typedef
+  `_decl_alias_tokens`, `_header_shares_safely`, `_simple_guard_span`, `generate_suite`).
+* `tests/test_pr2_runner.py` (twelve §C regression tests: opaque alias, pointer-typedef
   depth, interface-header alias, anonymous-aggregate sharing, guard-less aggregate
   limitation, guard-less enum limitation + guarded-enum compile, guard-less inline
   tag-body limitation, guard-like-block-not-enclosing-the-body limitation,
-  `#pragma once` inline body shareable, combined-line alias + in-image execution),
+  `#pragma once` inline body shareable, conditional-branch-of-guard limitation,
+  guarded-nested-conditional body shareable, combined-line alias + in-image basics),
   `tests/test_pr2_units.py` (opaque-alias scanner test).
 * PR 3 §A/§B/§C and DoD 3 in `docs/plan/implementation.md`;
-  `worklog/log/2026-10-18-pr3.md` (sessions 4–9).
+  `worklog/log/2026-10-18-pr3.md` (sessions 4–10).
