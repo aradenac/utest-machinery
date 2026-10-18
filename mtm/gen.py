@@ -1546,8 +1546,9 @@ def _authoritative_declaration(
     2. :data:`DECL_FROM_HEADER` — a prototype textually present in a selected
        header (still a real declaration, subordinate to clang's typed facts but
        superior to the model). Reached when clang did not attribute the symbol
-       (e.g. it is declared only in a ``.c``), or when the resolver is the offline
-       test double.
+       (e.g. it is declared only in a ``.c``), when the resolver is the offline
+       test double, or when clang's facts cannot be rendered into a usable
+       declarator (an unnamed parameter the mock surface cannot key on).
     3. :data:`DECL_FROM_LLM` — extracted from the plan's ``mock_declarations``
        **only when no real declaration exists** (verifiably), and only when one
        unambiguous prototype is present.
@@ -1558,7 +1559,11 @@ def _authoritative_declaration(
         fact = facts.by_name(symbol)
         if fact is not None:
             decl = _declaration_from_fact(fact)
-            if decl:
+            # Only a declaration this generator can actually materialise counts as
+            # the authoritative one: a reconstruction whose parameters have no
+            # names (a partial fact set) is not usable for a CMock mock, so fall
+            # through to the real selected header rather than emit it.
+            if decl and split_declaration(decl) is not None:
                 return decl, DECL_FROM_CLANG
     real = _prototype_for_symbol(bench_root, inventory, symbol)
     if real:
