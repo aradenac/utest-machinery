@@ -1413,3 +1413,159 @@ def test_compatible_signature_spellings_are_never_falsely_refused(tmp_path):
     assert _signature_key("int *foo_a(int x)") == _signature_key("int *foo_a(int y)")
     assert _signature_key("int *foo_a(int x)") == _signature_key("int * foo_a(int x)")
     assert _signature_key("int foo_a(void)") == _signature_key("int foo_a()")
+
+
+def test_compatible_qualifiers_and_storage_class_are_never_falsely_refused(tmp_path):
+    """E2-residual contrast (fresh PR_RECHECK): a header repeating the same
+    declaration with a top-level ``const``, an ``extern`` storage class, or
+    differing whitespace is C-compatible and must generate, not be refused as an
+    "incompatible signature". A genuine difference (arity, param type, return
+    type) is still refused."""
+    from mtm.gen import _signature_key
+
+    # Compatible: qualifiers/storage class do not change the function type.
+    assert _signature_key("int sensor_read(int x)") == \
+        _signature_key("int sensor_read(const int x)")
+    assert _signature_key("int sensor_read(int x)") == \
+        _signature_key("extern int sensor_read(int x);")
+    assert _signature_key("int foo_a(int *p)") == _signature_key("int foo_a(int * p)")
+    # Still refused: a real type difference.
+    assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int *x)")
+    assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int x, int y)")
+
+    # End to end: the `const int` bench now generates (previously refused).
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "const-param-compatible"
+    bench.mkdir()
+    (bench / "sensor.c").write_text("int sensor_read(int x) { return x; }\n")
+    (bench / "sensor.h").write_text(
+        "#ifndef SENSOR_H\n#define SENSOR_H\nint sensor_read(const int x);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **S**: s\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("sensor.c", "source"), ("sensor.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "sensor_read", "requirement_ids": ["S"],
+         "mocks": [], "cases": [{"args": [1], "expected": 1}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+
+
+def test_a_variadic_signature_is_refused_not_emitted_as_an_invalid_call(tmp_path):
+    """E2-residual (fresh PR_RECHECK, HIGH): a variadic function signature is a
+    shape the generator cannot render faithfully — ``split_params`` turns the
+    trailing ``...`` into a parameter, so the emitted call is ``foo_a((int)1,
+    (...)2)`` (not valid C) and the whole bench dies as an *opaque* build failure
+    with no recorded limitation. The scenario must be refused with a limitation
+    instead, whether the variadic parameter is miscounted as one argument or two."""
+    from mtm.gen import func_params, generate_suite, _unsupported_param_shape
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    # The scanner's synthetic `...` parameter is detected regardless of arity.
+    assert "..." in func_params("int foo_a(int x, ...)")[1].type
+    assert _unsupported_param_shape(func_params("int foo_a(int x, ...)"))
+    assert not _unsupported_param_shape(func_params("int foo_a(int x, int y)"))
+
+    bench = tmp_path / "variadic-sut"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo_a(int x, ...) { return x; }\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    for args in ([1], [1, 2]):
+        plan = parse_plan(json.dumps({"scenarios": [
+            {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+             "mocks": [], "cases": [{"args": args, "expected": 1}],
+             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+            inventory, LLMIdentity(provider="test", model="t"))
+        out = generate_suite(bench, plan, inventory)
+        assert out.test_functions == [], (args, out.test_functions)
+        assert any("variadic" in lim for lim in out.limitations), out.limitations
+
+
+def test_an_array_or_function_pointer_parameter_is_refused_not_misrendered(tmp_path):
+    """E2-residual (fresh PR_RECHECK, HIGH): an array parameter (``int a[3]``) or a
+    function-pointer parameter (``int (*cb)(int)``) cannot be materialised
+    faithfully — the argument is rendered as a scalar cast, so a *pointer*
+    parameter receives an ``int``. The SUT then runs with a nonsense argument and
+    the run is misreported as a fabricated ``IMPLEMENTATION_DEFECT`` (or crashes).
+    It must instead be refused with a recorded limitation.
+
+    Honest scope: the deterministic scanner's function-definition regex excludes
+    ``()`` from the parameter list, so a **function-pointer-parameter** definition
+    is never surfaced (the plan rejects it as an unknown function); that branch of
+    the guard is therefore only asserted at the parameter-shape level, defensively.
+    The array case is reached end to end."""
+    from mtm.gen import _unsupported_param_shape, func_params, generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    assert _unsupported_param_shape(func_params("int foo_a(int xs[4])"))
+    assert _unsupported_param_shape(func_params("int foo_a(int (*cb)(int))"))
+    # A plain pointer parameter with a supplied pointed-to value stays supported.
+    assert not _unsupported_param_shape(func_params("int foo_a(int *p)"))
+
+    bench = tmp_path / "unsupported-array"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo_a(int xs[4]) { return xs[0]; }\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+         "mocks": [], "cases": [{"args": [1], "expected": 1}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == [], out.test_functions
+    assert any("function-pointer or array" in lim for lim in out.limitations), \
+        out.limitations
+
+
+@pytest.mark.docker
+def test_real_image_builds_a_previously_refused_compatible_declaration(
+        tmp_path, product_image):
+    """AP-02 for the E2-residual contrast: the `const int` parameter bench that the
+    pre-fix conflict check falsely refused now compiles and executes in the product
+    image (it is C-compatible: a top-level `const` on a parameter does not change
+    the function type)."""
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "real-const-compatible"
+    bench.mkdir()
+    (bench / "sensor.c").write_text("int sensor_read(int x) { return x; }\n")
+    (bench / "sensor.h").write_text(
+        "#ifndef SENSOR_H\n#define SENSOR_H\nint sensor_read(const int x);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **S**: s\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("sensor.c", "source"), ("sensor.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "sensor_read", "requirement_ids": ["S"],
+         "mocks": [], "cases": [{"args": [1], "expected": 1}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran, f"no Unity summary: {run.diagnostics[-2000:]}"
+    assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1000:])

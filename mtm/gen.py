@@ -115,6 +115,41 @@ def _looks_like_type(token: str) -> bool:
     return token.endswith("_t") or token in _CTYPE_WORDS
 
 
+#: Type names that may legitimately stand alone as a parameter (no name, no
+#: ``*``): an unnamed parameter is nothing else in a well-formed prototype. A
+#: typedef'd type is deliberately *not* listed: an unknown bare token is treated
+#: as a missing name (a refusal) rather than guessed to be a type.
+_SHAPE_AS_IS = {"void", "void *", "char *", "const char *"}
+
+
+def _unsupported_param_shape(params: list[CParam]) -> str | None:
+    """A reason a parameter list cannot be materialised faithfully, or ``None``.
+
+    The generator renders each argument as a cast to the parameter's type and,
+    for a pointer parameter, a declared local initialised from a scalar. A
+    parameter that C decltype-syntax or the scanner cannot express faithfully —
+    a variadic ``...``, a function-pointer or array parameter, or a parameter the
+    scanner could not parse into a ``type name`` — would emit a call that does
+    not compile (an opaque ``TOOL_FAILURE``) or passes a scalar where the callee
+    dereferences it (a run-time crash misread as an ``IMPLEMENTATION_DEFECT``).
+    Report it so the caller records a limitation and refuses the scenario, never
+    an admitted-but-uncompilable/crashing bench (``implementation.md``:
+    "unsupported shapes are recorded limitations, never silent passes").
+    """
+    for param in params:
+        if "..." in param.type:
+            return "a variadic (`...`) parameter is not supported"
+        if any(ch in param.type or ch in param.name for ch in "(["):
+            # The scanner leaves a function-pointer/array suffix in the parsed
+            # type or name (`int a[3]` → name `a[3]`; `int (*cb)(int)` → name
+            # `(cb)(int)`); the generator cannot render such an argument.
+            return ("a function-pointer or array parameter is not supported")
+        if not param.name and param.type not in _SHAPE_AS_IS:
+            return (f"parameter {param.type!r} could not be parsed into a type "
+                    "and a name")
+    return None
+
+
 def func_params(signature: str) -> list[CParam]:
     m = re.search(r"\(([^)]*)\)", signature)
     return split_params(m.group(1)) if m else []
@@ -251,16 +286,39 @@ def _functions_declared_by(unit, scenarios: list[Scenario] | None,
     return declared & _wanted_functions(scenarios)
 
 
+#: C type qualifiers and storage-class specifiers that do not change a function's
+#: *type*: a header that repeats a declaration with or without them is not a
+#: conflict. (`inline`/`extern`/`static` on a prototype are storage class; the
+#: ``const``/``volatile``/``restrict`` in a **top-level** position do not affect
+#: the function type either.)
+_QUALIFIERS = {"const", "volatile", "restrict", "extern", "static", "inline",
+               "_Noreturn", "register", "auto", "typedef"}
+
+
+def _norm_type(text: str) -> str:
+    """Normalise a C type for *comparison*: drop qualifiers/storage class, spaces.
+
+    This is a deliberate textual approximation, **not** a C type system (see the
+    recorded limitation): a typedef-alias spelling of the same type (``size_t`` vs
+    ``unsigned long``) is still treated as a difference. It only removes tokens
+    that provably do not change the function type, so a genuinely compatible
+    declaration (`const int x`, `extern int f(int)`) is not falsely refused.
+    """
+    tokens = [t for t in re.split(r"\s+", text.strip()) if t]
+    return "".join(t for t in tokens if t not in _QUALIFIERS).replace(" ", "")
+
+
 def _signature_key(signature: str) -> tuple | None:
     """A comparable key for a C signature, or ``None`` when unparseable.
 
-    Parameter *names* are dropped and types normalised, so a header that repeats
-    the same declaration with different parameter names is not a conflict; arity,
-    parameter types and the return type are compared. Parsed independently of
-    ``split_declaration`` (which deliberately refuses *pointer returns* and other
-    shapes the **generator** cannot emit): a pointer-returning prototype is a
-    perfectly comparable declaration, and treating it as unparseable would silently
-    skip the conflict check exactly where it is needed.
+    Parameter *names* are dropped and types normalised (qualifiers and storage
+    class removed), so a header that repeats the same declaration with different
+    parameter names, a spurious `const`, or an `extern` storage class is not a
+    conflict; arity, parameter types and the return type are compared. Parsed
+    independently of ``split_declaration`` (which deliberately refuses *pointer
+    returns* and other shapes the **generator** cannot emit): a pointer-returning
+    prototype is a perfectly comparable declaration, and treating it as
+    unparseable would silently skip the conflict check exactly where it is needed.
     """
     decl = _strip_c_comments(signature or "").strip().rstrip(";")
     if not decl:
@@ -268,13 +326,12 @@ def _signature_key(signature: str) -> tuple | None:
     m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
     if not m or "..." in m.group("params"):
         return None
-    ret = re.sub(r"\s+", " ", m.group("ret")).strip()
-    ret_key = ret.replace(" ", "") if "*" in ret else ret
+    ret_key = _norm_type(m.group("ret"))
     params = split_params(m.group("params"))
-    if any("(" in p.type for p in params):
+    if any("(" in p.type or "[" in p.type or "[" in p.name for p in params):
         return None  # function-pointer/array parameter: not comparable here
     return (ret_key, tuple(
-        f"{'*' if p.pointer else ''}{p.type.replace(' ', '')}" for p in params))
+        f"{'*' if p.pointer else ''}{_norm_type(p.type)}" for p in params))
 
 
 def _conflicting_declarations(unit, scenarios: list[Scenario] | None,
@@ -438,6 +495,15 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
     control would make the mock return defaults and turn a planned expectation
     into a spurious test finding, i.e. a fabricated defect report.
     """
+    # A parameter whose shape this generator cannot render faithfully (variadic,
+    # function-pointer/array, or unparsed) must be refused *here*, not emitted as
+    # an uncompilable call (opaque TOOL_FAILURE) or a scalar passed where the
+    # callee dereferences it (a crash misread as an IMPLEMENTATION_DEFECT). Checked
+    # before the arity test so the reason names the real cause, not a misleading
+    # argument count (the scanner counts a trailing `...` as a parameter).
+    shape_problem = _unsupported_param_shape(params)
+    if shape_problem is not None:
+        return shape_problem
     # The argument count must match the real signature: `signatures` come from the
     # deterministic scanner, not the model. A mismatch would emit an uncompilable
     # call and kill the whole bench as an opaque TOOL_FAILURE while still counting
