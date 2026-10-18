@@ -65,15 +65,39 @@ TEST_DIRNAME = "test"
 UNRESOLVED = "UNRESOLVED"
 
 
+#: clang record ``kind``s whose pointee is a true **aggregate**: a struct, union
+#: or class. An ``ENUM`` is deliberately absent — an enumeration is a *scalar* C
+#: type (``e_t x = (e_t)7;`` and ``TEST_ASSERT_EQUAL`` compile), so a scalar for
+#: it is materialisable and must not be refused. Conflating ``ENUM`` with
+#: ``RECORD``/``UNION`` (clang groups all three under ``record``) silently shrank
+#: the verified domain to every non-enum API — the regression this predicate
+#: exists to prevent.
+_AGGREGATE_RECORD_KINDS = frozenset({"RECORD", "UNION"})
+
+
+def _is_aggregate_record(record: Any) -> bool:
+    """True when clang's *record* fact names a struct/union (not an enum).
+
+    The single source of the aggregate/``record`` boundary: a struct/union pointee
+    cannot be initialised from a scalar, whereas an enum pointee can. Consumed by
+    both :func:`_chart_type_map` (the ``Typedef.aggregate`` marker) and the
+    ``aggregates`` name set ``is_aggregate_base`` tests, so the two refusal paths
+    cannot drift apart again.
+    """
+    return bool(record) and record.get("kind") in _AGGREGATE_RECORD_KINDS
+
+
 @dataclass
 class Typedef:
     """One resolved C alias, charted from libclang facts (``_chart_type_map``).
 
     ``base`` is the canonical pointee base and ``depth`` its ``*`` count;
     ``opaque`` marks a function-pointer/array shape this generator cannot render;
-    ``aggregate`` marks an alias whose ultimate base is a record/enum (a scalar
-    cannot initialise a pointer to it). Both are clang's identity facts, replacing
-    the retired regex scanner's textual guesses on this path.
+    ``aggregate`` marks an alias whose ultimate base is a **struct/union** (a
+    scalar cannot initialise a pointer to it). An enum alias is *not* aggregate: an
+    enumeration is a scalar type, so a scalar (or enum identifier) for it is
+    materialisable. Both are clang's identity facts, replacing the retired regex
+    scanner's textual guesses on this path.
     """
 
     base: str
@@ -99,10 +123,13 @@ def _chart_type_map(facts: Any) -> dict[str, Typedef]:
     clang **replaces** the regex's semantic claims: the
     depth of ``typedef int *P; P *pp`` is clang's 2, not a textual guess.
 
-    ``aggregate`` is set when the alias's ultimate base names a record/enum or a
-    function/array shape (``opaque``) — the *identity* clang reports, not a
-    ``struct``-in-braces text match. This keeps the aggregate-refusal family
-    (a scalar for an aggregate pointee) and the chained-alias case covered.
+    ``aggregate`` is set when the alias's ultimate base names a **struct/union**
+    (``record.kind`` in ``RECORD``/``UNION``) or a function/array shape
+    (``opaque``) — the *identity* clang reports, not a ``struct``-in-braces text
+    match. An ``ENUM`` base is a scalar, so its alias is **not** aggregate (see
+    :func:`_is_aggregate_record`). This keeps the aggregate-refusal family
+    (a scalar for a struct/union pointee) and the chained-alias case covered
+    without blanket-refusing every enum-typed parameter.
     """
     charted: dict[str, Typedef] = {}
     aliases = getattr(facts, "aliases", None) or {}
@@ -111,7 +138,7 @@ def _chart_type_map(facts: Any) -> dict[str, Typedef]:
             base=fact.base,
             depth=fact.depth,
             opaque=fact.opaque,
-            aggregate=bool(fact.record) or fact.opaque,
+            aggregate=_is_aggregate_record(fact.record) or fact.opaque,
         )
     return charted
 
@@ -1262,13 +1289,16 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         out.mocks.append(symbol)
         interfaces[symbol] = header_name
 
-    # Aggregate identity comes from clang (a record/enum base), charted into the
-    # same `aggregates` name set `aggregate_aliases`/`is_aggregate_base` consume —
-    # a scalar supplied for a record pointee is refused before a verdict. Function/
-    # array aliases (opaque) are excluded here: they are refused by the `opaque`
-    # type map on the argument path, not treated as aggregates.
+    # Aggregate identity comes from clang (a struct/union base), charted into the
+    # same `aggregates` name set `is_aggregate_base` consumes — a scalar supplied
+    # for a struct/union pointee is refused before a verdict. An **enum** base is a
+    # scalar type and is deliberately excluded (its alias is not aggregate — see
+    # `_is_aggregate_record`), else every enum-typed parameter/out-param would be
+    # blanket-refused. Function/array aliases (opaque) are excluded here too: they
+    # are refused by the `opaque` type map on the argument path, not treated as
+    # aggregates.
     aggregates: set[str] = {name for name, fact in (getattr(facts, "aliases", None) or {}).items()
-                            if fact.record}
+                            if _is_aggregate_record(fact.record)}
 
     # 4. One Unity test file per unit holding that unit's scenarios.
     by_unit: dict[str, list[Scenario]] = {}

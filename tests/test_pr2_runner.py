@@ -2559,6 +2559,82 @@ def test_a_guardless_header_with_an_inline_tag_body_is_a_named_limitation(tmp_pa
         assert proc.returncode == 0, proc.stderr
 
 
+def test_an_enum_by_value_parameter_generates_with_empty_limitations(tmp_path):
+    """I5 regression (TC-1): an **enum-typed by-value parameter** is a scalar and
+    must generate — the regression (lot B charting clang's ``record.kind == ENUM``
+    into ``aggregate``) refused it with "argument N points at an aggregate type".
+    The generated call casts each argument to its declared enum type, which the
+    real compiler accepts below."""
+    bench, out, _ = _ptr_bench(
+        tmp_path, "enum-by-value",
+        '#include "foo.h"\n'
+        "state_t transition(state_t s, event_t e) { return (e == EV_START) ? s : ST_STOPPED; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n"
+        "typedef enum { ST_STOPPED, ST_RUNNING } state_t;\n"
+        "typedef enum { EV_START, EV_STOP } event_t;\n"
+        "state_t transition(state_t s, event_t e);\n#endif\n",
+        "# SDD\n- **FOO-001**: `transition` SHALL keep its state on EV_START.\n",
+        [_one_scenario("transition", ["ST_STOPPED", "EV_START"], "ST_STOPPED")])
+    assert out.limitations == [], out.limitations
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert "(state_t)ST_STOPPED" in body and "(event_t)EV_START" in body, body
+    if shutil.which("gcc"):
+        _compile_enum_call_shapes(
+            bench, tmp_path / "enum-by-value-tu",
+            "state_t call_shape(void) { return transition((state_t)ST_STOPPED,"
+            " (event_t)EV_START); }")
+
+
+def test_an_enum_pointer_out_parameter_generates_with_empty_limitations(tmp_path):
+    """The ``enum *`` out-param half of TC-1: a pointer to a scalar enum must be
+    materialised as ``status_t out0_0 = (status_t)…;`` and observed, never refused
+    as an aggregate. The old scanner chased only ``struct``/``union``; an enum
+    pointee is a scalar and was generatable at base ``755d27e``."""
+    bench, out, _ = _ptr_bench(
+        tmp_path, "enum-out-param",
+        '#include "foo.h"\n'
+        "int poll(sensor_status_t *out) { *out = SENSOR_OK; return 0; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n"
+        "typedef enum { SENSOR_OK, SENSOR_ERR } sensor_status_t;\n"
+        "int poll(sensor_status_t *out);\n#endif\n",
+        "# SDD\n- **FOO-001**: `poll` SHALL report SENSOR_OK.\n",
+        [{"id": "S1", "title": "t", "function": "poll", "requirement_ids": ["FOO-001"],
+          "mocks": [],
+          "cases": [{"args": ["SENSOR_OK"], "expected": 0,
+                     "expect_out": {0: "SENSOR_OK"}}],
+          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}])
+    assert out.limitations == [], out.limitations
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert "sensor_status_t out0_0 = (sensor_status_t)SENSOR_OK;" in body, body
+    assert "TEST_ASSERT_EQUAL(SENSOR_OK, out0_0);" in body, body
+    if shutil.which("gcc"):
+        _compile_enum_call_shapes(
+            bench, tmp_path / "enum-out-param-tu",
+            "int call_shape(void) { sensor_status_t out0_0 ="
+            " (sensor_status_t)SENSOR_OK; return poll(&out0_0); }")
+
+
+def _compile_enum_call_shapes(bench: Path, comp: Path, call_shape: str) -> None:
+    """Compile *call_shape* — the exact cast/call shapes the generated test emits —
+    against the generated header with the real gcc. ``unity.h`` is not available
+    offline, so this compiles the C the generator produced (proving the cast to a
+    scalar enum and the ``enum *`` pointer are valid C) rather than the test file
+    verbatim; the full compile-and-run is the Docker-gated test below."""
+    import subprocess
+
+    comp.mkdir()
+    tu = comp / "tu.c"
+    tu.write_text(f'#include "foo.h"\n{call_shape}\n')
+    proc = subprocess.run(
+        ["gcc", "-std=c99", "-Wall", "-Werror",
+         "-I", str(bench / ".mtm" / "gen" / "src"),
+         "-c", str(tu), "-o", str(comp / "tu.o")],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_a_guard_like_block_not_enclosing_the_definition_is_still_unsafe(tmp_path):
     """F-A4-review (independent PRE_PR, CONFIRMED MANDATORY): the share-safety check
     must prove the inline body is *inside* an include guard, not merely that the
@@ -2947,6 +3023,73 @@ def test_real_image_runs_a_mock_through_a_pointer_typedef_and_a_guarded_aggregat
         '#include "foo.h"\n'
         "unsigned short use(int a) { P p = &a; "
         "return (unsigned short)(dep_read(p) + 1); }\n")
+    out2 = generate_suite(bench, plan, inventory, image=product_image)
+    assert out2.test_functions, out2.limitations
+    faulty = run_ceedling(bench, image_ref=product_image)
+    assert faulty.ran, faulty.diagnostics[-2000:]
+    assert faulty.total == 1 and faulty.failed == 1, \
+        (faulty.total, faulty.failed, faulty.stdout[-1500:])
+
+
+@pytest.mark.docker
+def test_real_image_runs_an_enum_typed_argument(tmp_path, product_image):
+    """AP-02 / I1 / I5 for the enum regression (TC-1): a mock and SUT path with an
+    **enum-typed argument** must compile, link and **execute** in the real product
+    image (libclang 18 drives the type map). At the regressed candidate the enum
+    parameter was refused as an aggregate (empty suite); the fix must generate a
+    real, runnable bench — correct SUT PASS, faulty SUT FAIL.
+
+    The mocked ``dep_state`` takes an enum *by value* and another returns one; the
+    SUT passes and returns enum-typed values, so the whole chain exercises the
+    scalar-enum boundary the defect broke."""
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "clang-enum-argument"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        '#include "foo.h"\n'
+        "state_t use(state_t s) { return dep_next(s); }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+        "typedef enum { ST_STOPPED, ST_RUNNING } state_t;\n"
+        "state_t dep_next(state_t s);\n"
+        "state_t use(state_t s);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `use` SHALL return the next state.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_next"],
+        "cases": [{"args": ["ST_STOPPED"], "expected": "ST_RUNNING",
+                   "mocks": {"dep_next": {"ret": "ST_RUNNING"}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, image=product_image)
+    assert out.types["status"] == "RESOLVED", out.types
+    # The enum parameter was NOT refused as an aggregate (the regression).
+    assert out.limitations == [], out.limitations
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert "(state_t)ST_STOPPED" in body, body
+
+    # Correct SUT: the mock's enum return is observed and the case passes.
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran, run.diagnostics[-2000:]
+    assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1500:])
+
+    # Faulty SUT (contrast): returns the *wrong* enum, so the same generated
+    # assertion must FAIL — a finding, never a silent pass.
+    (bench / "foo.c").write_text(
+        '#include "foo.h"\n'
+        "state_t use(state_t s) { (void)s; return ST_STOPPED; }\n")
     out2 = generate_suite(bench, plan, inventory, image=product_image)
     assert out2.test_functions, out2.limitations
     faulty = run_ceedling(bench, image_ref=product_image)
