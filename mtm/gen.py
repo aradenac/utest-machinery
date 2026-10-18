@@ -291,38 +291,75 @@ _STORAGE_CLASS = {"extern", "static", "inline", "register", "auto", "typedef",
 _QUALIFIERS = {"const", "volatile", "restrict"}
 
 
-def _norm_type(text: str, pointer: bool) -> str:
-    """Normalise a C type for *comparison*, given whether it is a pointer.
+def _type_key(raw: str, name: str = "") -> str:
+    """A comparison key for a raw C type/declarator that preserves C significance.
 
-    This is a deliberate textual approximation, **not** a C type system (see the
-    recorded limitation): a typedef-alias spelling of the same type (``size_t`` vs
-    ``unsigned long``) is still treated as a difference. It removes only tokens
-    that provably do not change the compared type — storage class everywhere, and
-    top-level qualifiers on a non-pointer type — so a genuinely compatible
-    declaration (`const int x`, `extern int f(int)`) is not falsely refused while
-    a real pointer-qualifier conflict still is.
+    Storage class and the declared *name* are dropped. Pointer **depth** is
+    preserved. A **pointee** qualifier is kept — it is part of the type
+    (`const char *` != `char *`; gcc: "conflicting types") — while a **pointer-level**
+    or by-value top-level qualifier is dropped, both being ignored for
+    compatibility (`int *const p` == `int *p`, `const int x` == `int x`). Pointee
+    base tokens are compared order-insensitively (`unsigned long` == `long unsigned`).
+
+    Operates on the *raw* declarator text (from which the ``*`` position is still
+    visible); a key built from ``parse_param``'s output would lose it.
+
+    A deliberate textual approximation, **not** a full C type system: a
+    typedef-alias spelling of the same type (`size_t` vs `unsigned long`) is still
+    treated as a difference.
     """
-    tokens = [t for t in re.split(r"\s+", text.strip()) if t]
-    drop = _STORAGE_CLASS if pointer else (_STORAGE_CLASS | _QUALIFIERS)
-    return "".join(t for t in tokens if t not in drop)
+    text = _strip_c_comments(raw or "").strip().rstrip(";")
+    if name:
+        text = re.sub(rf"\b{re.escape(name)}\s*$", "", text).strip()
+    segments = text.split("*")
+    depth = len(segments) - 1
+    base_tokens = [t for t in re.split(r"\s+", segments[0].strip())
+                   if t and t not in _STORAGE_CLASS]
+    # A top-level qualifier is significant only on a pointee (depth > 0); on a
+    # by-value type or a pointer-level qualifier it is ignored by C.
+    keep_qual = depth > 0 and any(t in _QUALIFIERS for t in base_tokens)
+    base = "+".join(sorted(t for t in base_tokens if t not in _QUALIFIERS))
+    return ("const" if keep_qual else "") + base + "*" * depth
+
+
+def _raw_params(params: str) -> list[str]:
+    """Split a raw C parameter list into per-parameter declarator strings.
+
+    Keeps the ``*`` position (unlike ``split_params``/``parse_param``, which
+    reduce a pointer to a bool and a stripped type).
+    """
+    params = params.strip()
+    if params in ("", "void"):
+        return []
+    out: list[str] = []
+    depth = 0
+    current = ""
+    for ch in params:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    out.append(current.strip())
+    return out
 
 
 def _signature_key(signature: str) -> tuple | None:
     """A comparable key for a C signature, or ``None`` when unparseable.
 
-    Parameter *names* are dropped and types normalised (storage class removed, and
-    top-level qualifiers on a non-pointer), so a header that repeats the same
-    declaration with different parameter names, a spurious `const` on a by-value
-    parameter, or an `extern` storage class is not a conflict; arity, parameter
-    types and the return type are compared. Parsed independently of
+    Parameter names are dropped and types normalised by :func:`_type_key`, so a
+    header repeating the same declaration with different parameter names, a
+    spurious by-value or pointer-level `const`, or an `extern` storage class is
+    not a conflict, while a genuine type difference (arity, pointee qualifier,
+    pointer depth, base type) still is. Parsed independently of
     ``split_declaration`` (which deliberately refuses *pointer returns* and other
     shapes the **generator** cannot emit): a pointer-returning prototype is a
     perfectly comparable declaration, and treating it as unparseable would silently
     skip the conflict check exactly where it is needed.
-
-    Known textual limitation (recorded, pre-existing): ``parse_param`` collapses a
-    pointer to a bool, so ``int *p`` and ``int **p`` yield the same key and a
-    pointer-depth conflict is not detected here.
     """
     decl = _strip_c_comments(signature or "").strip().rstrip(";")
     if not decl:
@@ -330,13 +367,13 @@ def _signature_key(signature: str) -> tuple | None:
     m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
     if not m or "..." in m.group("params"):
         return None
-    ret_text = m.group("ret")
-    ret_key = _norm_type(ret_text, "*" in ret_text)
-    params = split_params(m.group("params"))
-    if any("(" in p.type or "[" in p.type or "[" in p.name for p in params):
-        return None  # function-pointer/array parameter: not comparable here
-    return (ret_key, tuple(
-        f"{'*' if p.pointer else ''}{_norm_type(p.type, p.pointer)}" for p in params))
+    ret_key = _type_key(m.group("ret"))
+    keys: list[str] = []
+    for raw in _raw_params(m.group("params")):
+        if "(" in raw or "[" in raw:
+            return None  # function-pointer/array parameter: not comparable here
+        keys.append(_type_key(raw, parse_param(raw).name))
+    return (ret_key, tuple(keys))
 
 
 def _conflicting_declarations(unit, scenarios: list[Scenario] | None,

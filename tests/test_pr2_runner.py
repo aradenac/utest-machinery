@@ -1435,6 +1435,14 @@ def test_compatible_qualifiers_and_storage_class_are_never_falsely_refused(tmp_p
     # convergence-guardian).
     assert _signature_key("int foo_a(char *p)") != \
         _signature_key("int foo_a(const char *p)")
+    # A POINTER-LEVEL qualifier is ignored by C (`int *const p` == `int *p`;
+    # gcc compiles the re-declaration), so it must NOT be refused (found by the
+    # fresh verifier).
+    assert _signature_key("int foo_a(int *p)") == \
+        _signature_key("int foo_a(int * const p)")
+    # Pointer DEPTH is significant.
+    assert _signature_key("int foo_a(int *p)") != \
+        _signature_key("int foo_a(int **p)")
     # Still refused: a real type difference.
     assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int *x)")
     assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int x, int y)")
