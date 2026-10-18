@@ -19,6 +19,8 @@ Full licence texts are shipped inside the image under `/usr/share/doc/<component
 | Unity | `2.7.2` (vendored **by Ceedling**, not by this repo) | MIT | image (compiled into the generated suite only) | github.com/ThrowTheSwitch/Unity |
 | CMock | `2.7.2` (vendored **by Ceedling**, not by this repo) | MIT | image (generates the mocked dependencies for the generated suite) | github.com/ThrowTheSwitch/CMock |
 | GCC / libc6-dev / make | distro packages | GPL-3.0-or-later (GCC runtime exception) | image (C toolchain used by Ceedling) | debian package |
+| Clang / LLVM | `18.1.8` (distro `clang-18`, `llvm-18`, `llvm-18-tools`) | Apache-2.0 WITH LLVM-exception | image (compiler for the coverage/MC-DC, ASan/UBSan and `-O2` profiles) | apt.llvm.org |
+| Valgrind | `3.19.0` (distro package) | GPL-2.0-or-later | image (Memcheck profile) | debian package |
 | Python | `3.11+` (host floor), `3.12` in image | PSF-2.0 | host CLI + image | debian package |
 | PyYAML | `>=6.0` | MIT | host CLI + image | PyPI |
 | jsonschema | `>=4.0` | MIT | host CLI + image | PyPI |
@@ -38,5 +40,9 @@ vendored inside the image by Ceedling, not stored in this repository.
 
 ## Not yet bundled (later milestones)
 
-Clang/LLVM, sanitizers, Mull, libFuzzer, Valgrind (PR 3/4). Each addition
-updates this SBOM in the same PR.
+Mull and libFuzzer (PR 4). Each addition updates this SBOM in the same PR.
+
+Clang/LLVM and Valgrind are bundled as of PR 3 (see the rows above): the offline
+`mtm verify` profiles compile with `clang-18` (coverage incl. MC/DC, ASan/UBSan and
+`-O2` portability) and run the built suite under Valgrind Memcheck. They are
+invoked as separate executables and never linked into the product code.

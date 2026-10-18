@@ -42,4 +42,12 @@ tools:
   gcc:
     version: "distro package"
     license: GPL-3.0-or-later (with GCC runtime exception)
-    note: "Host-arch C compiler used by Ceedling in the image (plus host feasibility/smoke in PR 2). The Clang/sanitizer/Mull toolchain arrives in PR 3/4."
+    note: "Host-arch C compiler used by Ceedling in the image (plus host feasibility/smoke in PR 2)."
+  llvm:
+    version: "18.1.8 (clang-18, llvm-18, llvm-18-tools, libclang-rt-18-dev)"
+    license: Apache-2.0 WITH LLVM-exception
+    note: "Compiler for the PR 3 coverage/MC-DC, ASan/UBSan and -O2 profiles. From apt.llvm.org's bookworm-18 suite; installed under -18-suffixed names (clang-18, llvm-profdata-18, llvm-cov-18)."
+  valgrind:
+    version: "3.19.0"
+    license: GPL-2.0-or-later
+    note: "Memcheck for the PR 3 valgrind profile; run as a separate executable on the GCC-built suite."

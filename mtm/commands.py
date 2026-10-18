@@ -8,6 +8,7 @@ stdout and the process exit code, and persists it as ``last-operation.json``.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import uuid
@@ -59,6 +60,7 @@ from .paths import (
     require_bench_root,
     sha256_file,
     state_dir,
+    write_json_atomic,
     write_last_operation,
     write_project,
 )
@@ -67,7 +69,6 @@ CREDENTIALS_FILE = Path.home() / ".config" / "utest-machinery" / "credentials.en
 
 #: Commands that are declared in the user guide but belong to later milestones.
 NOT_YET_IMPLEMENTED = {
-    "verify": "PR3",
     "interpret": "PR5",
     "report": "PR5",
 }
@@ -830,7 +831,7 @@ def cmd_plan(args: Any, ctx: "Context") -> dict[str, Any]:
             "test": test_name,
         })
     undetermined = [r for r in rows if r["oracle_kind"] == "UNDETERMINED"]
-    return _record(
+    record = _record(
         op, "plan", "SUCCEEDED",
         bench_root=str(root),
         model=plan.get("model", {}),
@@ -847,6 +848,104 @@ def cmd_plan(args: Any, ctx: "Context") -> dict[str, Any]:
             if (s.get("oracle") or {}).get("proposal")
         ],
     )
+    # R04 oracle justification, surfaced through the existing plan evidence
+    # (no new public command). It runs only when an independent manifest is given
+    # explicitly by path, and is skipped otherwise: the manifest must never be a
+    # silent input, and the assessment never edits the plan or the oracles.
+    manifest_path = os.environ.get("MTM_QUALIFICATION_MANIFEST", "")
+    if manifest_path:
+        record["oracle_assessment"] = _assess_oracles(root, plan, Path(manifest_path))
+    return record
+
+
+def _assess_oracles(bench_root: Path, plan: dict[str, Any],
+                    manifest_path: Path) -> dict[str, Any]:
+    """R04: assess the frozen plan's oracles against an independent manifest.
+
+    Read-only over the plan. Persists the assessment beside the frozen plan so it
+    is reviewable, and returns a compact summary for the ``plan`` output.
+    """
+    from .qualify import assess_oracles, load_manifest, oracle_summary
+
+    if not manifest_path.is_file():
+        return {"error": f"no manifest at {manifest_path}", "counts": {}}
+    manifest = load_manifest(manifest_path)
+    assessments = assess_oracles(plan, manifest)
+    summary = oracle_summary(assessments)
+    summary["assessments"] = [a.to_dict() for a in assessments]
+    summary["manifest"] = str(manifest_path)
+    target = bench_root / ".mtm" / "state" / "generate" / "oracle_assessment.json"
+    write_json_atomic(target, summary)
+    summary["path"] = str(target.relative_to(bench_root))
+    return summary
+
+
+def cmd_verify(args: Any, ctx: "Context") -> dict[str, Any]:
+    """Replay the frozen bench offline across profiles (SYS-015, PR 3).
+
+    No model is called and nothing in the annex is regenerated: the frozen suite is
+    rebuilt and re-run against the *same selected input bytes* it was generated
+    from. Changed inputs are ``SNAPSHOT_MISMATCH`` (exit 40), a profile's tool
+    fault is a ``TOOL_FAILURE`` (30), an unavailable tool is a ``PARTIAL`` (20),
+    and only a real, parsed assertion/violation is ``FINDINGS`` (10).
+    """
+    from .verify import run_verify
+
+    op = _op_id()
+    root = require_bench_root()
+    config = _load_config(root)
+    if not config.scopes:
+        raise MtmError(
+            code=Code.INPUT_MISSING,
+            message="No inputs are selected, so there is nothing to verify.",
+            action="Select the source/SDD inputs first, e.g. 'mtm scope add <path> --kind source'.",
+            stage="verify",
+        )
+
+    result = run_verify(root, config.scopes, image_ref=image_ref(ctx.image_tag),
+                        run_id=getattr(args, "run_id", None),
+                        force=getattr(args, "force", False))
+    record = _record(
+        op, "verify", result.status,
+        bench_root=str(root),
+        run_id=result.run_id,
+        snapshot_hash=result.snapshot_hash,
+        evidence_dir=result.evidence_dir,
+        profiles=[p.to_dict() for p in result.profiles],
+        counts=result.counts,
+        findings=result.findings,
+        exit_code=result.exit_code,
+    )
+    if result.status == "TOOL_FAILURE":
+        failed = [p for p in result.profiles if p.status == "TOOL_FAILED"]
+        record.update(
+            category=Category.TOOL,
+            code=Code.TOOL_FAILED,
+            message="Verification did not complete: a profile could not be executed to a result.",
+            cause="; ".join(f"{p.id}: {p.reason}" for p in failed)[-800:],
+            action="Inspect the per-profile evidence; a tool fault is never a pass or a "
+                   "failure of the unit under test.",
+            tool_name=", ".join(sorted({p.id for p in failed})),
+        )
+    elif result.status == "PARTIAL":
+        unsupported = [p for p in result.profiles if p.status == "UNSUPPORTED"]
+        record.update(
+            category=Category.INPUT_LIMITATION,
+            code=Code.HOST_UNSUPPORTED,
+            message="Verification is incomplete: some profiles could not run.",
+            action="; ".join(f"{p.id}: {p.reason}" for p in unsupported)[:800],
+        )
+    elif result.status == "FINDINGS":
+        record.update(
+            category=Category.TEST_FINDING,
+            code=Code.TEST_ASSERTION,
+            message=f"Verification found {len(result.findings)} failure(s) under the frozen suite.",
+            action="Review the findings and the failing profile's evidence; the frozen "
+                   "suite and selected inputs were not modified.",
+        )
+    else:
+        record.update(message="Verified the frozen suite offline across all available profiles.")
+    return record
 
 
 def cmd_not_implemented(args: Any, ctx: "Context") -> dict[str, Any]:

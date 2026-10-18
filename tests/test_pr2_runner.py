@@ -2229,3 +2229,216 @@ def test_real_image_observes_a_reassigned_multi_level_pointer(tmp_path, product_
         assert run.ran, (name, run.diagnostics[-2000:])
         assert run.total == 1 and run.failed == 0, \
             (name, run.total, run.failed, run.stdout[-1500:])
+
+
+def test_an_array_or_function_pointer_typedef_parameter_is_a_named_limitation(tmp_path):
+    """F1-review (challenger, CONFIRMED MANDATORY): a parameter whose type is a
+    ``typedef`` alias of an **array** or **function-pointer** type was silently
+    accepted — the scanner's alias-name extraction returned ``None`` for
+    ``typedef int Arr[4]`` / ``typedef void (*CB)(int)``, so the ``opaque`` marker
+    was never recorded and the refusal was dead code. The generator then emitted
+    ``first((Arr)5);`` with ``limitations == []``; that C does not compile
+    (``error: cast specifies array type``, verified with gcc -Werror), so the whole
+    bench died as an opaque ``TOOL_FAILURE`` instead of a named limitation."""
+    from mtm.cscan import scan_typedefs
+    from mtm.gen import _unsupported_param_shape, func_params
+
+    header = ("#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+              "typedef int Arr[4];\ntypedef void (*CB)(int);\n"
+              "int first(Arr a);\n#endif\n")
+    bench_dir = tmp_path / "decls"
+    bench_dir.mkdir()
+    (bench_dir / "h.h").write_text(header)
+    td = scan_typedefs(bench_dir / "h.h")
+    assert td["Arr"].opaque and td["CB"].opaque, td
+    # Used as a parameter type, each is refused (a named limitation), never emitted.
+    assert _unsupported_param_shape(func_params("int first(Arr a)", td), td)
+    assert _unsupported_param_shape(func_params("int first(CB cb)", td), td)
+
+    bench, out, _ = _ptr_bench(
+        tmp_path, "arr-typedef",
+        "int first(Arr a) { return a[0]; }\n", header,
+        "# SDD\n- **FOO-001**: `first` SHALL take Arr.\n",
+        [_one_scenario("first", [5], 5)])
+    assert out.test_functions == [], out.test_functions
+    assert any("typedef" in lim and "not supported" in lim for lim in out.limitations), \
+        out.limitations
+
+
+def _mock_bench(tmp_path, name, source, header, scenario):
+    """Build a one-unit bench with a mocked dependency, then generate it."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / name
+    bench.mkdir()
+    (bench / "foo.c").write_text(source)
+    (bench / "foo.h").write_text(header)
+    (bench / "sdd.md").write_text("# SDD\n- **FOO-001**: the SUT SHALL behave.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    return bench, generate_suite(bench, plan, inventory)
+
+
+def test_a_mocked_dependency_through_a_pointer_typedef_is_refused(tmp_path):
+    """F2-review (challenger, CONFIRMED MANDATORY): the mock path did not resolve a
+    pointer ``typedef``, so ``typedef int *P; void dep_write(P *pp);`` (a real
+    ``int **``) was reported at depth 1 and emitted ``P v = (P)5;`` plus a
+    ``ReturnThruPtr`` at the wrong indirection — an unjustified pointer cast and
+    uncompilable C. With the alias resolved the depth is 2, so the multi-level
+    write-through is refused with the named limitation the SUT path already uses."""
+    from mtm.cscan import Typedef
+    from mtm.gen import mock_controls, split_declaration
+
+    td = {"P": Typedef("int", 1)}
+    ctrl = mock_controls("void dep_write(P *pp);", "dep_write", None, td)
+    assert ctrl["out_depth"] == {"pp": 2}, ctrl
+    split = split_declaration("void dep_write(P *pp);", td)
+    assert split[1][0].depth == 2, split
+
+    bench, out = _mock_bench(
+        tmp_path, "ptr-typedef-mock",
+        "int use(int a) { int v; dep_write(&v); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\ntypedef int *P;\n"
+        "void dep_write(P *pp);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_write"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {"pp": 5}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions == [], out.test_functions
+    assert any("multi-level pointer" in lim for lim in out.limitations), out.limitations
+
+
+def test_a_mocked_dependency_using_a_typedef_is_declared_in_its_interface_header(tmp_path):
+    """F3-review (challenger, CONFIRMED MANDATORY): the private CMock interface
+    header carried only the raw declaration, so ``void dep_write(P p);`` compiled
+    with ``unknown type name 'P'`` (also for a plain alias like
+    ``vendor_adc_sample_t``) and every mock scenario died as an opaque build
+    failure. The header must now make the alias visible, so it compiles — the
+    actual proof is a real gcc compile below.
+
+    The alias is brought in by ``#include``-ing the copied header that defines it
+    (one guarded definition per TU), *not* by re-declaring it: a duplicate alias
+    the test's own unit header also defines is legal for a scalar/pointer typedef
+    but a hard ``conflicting types`` error for an anonymous aggregate."""
+    import shutil
+    import subprocess
+
+    bench, out = _mock_bench(
+        tmp_path, "typedef-dep-header",
+        "int use(int a) { dep_write(0); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\ntypedef int *P;\n"
+        "typedef unsigned short vendor_adc_sample_t;\n"
+        "void dep_write(P p);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_write"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {"ret": 0}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    src_dir = bench / ".mtm" / "gen" / "src"
+    header_path = bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h"
+    assert header_path.is_file()
+    body = header_path.read_text()
+    # The alias is brought in through the defining copied header, not re-declared.
+    assert '#include "foo.h"' in body, body
+    assert "typedef int *P;" not in body, body
+    # The decisive proof: the header compiles on its own under -Werror with the
+    # copied sources on the include path (so its `#include "foo.h"` resolves).
+    # Compile a copy in an isolated temp dir so gcc's precompiled-header side file
+    # never lands in the bench.
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile"
+        comp.mkdir()
+        copy = comp / "hdr.c"
+        copy.write_text(body)
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror", "-I", str(src_dir),
+             "-c", str(copy), "-o", str(comp / "hdr.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_an_anonymous_aggregate_alias_is_shared_not_redeclared_in_the_interface_header(tmp_path):
+    """Same-class contract as F3: the interface header must make a mocked
+    dependency's alias visible **without** re-declaring it. Emitting the verbatim
+    ``typedef struct { int v; } S;`` broke the TU that also includes the unit
+    header, whose identical-looking alias names a *different* anonymous type —
+    gcc: ``conflicting types for 'S'``. Sharing the one guarded definition via
+    ``#include`` fixes it (verified mechanical fact: duplicate scalar/pointer
+    typedefs compile, duplicate anonymous-aggregate typedefs do not)."""
+    import shutil
+    import subprocess
+
+    bench, out = _mock_bench(
+        tmp_path, "anon-agg-dep-header",
+        "typedef struct { int v; } S;\n"
+        "int use(int a) { S s = {0}; dep_send(&s); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\ntypedef struct { int v; } S;\n"
+        "void dep_send(S *s);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1,
+                    "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    src_dir = bench / ".mtm" / "gen" / "src"
+    header_path = bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h"
+    body = header_path.read_text()
+    assert '#include "foo.h"' in body, body
+    assert "typedef struct" not in body, body
+    # The regression that motivated this: the test TU includes both the mock's
+    # interface header and the unit header. Emulating that inclusion order must
+    # compile cleanly (it did not when the alias was re-declared).
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_send.h"\n#include "foo.h"\n'
+                      "static S g;\nint main(void) { (void)g; return 0; }\n")
+        iface_dir = bench / ".mtm" / "gen" / "interface"
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror", "-I", str(src_dir),
+             "-I", str(iface_dir), "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_a_guardless_aggregate_alias_header_is_a_named_limitation(tmp_path):
+    """The include-based sharing needs the defining header's own guard to collapse
+    the second inclusion. A header that defines an *anonymous-aggregate* alias
+    **without** a guard cannot be shared: the test includes it both directly (as
+    the unit header) and transitively (via the mock's interface header), and the
+    repeat declaration is a hard ``conflicting types`` error. It must be refused
+    with a precise limitation — not emitted as an opaque build failure whose
+    ``limitations`` is empty (plan §C: record the limit before execution). A guard
+    is what makes the ordinary case work; a guard-less *scalar* alias stays admitted
+    because a duplicate scalar typedef is legal C."""
+    bench, out = _mock_bench(
+        tmp_path, "guardless-agg",
+        "typedef struct { int v; } S;\n"
+        "int use(int a) { S s = {0}; dep_send(&s); return a; }\n",
+        "#include <stdint.h>\ntypedef struct { int v; } S;\n"  # deliberately no guard
+        "void dep_send(S *s);\nint use(int a);\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1,
+                    "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions == [], out.test_functions
+    assert any("no include guard" in lim for lim in out.limitations), out.limitations
+    # No interface header was written for the refused mock, so nothing dangling.
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
+    # A guard-less *scalar* alias is still admitted (duplicate scalar typedef is OK).
+    _, ok = _mock_bench(
+        tmp_path, "guardless-scalar",
+        "int use(int a) { dep_write((P)0); return a; }\n",
+        "#include <stdint.h>\ntypedef int *P;\nvoid dep_write(P p);\nint use(int a);\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_write"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert ok.test_functions, ok.limitations

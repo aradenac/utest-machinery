@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .ceedling import REVISION_DIRNAME
-from .cscan import scan_typedefs
+from .cscan import scan_typedefs, typedef_statement_map
 from .inventory import Inventory, resolve_scope_paths
 from .plan import Plan, Scenario
 
@@ -224,6 +224,12 @@ def _unsupported_param_shape(params: list[CParam], typedefs: dict[str, Any] | No
     An **unnamed** parameter (``int foo(int)``, ``int foo(char *)``) is *not*
     refused: that is legal C and renders fine as ``(type)value`` — refusing it
     would be a false refusal of a common prototype form.
+
+    A parameter that points at an aggregate reached through a ``typedef`` alias is
+    *not* refused here: an aggregate pointee is renderable via the
+    ``{"expr": …}`` escape hatch, so that is decided per **argument** in
+    :func:`_case_problem` (see ``aggregate_params``), exactly like the inline
+    ``typedef struct`` form.
     """
     opaque = {name for name, t in (typedefs or {}).items() if getattr(t, "opaque", False)}
     for param in params:
@@ -556,20 +562,19 @@ def _strip_c_comments(text: str) -> str:
     return re.sub(r"//[^\n]*", " ", text)
 
 
-def split_declaration(decl: str) -> tuple[str, list[CParam]] | None:
+def split_declaration(decl: str,
+                      typedefs: dict[str, Any] | None = None) -> tuple[str, list[CParam]] | None:
     """Split a C function declaration into ``(return_type, params)``.
 
     ``None`` when the declaration has a shape this generator does not support
     (variadics, a function-pointer/array parameter, or an unparseable header),
     so the caller records a limitation instead of emitting wrong code.
 
-    Called without a typedef map (``typedefs=None``): this is used for a
-    *dependency's* declaration, whose aliases a mocked symbol must satisfy
-    through the same header the mock is generated from, so a hidden pointer
-    typedef is left unresolved and refused by
-    :func:`_unsupported_param_shape`/the mock control surface rather than
-    guessed. The unit's own parameter path resolves typedefs explicitly (the
-    selected headers are scanned by the caller).
+    *typedefs* (the aliases the compiled project sees) resolves a **pointer
+    alias** in a *dependency's* declaration — ``typedef int *P; void dep(P *pp);``
+    is ``int **`` and must be treated at depth 2, exactly like the SUT parameter
+    path. Without it the mock path reported depth 1 and emitted an uncompilable
+    ``P v = scalar;`` plus a ``ReturnThruPtr`` at the wrong indirection.
     """
     decl = _strip_c_comments(decl or "").strip().rstrip(";")
     if not decl:
@@ -580,7 +585,7 @@ def split_declaration(decl: str) -> tuple[str, list[CParam]] | None:
     ret = m.group("ret").strip()
     if "*" in ret or "..." in m.group("params"):
         return None
-    params = split_params(m.group("params"))
+    params = split_params(m.group("params"), typedefs)
     for p in params:
         if not p.name or "(" in p.type:
             return None
@@ -716,7 +721,8 @@ def _pointer_arg(param: CParam, var: str, value: Any) -> tuple[list[str], str, s
 
 
 def mock_controls(decl: str, symbol: str,
-                  aggregates: set[str] | None = None) -> dict[str, Any] | None:
+                  aggregates: set[str] | None = None,
+                  typedefs: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The control surface CMock will expose for *symbol*.
 
     ``{"return": bool, "out": [names], "out_aggregate": set, "out_depth": {name:
@@ -728,16 +734,22 @@ def mock_controls(decl: str, symbol: str,
     ``ReturnThruPtr`` for a ``void *`` pointee) — the same refusal contract the
     SUT parameter path follows.
     """
-    split = split_declaration(decl)
+    split = split_declaration(decl, typedefs)
     if split is None:
         return None
     ret, params = split
     pointers = [p for p in params if p.pointer]
+    # An out-parameter whose base reaches an aggregate through a *typedef alias*
+    # must be recognised as an aggregate too, so the caller refuses its scalar
+    # write-through rather than emitting an uncompilable assignment (plan §C).
+    alias_aggregates = {name for name, t in (typedefs or {}).items()
+                        if getattr(t, "aggregate", False)}
     return {
         "return": ret not in _VOID,
         "out": [p.name for p in pointers],
         "out_aggregate": {p.name for p in pointers
-                          if is_aggregate_base(_base_type(p), aggregates)},
+                          if is_aggregate_base(_base_type(p), aggregates)
+                          or any(tok in alias_aggregates for tok in p.type.split())},
         "out_depth": {p.name: p.depth for p in pointers},
         "out_void": {p.name for p in pointers if _is_void_base(_base_type(p))},
     }
@@ -829,8 +841,15 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
                 return (f"mock {symbol!r} sets {key!r}, whose pointee is an aggregate "
                         "type; supply it as {\"expr\": \"<C initializer>\"} instead of a scalar")
     pointer_indices = {i for i, p in enumerate(params) if p.pointer}
+    # A look-through-`typedef` aggregate alias (the chained form the inline
+    # `aggregate_aliases` scan misses, or a pointer alias whose pointee is an
+    # aggregate). Recognised here, per argument, so the `{"expr": …}` hatch still
+    # initialises it faithfully and only a *scalar* for it is refused.
+    alias_aggregate: set[str] = {name for name, t in (typedefs or {}).items()
+                                 if getattr(t, "aggregate", False)}
     aggregate_params = {i for i, p in enumerate(params)
-                        if p.pointer and is_aggregate_base(_base_type(p), aggregates)}
+                        if (p.pointer and is_aggregate_base(_base_type(p), aggregates))
+                        or any(tok in alias_aggregate for tok in p.type.split())}
     for index in range(min(len(case.args), len(params))):
         value = case.args[index]
         if index in aggregate_params:
@@ -1026,10 +1045,30 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     #     defect). Scan every copied source/header — an alias may live in any of
     #     them — and the shims, which the test also includes.
     typedefs: dict[str, Any] = {}
+    alias_statements: dict[str, str] = {}
+    # The copied *header* that defines each alias, when one exists. A private
+    # interface header must see every alias its declaration names (else `unknown
+    # type name 'P'` and every mock scenario dies as an opaque build failure), but
+    # it must not *re-declare* an alias the test's own unit header also defines: a
+    # duplicate scalar/pointer typedef is legal C, while a duplicate *anonymous
+    # aggregate* typedef names a different type and is a hard `conflicting types`
+    # error under `-Werror`. So the interface header `#include`s the defining
+    # copied header (one guarded definition per TU) and falls back to verbatim
+    # text only for an alias with no includable header (e.g. one written in a .c).
+    alias_header: dict[str, str] = {}
+    guarded_headers: dict[str, bool] = {}
     for name in sorted(copied):
-        if name.endswith((".c", ".h")):
-            for alias, typedef in scan_typedefs(src_dir / name).items():
-                typedefs.setdefault(alias, typedef)
+        if not name.endswith((".c", ".h")):
+            continue
+        text = (src_dir / name).read_text(encoding="utf-8", errors="replace")
+        for alias, typedef in scan_typedefs(src_dir / name).items():
+            typedefs.setdefault(alias, typedef)
+        for alias, statement in typedef_statement_map(text).items():
+            alias_statements.setdefault(alias, statement)
+            if name.endswith(".h"):
+                alias_header.setdefault(alias, name)
+        if name.endswith(".h"):
+            guarded_headers[name] = _header_has_guard(text)
     for name in shim_names:
         for alias, typedef in scan_typedefs(shim_dir / name).items():
             typedefs.setdefault(alias, typedef)
@@ -1038,6 +1077,7 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     #    the header, so it declares only that symbol and the types it needs.
     interfaces: dict[str, str] = {}
     declarations: dict[str, str] = {}
+    refused_mocks: dict[str, str] = {}
     for scenario in plan.scenarios:
         if scenario.unit_id in excluded:
             continue
@@ -1052,6 +1092,36 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
                 f"mocked symbol {symbol!r} has no declared interface; its "
                 "scenarios are not executed")
             continue
+        # A declaration may name a `typedef` alias (`typedef int *P; void dep(P p);`).
+        # The private header is compiled on its own (CMock generates the mock from
+        # it, and the test includes it before the unit header), so every alias its
+        # parameters mention must be visible here — otherwise the adapter and the
+        # mock's TU see `unknown type name 'P'` and *every* scenario that mocks the
+        # symbol dies as an opaque build failure. Include the defining copied header
+        # where one exists (the guarded, single definition the test's unit header
+        # also sees); only an alias with no includable header is spelled verbatim.
+        alias_includes, alias_defs = _typedef_aliases_for_decl(decl, alias_statements,
+                                                               alias_header)
+        # The include-based alias sharing needs the defining header's own guard to
+        # give the TU one definition. A guard-less header that defines an
+        # *aggregate* alias is the one shape that cannot be shared safely: the test
+        # includes it both here and directly, and the second anonymous-aggregate
+        # definition is a hard `conflicting types` error. (A duplicate *scalar*
+        # alias is legal C, so the guard-less scalar case is admitted.) Refuse with
+        # a named limitation rather than emit an opaque build failure — a leftover
+        # of the required shapes that §C demands be recorded, not silently broken.
+        unguarded = sorted({
+            alias_header[a] for a in _decl_alias_tokens(decl, alias_statements,
+                                                        alias_header)
+            if not guarded_headers.get(alias_header[a], True)
+            and getattr(typedefs.get(a), "aggregate", False)})
+        if unguarded:
+            refused_mocks[symbol] = (
+                f"mocked symbol {symbol!r} declares a parameter through an "
+                f"aggregate typedef defined in {unguarded!r}, which has no include "
+                "guard; sharing it with the unit's own header would redefine the "
+                "anonymous aggregate")
+            continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
         body = (
@@ -1059,7 +1129,9 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             f" * Declared from the plan/SDD so CMock can generate a mock. This\n"
             f" * header is NEVER written into the source directory. */\n"
             f"#ifndef {interface_guard}\n#define {interface_guard}\n"
-            f"{shim_includes}#include <stdint.h>\n\n{decl.strip()}\n\n"
+            f"{shim_includes}#include <stdint.h>\n"
+            f"{alias_includes}\n"
+            f"{alias_defs}{decl.strip()}\n\n"
             f"#endif /* {interface_guard} */\n"
         )
         (iface_dir / header_name).write_text(body, encoding="utf-8")
@@ -1106,7 +1178,7 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             continue
         code, names, skipped = _emit_test_file(
             unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates,
-            unit_includes=unit_includes, typedefs=typedefs)
+            unit_includes=unit_includes, typedefs=typedefs, refused_mocks=refused_mocks)
         path = test_dir / f"test_{Path(unit.path).stem}.c"
         path.write_text(code, encoding="utf-8")
         out.files[f"{TEST_DIRNAME}/{path.name}"] = "test"
@@ -1191,6 +1263,83 @@ def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -
                 if name == symbol:
                     return decl
     return ""
+
+
+def _decl_alias_tokens(decl: str, alias_statements: dict[str, str],
+                       alias_header: dict[str, str] | None = None) -> list[str]:
+    """Aliases a declaration references, transitively, in first-seen order.
+
+    A statement may itself name another alias (``typedef int *P; typedef P *Q;``),
+    so the walk runs to a fixpoint. Shared by :func:`_typedef_aliases_for_decl` and
+    the guard check so both agree on exactly which aliases a declaration needs.
+    """
+    if not alias_statements:
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    tokens = set(re.findall(r"[A-Za-z_]\w*", decl))
+    changed = True
+    while changed:
+        changed = False
+        for token in list(tokens):
+            if token in seen or token not in alias_statements:
+                continue
+            seen.add(token)
+            ordered.append(token)
+            tokens |= set(re.findall(r"[A-Za-z_]\w*", alias_statements[token]))
+            changed = True
+    return ordered
+
+
+def _typedef_aliases_for_decl(decl: str, alias_statements: dict[str, str],
+                              alias_header: dict[str, str] | None = None
+                              ) -> tuple[str, str]:
+    """The ``#include`` and verbatim ``typedef`` lines a declaration needs.
+
+    The private CMock interface header is compiled standalone (CMock generates the
+    mock from it, and the test includes it before the unit header), so an alias
+    named anywhere in the declaration — a parameter *or* the return type — needs
+    its definition in the same TU. Transitive aliases (``typedef int *P; typedef P
+    *Q;``) are pulled in to a fixpoint, because ``Q``'s own statement names ``P``.
+
+    Returns ``(includes, statements)``. When the alias is defined in a copied
+    *header* that can be ``#include``d (``alias_header``), the header is included
+    instead of re-declaring it: the include guard gives one definition the test's
+    own unit header also sees, which is required for an anonymous-aggregate alias
+    (a duplicate such typedef names a different type — a hard ``conflicting
+    types`` error). An alias with no includable header is emitted verbatim.
+    """
+    include_names: list[str] = []
+    wanted: list[str] = []
+    for token in _decl_alias_tokens(decl, alias_statements, alias_header):
+        header = (alias_header or {}).get(token)
+        if header is not None:
+            if header not in include_names:
+                include_names.append(header)
+        else:
+            wanted.append(alias_statements[token])
+    includes = "".join(f'#include "{name}"\n' for name in include_names)
+    statements = "".join(f"{statement}\n" for statement in wanted)
+    if statements:
+        statements += "\n"
+    return includes, statements
+
+
+def _header_has_guard(text: str) -> bool:
+    """Whether *text* opens with an ``#ifndef``/``#define`` include guard.
+
+    A guarded header can be included more than once in one translation unit (the
+    guard collapses the repeats); an unguarded one repeats its declarations, which
+    is poisonous for an anonymous-aggregate ``typedef`` (``conflicting types``).
+    """
+    from .cscan import strip_comments_and_strings
+
+    clean = strip_comments_and_strings(text)
+    m = re.search(r"(?m)^[ \t]*#\s*ifndef[ \t]+([A-Za-z_]\w*)", clean)
+    if not m:
+        return False
+    guard = m.group(1)
+    return re.search(rf"(?m)^[ \t]*#\s*define[ \t]+{re.escape(guard)}\b", clean) is not None
 
 
 def _project_yml() -> str:
@@ -1298,7 +1447,9 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                     shim_names: list[str] | None = None,
                     aggregates: set[str] | None = None,
                     unit_includes: list[str] | None = None,
-                    typedefs: dict[str, Any] | None = None) -> tuple[str, list[str], list[str]]:
+                    typedefs: dict[str, Any] | None = None,
+                    refused_mocks: dict[str, str] | None = None) -> tuple[str, list[str], list[str]]:
+    refused_mocks = refused_mocks or {}
     unit_includes = list(unit_includes or [])
     lines: list[str] = [
         f"/* Generated Unity tests for {unit.path} — materialised from the plan. */",
@@ -1336,11 +1487,15 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                 "so it would exercise no C behaviour")
             continue
         for symbol in scenario.mocks:
-            control = mock_controls(declarations.get(symbol, ""), symbol, aggregates)
+            if symbol in refused_mocks:
+                problem = f"{refused_mocks[symbol]}; the scenario is not executed"
+                break
+            control = mock_controls(declarations.get(symbol, ""), symbol, aggregates,
+                                    typedefs)
             if control is None:
                 problem = f"mock {symbol!r} has no usable declaration"
                 break
-            split = split_declaration(declarations.get(symbol, ""))
+            split = split_declaration(declarations.get(symbol, ""), typedefs)
             control["out_types"] = {p.name: _base_type(p) for p in split[1]} if split else {}
             controls[symbol] = control
         if problem is None:

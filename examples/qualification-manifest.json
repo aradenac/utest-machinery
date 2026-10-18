@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "note": "Independent, human-authored qualification truth. This file SHALL NOT appear in any generation scope, prompt or recorded model response (QD-012): it encodes the ground truth the R04 oracle assessment and the R22 sensitivity comparison are measured against. Values are derived from the SDD text, independently of the generating model and of the implementation behaviour.",
+  "functions": {
+    "saturate_u16": {
+      "requirement_ids": ["SAT-001", "SAT-002"],
+      "cases": [
+        {"args": [5, 10], "return": 5,
+         "why": "SAT-001: input (5) <= ceiling (10) returns input"},
+        {"args": [10, 10], "return": 10,
+         "why": "SAT-001 boundary: input == ceiling returns input (== ceiling)"},
+        {"args": [11, 10], "return": 10,
+         "why": "SAT-002: input (11) > ceiling (10) returns ceiling (10), NOT ceiling-1"},
+        {"args": [5, 0], "return": 0,
+         "why": "SAT-001: ceiling 0, input 5 > 0 so SAT-002 applies, returns ceiling 0"}
+      ]
+    },
+    "is_high": {
+      "requirement_ids": ["MUT-001", "MUT-002"],
+      "cases": [
+        {"args": [0], "return": 0, "why": "MUT-002: x < 100 returns 0"},
+        {"args": [99], "return": 0, "why": "MUT-002: x < 100 returns 0"},
+        {"args": [100], "return": 1,
+         "why": "MUT-001 boundary: x >= 100 returns 1 (the boundary the >= -> > mutant must survive)"},
+        {"args": [200], "return": 1, "why": "MUT-001: x >= 100 returns 1"}
+      ]
+    },
+    "permit_enable": {
+      "requirement_ids": ["SAFE-001", "SAFE-002"],
+      "cases": [
+        {"args": [1, 9000, 0], "return": 1,
+         "why": "SAFE-001: ignition on, supply >= 9000 mV (== threshold), no fault -> true"},
+        {"args": [1, 8999, 0], "return": 0,
+         "why": "SAFE-002: supply below 9000 mV -> false"},
+        {"args": [0, 12000, 0], "return": 0, "why": "SAFE-002: ignition off -> false"},
+        {"args": [1, 12000, 1], "return": 0, "why": "SAFE-002: fault latched -> false"}
+      ]
+    }
+  },
+  "fixtures": {
+    "saturation-correct": {
+      "src": "examples/qualification/saturation-correct/saturation.c",
+      "reference": "conforms to SAT-001/SAT-002; used as the R22 reference-correct variant",
+      "defects": []
+    },
+    "saturation": {
+      "src": "examples/saturation/saturation.c",
+      "reference": "violates SAT-002 (returns ceiling-1 for a nonzero ceiling above the ceiling)",
+      "defects": [
+        {
+          "id": "SAT-OFF-BY-ONE",
+          "location": "examples/saturation/saturation.c:8 (return ceiling == 0 ? 0 : (uint16_t)(ceiling - 1u);)",
+          "kind": "off_by_one",
+          "reference": "SAT-002 requires return ceiling (10) for input 11 > ceiling 10; the seeded defect returns ceiling-1 (9)",
+          "detectable_by": "the boundary case input 11 > ceiling 10 must fail the assertion expected==10"
+        }
+      ]
+    }
+  }
+}

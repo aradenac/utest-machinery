@@ -219,6 +219,30 @@ def test_aggregate_aliases_detected_from_typedef():
     assert "uint8_t" not in aggregate_aliases(_SHIM)
 
 
+def test_array_function_pointer_and_function_typedefs_are_marked_opaque(tmp_path):
+    """F1-review (challenger): a `typedef` of an array, a function pointer or a
+    function *type* has no honest indirection depth, so it must be recorded
+    ``opaque`` and refused as a parameter — the refusal the commit that introduced
+    the marker intended. The alias-name extraction used to return ``None`` for all
+    three (the declarator ends in ``]``/``)``), leaving the refusal dead and the
+    generator emitting an uncompilable ``(Arr)5`` cast."""
+    from mtm.cscan import scan_typedefs
+
+    src = tmp_path / "decls.h"
+    src.write_text(
+        "typedef int Arr[4];\n"
+        "typedef void (*CB)(int);\n"
+        "typedef int Func(int);\n"
+        "typedef int *P;\n"
+        "typedef int myint;\n")
+    td = scan_typedefs(src)
+    for name in ("Arr", "CB", "Func"):
+        assert td[name].opaque, name
+    # A pointer alias (resolvable) and a scalar alias (a real base) are NOT opaque.
+    assert not td["P"].opaque and td["P"].depth == 1
+    assert not td["myint"].opaque and td["myint"].base == "int"
+
+
 def test_scalar_pointee_is_not_an_aggregate():
     ctrl = mock_controls("int platform_read_sensor(uint16_t *reading);",
                          "platform_read_sensor", aggregate_aliases(_SHIM))
