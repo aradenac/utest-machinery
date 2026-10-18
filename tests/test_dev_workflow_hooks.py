@@ -61,6 +61,74 @@ class WorkflowHookSmoke(unittest.TestCase):
         event["last_assistant_message"] = "PUBLISH_READY"
         self.assertEqual(invoke(event).returncode, 0)
 
+    def test_idle_without_assigned_mission_is_normal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            e = {"hook_event_name": "TeammateIdle", "cwd": tmp,
+                 "team_name": "my-team", "teammate_name": "developer"}
+            self.assertEqual(invoke(e).returncode, 0)
+
+    def test_idle_missing_report_gets_exactly_one_nudge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missions = root / ".claude/.runtime-reports/my-team/missions"
+            missions.mkdir(parents=True)
+            receipt = missions / "developer.json"
+            report = ".claude/.runtime-reports/my-team/developer-report.md"
+            receipt.write_text(json.dumps({
+                "active": True, "mission_id": "m01", "fingerprint": "sha-a",
+                "report": report
+            }), encoding="utf-8")
+            e = {"hook_event_name": "TeammateIdle", "cwd": tmp,
+                 "team_name": "my-team", "teammate_name": "developer"}
+            self.assertEqual(invoke(e).returncode, 2)
+            self.assertEqual(invoke(e).returncode, 0)  # never an idle-hook loop
+            target = root / report
+            target.write_text("MISSION_ID: m01\nFINGERPRINT: stale\nSTATUS: COMPLETED\n",
+                              encoding="utf-8")
+            self.assertEqual(invoke(e).returncode, 0)  # no additional nudge
+            receipt.write_text(json.dumps({
+                "active": True, "mission_id": "m02", "fingerprint": "sha-b",
+                "report": report
+            }), encoding="utf-8")
+            self.assertEqual(invoke(e).returncode, 2)  # new mission, new nudge
+
+    def test_idle_matching_report_and_inactive_assignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missions = root / ".claude/.runtime-reports/my-team/missions"
+            missions.mkdir(parents=True)
+            report = root / ".claude/.runtime-reports/my-team/done.md"
+            report.write_text("MISSION_ID: m01\nFINGERPRINT: sha-a\n"
+                              "STATUS: COMPLETED\nProof: observed test exit 0\n",
+                              encoding="utf-8")
+            receipt = missions / "developer.json"
+            info = {"active": True, "mission_id": "m01",
+                    "fingerprint": "sha-a", "report":
+                    ".claude/.runtime-reports/my-team/done.md"}
+            receipt.write_text(json.dumps(info), encoding="utf-8")
+            e = {"hook_event_name": "TeammateIdle", "cwd": tmp,
+                 "team_name": "my-team", "teammate_name": "developer"}
+            self.assertEqual(invoke(e).returncode, 0)
+            report.write_text("MISSION_ID: wrong\nFINGERPRINT: sha-a\n"
+                              "STATUS: COMPLETED\n", encoding="utf-8")
+            self.assertEqual(invoke(e).returncode, 2)
+            info["active"] = False
+            receipt.write_text(json.dumps(info), encoding="utf-8")
+            self.assertEqual(invoke(e).returncode, 0)
+
+    def test_idle_ignores_unsafe_mission_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missions = root / ".claude/.runtime-reports/my-team/missions"
+            missions.mkdir(parents=True)
+            (missions / "developer.json").write_text(json.dumps({
+                "active": True, "mission_id": "m01",
+                "fingerprint": "sha-a", "report": "../../unsafe.md"
+            }), encoding="utf-8")
+            e = {"hook_event_name": "TeammateIdle", "cwd": tmp,
+                 "team_name": "my-team", "teammate_name": "developer"}
+            self.assertEqual(invoke(e).returncode, 0)  # malformed receipt cannot trap worker
+
 
 if __name__ == "__main__":
     unittest.main()

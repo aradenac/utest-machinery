@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/develop-verified.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+# Development workflow: coordinator-led Agent Teams (18 Oct 2026)
+
+**Scope:** workflow instructions, agent roles, deterministic delivery hooks and hook smoke tests only. Product C generator, specifications, milestone acceptance and risk register unchanged.
+
+**Decision:** replace the main developer-as-lead with a non-coding `/develop-verified` coordinator. Coordinator alone schedules/refines Beads lots and native Tasks, assigns optional planner and one developer by default, arbitrates reviewer findings without reviewer veto, schedules one stable-input full qualification, runs one bounded final independent review and publishes one PR without auto-merge. Developer retains technical autonomy and focused tests; all specialist reports go to coordinator, never peer-to-peer.
+
+**Retained:** finite acceptance/DoD and AP-01/02/03/04/05, risk-focused early challenge, stable snapshot fingerprints (including untracked inputs), behavioral C oracle checks, tests on immutable full-campaign inputs with before/after hashes, deduped test evidence, optional guardian/keeper, bounded review and escalation after two failed approaches, exclusive Beads/worklog writer and owner-controlled merge.
+
+**New mechanical recovery:** one optional active per-Team mission receipt and atomic report under ignored `.claude/.runtime-reports/`; project-level `TeammateIdle` hook can request one missing or stale report and then allow idle. Existing session-scoped `SubagentStop`, optional `TaskCompleted Proof-file`, and `Stop` unfinished-background protection remain. Real Agent Teams/CCR event delivery and cross-worktree scratch visibility still require field qualification. `idle` or a missing notification is not proof of failure; the coordinator reconciles report/state and performs one bounded resume/fallback if needed. No daemon or additional durable tracker.
+
+**Evidence:** GitHub documentation/static diff and hook test cases added on this branch. No Docker/LLM/Agent Teams live session or Python hook execution was performed through the GitHub-only environment. Do not report measured concurrency improvements before a real milestone session. **CI not requested**; documentation/workflow PR may merge without waiting for CI by explicit owner instruction.

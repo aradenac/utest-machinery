@@ -32,30 +32,41 @@ Beads is **development tracking** in this repository, not a dependency inside th
 
 For auditability include a refreshed `.beads/issues.jsonl` export in each PR (issues/comments/dependencies); in modern Beads this is an **export**, not the canonical Dolt history. Use the documented `bd dolt push/pull` with the repository's Git remote for full cross-machine synchronization where supported, and `bd backup` if a restorable backup is needed. Version-pin the setup and document the tested recovery procedure in the first PR. Avoid server/Dolt services unless the default embedded mode demonstrably fails the use case.
 
-## One-prompt verified development workflow
+## One-prompt coordinator-led development
 
-From the repository root in an interactive WSL terminal, you **may** enable experimental Agent Teams per session (no global configuration change); this is optional for the workflow:
+In an interactive WSL session, Agent Teams may be enabled **optionally** (verify runtime compatibility with the installed Claude Code + CCR version):
 
-    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ccr "Claude DeepSeek Flash" cli
+```bash
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ccr "Claude DeepSeek Flash" cli
+```
 
-Then use ONE command, for example:
+Then give exactly ONE approved mission:
 
-    /develop-verified Implement the next approved milestone
-    /develop-verified Address all substantive findings on PR #14
+```text
+/develop-verified Implement the next approved milestone
+/develop-verified Address substantive findings on PR #14
+```
 
-The versioned .claude/skills/develop-verified/SKILL.md runs a lead-owned, finite acceptance contract. The lead can begin a clear local correction **without waiting for plan review**; a test-challenger runs early for material correctness/oracle risk. Plan and candidate critics, the convergence-guardian and the evidence-keeper are optional/conditional rather than automatic participants. Native background Bash handles straightforward long commands; a task-runner is reserved for independent multi-step work. ONE bounded fresh final verification uses /verify-feature OR an equivalent direct contract-reviewer, never both by default. You do **not** need a separate verifier prompt. Only the lead edits implementation and PR and normally updates Beads/worklog; for substantial parallel record work a delegated keeper obtains explicit ACK and exclusive ownership until RELEASED/confirmed termination. The contract reviewer remains independent of the live reviewer but must not duplicate full test campaigns. Evidence is tied to the actual revision; an edit invalidates applicable earlier acceptance claims.
+The main session becomes the **coordinator**: it translates approved criteria into a small Beads backlog, optionally consults the [planner](../../.claude/agents/planner.md), dispatches a separate [developer](../../.claude/agents/developer.md) with an isolated file/worktree contract, joins specialist reports, reprioritizes and schedules the integrated test campaign, invokes one fresh independent `/verify-feature`, and alone opens/updates the PR. The coordinator **does not write product code**. Developer runs targeted tests and retains implementation autonomy, including evidence-based criticism of reviewer findings; reviewers report to the coordinator ONLY, never to the developer. Beads is durable execution tracking, native Tasks are an optional session scheduler. Parallel developers require disjoint writes and build outputs. One developer is the default. No extra user verifier prompt.
 
-This is a **developer workflow**, not a runtime service or mandatory product installation step. Experiments in a separate disposable WSL lab demonstrated team messaging, Beads 1.3.1/worklog writes and fresh-subagent review, but not this exact integrated repository end-to-end flow, actual GitHub PR publication, or improved efficiency versus a baseline; verify these in subsequent real use. The worklog is mandatory *development memory*, not application/router debug logging. Do not enable verbose logging or persist credentials. If the experimental team fails with CCR, optional isolated one-shot reviews can still run; report actual availability accurately, never fabricate successful delegation and never wait on optional plan/guardian reports as release gates. Follow CLAUDE.md's merge boundary: PR then STOP, never auto-merge or start another milestone.
+This workflow is **not** the product's in-container LLM runtime. It is also not a daemon or a guaranteed tool-enforced ban on Team peer messaging. Use only approved scope, Beads/worklog/PR (no second persistent tracker), honor owner authority to merge/start milestones, and stop after PR publication.
 
-### Lightweight native development hooks
+### Native delivery and liveness hooks
 
-The `/develop-verified` skill installs **session-scoped**, repository-versioned `command` hooks using the Python 3 standard library: `.claude/hooks/develop-verified.py`. No `.claude/settings.json`, daemon, timers, new tracker, external Python packages, or Dynamic Workflow is needed. Check `/hooks` after invoking the skill. A new interactive session should invoke the skill once; skill hooks persist until that session ends.
+The main skill installs session-scoped `SubagentStop`, `TaskCompleted` and `Stop` hooks; **project-local** [`.claude/settings.json`](../../.claude/settings.json) installs `TeammateIdle` for teammate sessions that load project settings. All use the versioned Python-standard-library [hook](../../.claude/hooks/develop-verified.py). Check `/hooks` in the real Team/CCR environment. No global settings, timers, monitoring daemon or added package is needed.
 
-- `SubagentStop`, scoped to the named reviewers, checks for a **nonempty, substantial final response**. On an empty/non-substantive response it may request ONE short summary; `stop_hook_active` prevents retry loops. The hook is *not* a substitute for the lead joining delivered evidence. `SubagentHandback` uses its tool message rather than `last_assistant_message`; reviewers should still return a short final summary. Background Agent Teams messages do not guarantee a `SubagentStop` event for the named one-shot reviewer.
-- `TaskCompleted` only checks a path if the optional line `Proof-file: relative/path` was explicitly placed in a native Task's description. If the referenced file is absent, task completion is refused. Otherwise it is a no-op. Tasks remain optional; Beads holds the durable milestone.
-- `Stop` only intervenes when a final response explicitly claims `PUBLISH_READY` while Claude Code still reports active (not completed/failed/cancelled) background tasks. It permits ordinary pauses, `HOLD`, `PUBLISH_DRAFT` and an explicit user request to stop. No automatic tests or approval inference.
+- `SubagentStop`: asks once for a meaningful handback if an isolated subagent tries to stop with a very short answer (with `stop_hook_active` guard).
+- `TeammateIdle`: only when the coordinator has installed an **active mission receipt** at `.claude/.runtime-reports/<team-name>/missions/<teammate-name>.json`. Checks a report's `MISSION_ID`, `FINGERPRINT`, `STATUS` headers. If missing/wrong, requests one short completion report, tracked by an ignored one-time nudge marker; a second idle passes instead of creating a loop. IDLE alone is normal; absent receipt is a no-op. The report must be written atomically, and the coordinator must reconcile the receipt to inactive when the result is consumed.
+- `TaskCompleted`: optional `Proof-file: relative/path` annotation enforces presence of a task's artifact; ordinary tasks are unchanged.
+- `Stop`: catches literal `PUBLISH_READY` with background commands still active, not ordinary stops or draft/hold.
 
-The lead defines/splits/merges coherent implementation slices freely, with their affected interface surface and focused checks. Scoped critiques may run alongside disjoint implementation or in isolated worktrees; join substantive feedback before the consolidated full suite and final one-shot review. Record a candidate fingerprint (including effective uncommitted inputs), and reuse unaffected evidence. For full campaigns, ensure that source/test/config inputs remain unchanged until completion (prefer an isolated snapshot/worktree, or suspend overlapping edits); compare effective-input fingerprints before and after, including relevant untracked files. A green campaign on modified inputs is stale, not final qualification. The lead can keep unrelated work in parallel. For a filtered console summary that preserves the **test** exit status, adapt this generic Bash pattern, with `LOG` pointing to a local ignored file:
+These hooks do **not** detect workers that stall without emitting an event or agents whose Team process does not inherit the hook. Coordinator inspects completed reports, native agent/task state and inbox at **meaningful joins**, issues at most one bounded retry/resume and then confirms termination before replacement, or records `NOT_VERIFIED`/HOLD. Do not repeatedly poll or infer a missing report from a silent notification. The optional receipt is ignored scratch, not a second state machine/backlog. Avoid loops by giving each mission a bounded finish condition.
+
+### Scheduling, evidence and handoff
+
+For one long test/build command, use coordinator-owned **native background Bash** with retained task ID, true command exit and artifact. Use `task-runner` only for independent multi-step qualification/investigation with isolated inputs. The developer runs only its focused tests in its own worktree. **Exactly one executor** owns a full suite for a given revision/configuration; no reviewer or keeper runs it. A test result proves ONLY its effective input fingerprint: save code/test/config + untracked input identity **before and after** the campaign; use a frozen snapshot/worktree or refrain from editing consumed files while it runs. A green run on changed inputs is `STALE/NOT_VERIFIED`. Reuse unaffected evidence; do not rerun a complete suite for metadata-only Beads/worklog/PR edits.
+
+For a filtered console result preserve the real test exit:
 
 ```bash
 set -o pipefail
@@ -65,18 +76,8 @@ tail -n 30 "$LOG"
 exit "$rc"
 ```
 
-Do not use bare `pytest | tail` or `grep` to claim success. Record the tested input identity and the underlying test exit, even when console output is abbreviated. Reviewers: report a reproduced mandatory defect immediately via the live team channel when available; one-shot agents should return the decisive finding early, without repeated polling. Check actual feature/candidate validity manually when the command hooks or native Task API are unavailable in CCR/DeepSeek. The hooks control *mechanical delivery*, not technical judgments. For smoke validation of the hook contracts, run `python3 -m unittest discover -s tests -p test_dev_workflow_hooks.py` locally; this is a developer-only check.
+The coordinator processes finding IDs and rationales **once** (`ACCEPT/REJECT/DEFER`), reprioritizes coherent lots rather than demanding a patch per reviewer message, and pauses a developer immediately only for a proven strategy-breaking blocker. A `contract-reviewer` independently checks the frozen candidate once, returning early with `READY/CHANGES_REQUIRED/NOT_VERIFIED`; one bounded fallback if no usable report. Complete mandatory AP-01/02/03/04/05 checks, C emitted-code compile/execution contrasts when relevant, and Beads criterion→evidence or explicit `NOT_DEMONSTRATED`. Missing mandatory proof or absent fresh review forbids PUBLISH_READY, even with green CI. No automatic merge.
 
-### Asynchronous commands and independent delegated work
+For optional `evidence-keeper`, preserve exclusive Beads/worklog writer ownership: `ACCEPTED` before first delegated write, `RELEASED` (or confirmed termination) before coordinator takeover; IDLE does not release ownership. No other specialist modifies Beads, worklog, PR or normative specs. Experimentally verify reviewer message routing, liveness hook delivery and coordinator recovery in the real CCR stack; the old lab tests are not proof this new architecture works.
 
-`/develop-verified` chooses the **simplest** concurrency mechanism. For a straightforward slow command (tests, Docker, build or otherwise), the lead uses Claude Code's native Bash background mode and retains the task ID/output to collect the completed result; there is no need for an LLM agent merely to wait. If nothing useful can progress meanwhile, the lead simply joins/awaits that task.
-
-Only when the lead expects useful **independent work in parallel**, and the long task benefits from autonomous multi-step execution or analysis, can it delegate to the optional [`task-runner`](../../.claude/agents/task-runner.md). Examples include several dependent build/qualification commands, a bounded dependency investigation, or environment diagnosis while the lead develops another independent portion. The worker does not edit tracked product files, PR, Beads or worklog. It may use scoped temporary outputs.
-
-Both modes must protect shared writes and stale inputs: a committed worktree, or an explicitly captured snapshot (including needed uncommitted files), is required when the lead's concurrent changes could affect the task's input. A stable read-only analysis need not force an extra commit or worktree. Every mandatory result is joined and tied to its actual input revision before final review; rerun any invalidated checks. Degraded delegation falls back to native background Bash, not an unnecessary forced serial runner. Claude Code background tasks are session-scoped; do not detach orphan jobs.
-
-### Test ownership, review budgets and keeper handoff
-
-The lead or a specifically assigned task-runner executes the full local pytest/Docker/build campaign. Reviewers and the test-challenger inspect the evidence and may run a **few distinct, targeted, isolated probes**, not another complete suite. The convergence-guardian audits the diff and existing proofs without running a broad pytest command; the keeper **never executes tests**, but inspects command, process exit, input revision/configuration and artifacts. Reuse results on unchanged inputs; after corrections run focused regressions, then complete applicable checks on a stable candidate. Final contract-review must yield a structured READY / CHANGES_REQUIRED / NOT_VERIFIED early in its turn budget; permit only one bounded direct fallback if an invocation returns no usable report, never duplicate the same review by default.
-
-With Agent Teams, keeper sends ACK plus current Beads issue/PR and ACCEPTED write ownership. An `idle` teammate is available, not disconnected. Send compact checkpoint updates rather than polling. If no ACK arrives, make one bounded attempt to re-contact and confirm its state; lead does **not** write Beads/worklog until keeper explicitly RELEASES ownership, its termination is confirmed, or no keeper ever started. Stop and report an evidence blocker when ownership cannot be determined. No new tracker, test service or duplicated logs is needed.
+Local hook smoke test (not CI): `python3 -m unittest discover -s tests -p test_dev_workflow_hooks.py`.

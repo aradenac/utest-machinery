@@ -1,152 +1,103 @@
-# Verified development agent — operating guide
+# Coordinator-led verified development — operating guide
 
-> **Audience:** engineer operating Claude Code, reviewers, product owner (PO), and any assistant preparing development work.
-> **Scope:** describes the *development process* currently versioned in this repository, **not** the uTest Machinery product's in-Docker test-generation agent. For a process rule conflict, [`CLAUDE.md`](../../CLAUDE.md), the [approved implementation plan](../plan/implementation.md), and applicable normative `docs/` take precedence. This page is explanatory, not a second specification.
+> **Audience:** engineer operating Claude Code, independent reviewers and project owner. This is the *development workflow*, NOT the uTest Machinery product's in-container test-generation agent. The authoritative rules are [`CLAUDE.md`](../../CLAUDE.md), [`/develop-verified`](../../.claude/skills/develop-verified/SKILL.md) and approved product/qualification docs. This guide explains those rules without changing scope.
 
-## Where this agent sits in the end-to-end workflow
+## Operating model
 
 ```mermaid
-flowchart LR
-  PO["Owner / PO\nintent, priorities, arbitration"] --> D["Design / GitHub assistant\nrequirements, architecture, PR review"]
-  D --> S["Approved docs / milestones\nsource of truth"]
-  S --> L["Claude Code lead\n/develop-verified"]
-  L --> E["Developer PR\nimplementation + evidence"]
-  E --> H["Independent external review\nowner / GitHub"]
-  H -->|"findings"| L
-  H -->|"approval and merge"| PO
+flowchart TD
+  PO["Owner: approved scope / DoD / merge authorization"] --> C["MAIN Claude Code: coordinator /develop-verified"]
+  C --> B["Beads: durable lots, dependencies, evidence"]
+  C --> P["Planner: optional decomposition / replan"]
+  C --> D["Developer: independent implementation + targeted tests"]
+  C --> R["Challenger / targeted reviewers: independent findings"]
+  C --> T["Full test runner: one owner, stable inputs"]
+  P -->|report ONLY to coordinator| C
+  D -->|checkpoint + proof ONLY to coordinator| C
+  R -->|findings ONLY to coordinator| C
+  T -->|command / exit / artifacts ONLY to coordinator| C
+  C --> J{"Integrated candidate + acceptance evidence?"}
+  J -->|needs work| C
+  J -->|freeze| V["Fresh isolated contract-reviewer"]
+  V -->|advisory verdict ONLY to coordinator| C
+  C --> PR["PUBLISH_READY / PUBLISH_DRAFT / HOLD"]
+  PR --> PO
 ```
 
-The owner explains the desired **outcome and constraints**, reviews trade-offs, and alone authorizes scope changes and progression to the next product milestone. An assistant may help formulate product architecture and specifications, edit GitHub documentation, propose implementation boundaries, and review PRs. Such edits only become approved requirements through the applicable owner decision and the normative repository documents; a chat response, PR comment, or agent hypothesis is not automatically a requirement. The developer lead implements the **approved** scope, not speculative product strategy. **The lead owns technical decisions and publication readiness.** Other LLM agents are independent critics, not a committee whose consensus is required. Their reports must be considered, not obeyed: the lead may accept, technically refute/reject, or defer suggestions with evidence and without requesting further consensus. An approved mandatory contract cannot be waived merely by rejecting a reviewer. The [cross-project RETEX](llm-development-retrospective.md) discusses the whole chain and its failure modes.
+**One coordinator; no peer-to-peer specialist communication.** The coordinator translates approved acceptance into a small set of coherent lots, writes and owns Beads, assigns work, monitors state and proof, reprioritizes with minimal interruptions, integrates results, triggers tests and decides publication. The developer is a genuine autonomous technical specialist: it chooses its implementation and may refute findings with evidence, but it cannot change overall priorities, the approved requirements, Beads, PR or run full qualification on its own. Reviewers return exact evidence to the coordinator, not to the developer. The coordinator evaluates material objections `ACCEPT/REJECT/DEFER` without a vote or reflexive patch; only the owner changes normative scope or authorizes a merge.
 
-This workflow is specific to the repository; the underlying roles and gates can be adapted to other projects without copying the embedded-C, Beads, WSL, or CCR implementation choices.
+**Do not turn delegation into a ceremony.** One developer is default; optional planner for uncertain decomposition or changed strategy, early test-challenger when substantive correctness risk exists, targeted reviewer on meaningful stable snapshots, guardian only on actual drift/stall, and one mandatory fresh bounded final verifier. Team agents are experimental; simple isolated one-shot tasks may suffice. If delegation fails, report the limitation rather than simulating an agent or having the coordinator silently develop.
 
-## Start: one command
+## Start: one prompt
 
-Prerequisites: a cleanly understood local checkout; Claude Code, CCR, the configured provider and Beads installed/configured under the project's [developer setup](setup.md); GitHub access to the intended PR if handling feedback. Confirm installed versions and provider routing rather than assuming the terminal banner independently proves the upstream route.
-
-From the repository root, in a **new interactive terminal session**:
+From a cleanly understood repository checkout in WSL:
 
 ```bash
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ccr "Claude DeepSeek Flash" cli
 ```
 
-Inside Claude Code, supply a **single mission**:
+Agent Teams is **optional** and must be verified against the installed Claude Code + CCR + provider; do not assume the CLI banner proves the underlying model or Teams delivery. Then request exactly one approved job:
 
 ```text
 /develop-verified Implement the next approved milestone
-/develop-verified Address all substantive review findings on PR #14
+/develop-verified Correct the substantive remaining findings of PR #14
 ```
 
-The user does **not** have to issue a second `/verify-feature` or `/goal` prompt. The lead follows [`.claude/skills/develop-verified/SKILL.md`](../../.claude/skills/develop-verified/SKILL.md), invoking review automatically. A user may still call `/verify-feature` explicitly for a standalone review; it is not a required extra step of this workflow.
+No separate user `/verify-feature` prompt is needed. `NEW_FEATURE` implements one approved milestone and opens ONE PR; `PR_RECHECK` reads relevant reviews, corrects and updates the SAME PR. The coordinator **stops after PR publication**, awaits owner review and never auto-merges or starts the next milestone.
 
-**Mission modes:**
+## Plan → Beads → specialist missions
 
-- **New approved feature (PRE_PR):** select exactly one approved product milestone from the plan and develop the complete feature. The lead publishes one review-ready PR when objective acceptance is demonstrated, or may publish one draft with clearly declared gaps; publication is not merge approval.
-- **Existing open PR (PR_RECHECK):** gather review bodies, inline threads, replies and PR discussion; correlate findings to the reviewed revision; **independently evaluate** allegations, fix grounded contract violations and technically reject refuted or optional claims; test relevant contrasts; update **the same PR and Beads issue**. Do not start the next milestone.
-- **Docs-only changes:** a standalone documentary task outside `/develop-verified` can follow its separate policy; **within `/develop-verified`, a fresh final independent LLM review is mandatory** even for docs-only implementation/correction. Truthful evidence, scope, privacy and owner/merge boundaries still apply.
+1. **Preflight:** inspect true remote merge-base, local changes, existing PR/review context, merged instructions, product DoD, current Beads feature item and previous worklog/evidence.
+2. **Finite contract:** enumerate approved criteria, invariants, contrasting successful/faulty cases and proof needed. A speculative reviewer suggestion is not a new requirement.
+3. **Backlog:** coordinator reuses a few durable Beads work items, groups findings by common cause/invariant, considers dependencies and cost; optional native Tasks reflect only current session's executable assignments. A planner can propose but cannot write tasks. Do not atomize into one issue per assertion/reviewer comment.
+4. **Dispatch:** each mission specifies `MISSION_ID`, lot/Beads ID, technical goal, approved contract, stable snapshot/hash, exclusive edit/output paths, budget, report location and finish condition. Default one developer. For true parallel code edits, use isolated worktrees and disjoint file ownership; coordinator integrates.
+5. **Event-driven reconciliation:** at reports, completed Tasks, meaningful checkpoints, test results or detected blockers, coordinator reads actual agent state and fingerprint-bound reports, updates Beads once for meaningful changes, decides continue / reprioritize / targeted review / integrate. An IDLE notification means waiting, not proof of completion. No continuous ping or status narration.
+6. **Convergence:** after two different failed correction strategies, request bounded plan reevaluation/guardian and change approach; do not repeat a serial review-patch loop. New proved mandatory regressions matter; old hypotheses without new proof do not reopen resolved work.
 
-## Who does what
+## Central report routing and bounded recovery
 
-| Actor | Starts when | Reads / checks | Writes | Authority / restriction |
-| --- | --- | --- | --- | --- |
-| **Lead developer** (main Claude Code conversation) | At entry | Scope, architecture, current branch/PR, Beads, tests and agent findings | Product code, tests, necessary docs, PR content and Git operations | **Only technical release decision-maker**: ACCEPT/REJECT/DEFER advice; chooses review-ready, draft or hold; never waives mandatory contracts, silently changes scope or merges |
-| **`implementation-reviewer`** (named teammate) | Plan and candidate checkpoints | Approved contracts, real PR merge-base, stable code and review feedback | Only ignored atomic checkpoint report, no tracked writes | Offers **falsifiable advisory critique**, never a veto or full qualification rerun |
-| **`evidence-keeper`** (named teammate) | Early, parallel | Beads status, executed command/exit, inputs/revision, artifacts and evidence gaps | Ignored ownership ACK/RELEASE report; Beads and `worklog/` ONLY after lead-confirmed ACK | Single writer until release; never runs tests, idle does not release ownership |
-| **`convergence-guardian`** (fresh, targeted subagent) | Plan, structural change, stall, before PR | Actual remote-base diff, rework and existing evidence | Nothing | Advises on drift/stalls/minimality; lead can refute conclusions; no full suites |
-| **`task-runner`** (optional background subagent or teammate) | When a bounded multi-step task can progress independently of useful lead work | Goal, stable inputs, permitted commands, isolation/budget | Only scoped scratch outputs; no tracked product/Beads/PR edits | Investigates or executes independently and returns actual results; never a substitute for native Bash background |
-| **`test-challenger`** (fresh, optional subagent) | Material correctness risks | Normative inputs, SDD/oracles, negative/mixed cases and weak tests | Nothing | Suggests discriminating **in-domain** tests, not mandatory extras without proof |
-| **`contract-reviewer`** (fresh independent NON-Team subagent via `/verify-feature`) | **Always** on stable `/develop-verified` candidate, including docs-only | Contracts, exact candidate fingerprint, revision-bound evidence and PR feedback | Only returns structured result; lead persists ignored copy | Independent **advisory verdict**, not an authorization to publish; bounded checks |
-| **Owner / GitHub reviewer** | After PR opened/updated | User-visible behavior, design, actual evidence, risk and review feedback | Owner decisions and review/merge actions | Accepts or rejects scope changes; authorizes the next milestone separately |
+Specialists communicate ONLY with the coordinator through native task results/messages and, when Agent Teams support it, atomic ignored reports. Reports state `MISSION_ID`, `FINGERPRINT`, `STATUS`, findings or produced files/commands/true exits, and necessary next decision. The coordinator forwards only relevant accepted work to developer after checking what it is currently doing; developer may challenge the technical claim and return counter-evidence to coordinator.
 
-Agent definitions are versioned under [`.claude/agents/`](../../.claude/agents/). A teammate can reason critically yet remain fallible; an isolated reviewer working with the same model is not mathematically or organizationally independent of that model. **An LLM verdict is neither a requirement nor objective proof**. The lead should challenge unfounded allegations and reject speculative overengineering rather than automatically producing more changes. The instructions restricting `Bash` writes are **prompt constraints**, not an operating-system sandbox; apply isolated working directories, restricted mounts and permissions for untrusted or write-producing tests.
+Use ignored `.claude/.runtime-reports/<team-name>/` for **optional** Team receipts; it is a short-lived checkpoint area, never a new backlog, not committed. Coordinator may write `missions/<teammate-name>.json`:
 
-## End-to-end execution and gates
-
-```mermaid
-flowchart TD
-  A["Mission / approved contracts / PR"] --> B["Lead freezes bounded acceptance plan"]
-  B --> C["Live reviewer + keeper checkpoints"]
-  C --> D["Lead considers plan critique or records unavailable input"]
-  D --> I["Lead implements and independently triages critiques"]
-  I --> E{"Objective proof & regressions assessed?"}
-  E -->|"Grounded defect, bounded correction"| I
-  E -->|"Stable candidate; gaps explicit"| P["Prepare PR evidence and freeze fingerprint"]
-  P --> F["Mandatory fresh independent LLM critique"]
-  F --> L{"Lead evaluates objections\nACCEPT / REJECT / DEFER"}
-  L -->|"PUBLISH_READY: mandatory proof complete"| R["Publish review-ready PR"]
-  L -->|"PUBLISH_DRAFT: gaps/defects disclosed"| DR["Publish draft PR"]
-  L -->|"HOLD"| H["Record blocker and stop"]
-  R --> S["Inspect CI; stop before merge"]
-  DR --> S
+```json
+{"active":true,"mission_id":"m-01","fingerprint":"commit-or-effective-input-hash","report":".claude/.runtime-reports/<team-name>/developer-m01.md"}
 ```
 
-1. **Preflight:** inspect `git status`, base/head, merged changes, open PR and all substantive feedback; reconcile applicable `main` instructions, the approved milestone, Beads and the actual implementation. Never infer completion solely from an old checklist.
-2. **Acceptance contract before coding:** identify required behavior, a small set of critical invariants and the command/observation needed to prove each one. Distinguish approved requirements from assumptions, ambiguities and optional suggestions. A reviewer can criticize the plan immediately.
-3. **Checkpointed concurrent work:** lead first creates an ignored session-local report directory and assigns distinct report paths and checkpoint IDs. The reviewer atomically writes its independent plan critique; the lead considers it **before substantive implementation**, with independent ACCEPT / REJECT / DEFER judgements; after one bounded recovery, an unavailable plan critique is recorded rather than used as an implementation veto. At a stable candidate, reviewer writes a separate candidate critique which the lead must consume before final verification. Native teammate messages merely notify; a quiet UI or `idle` is not proof of failure. Keeper atomically writes ACCEPTED/RELEASED ownership reports, and the lead confirms handoff before changing Beads/worklog writer. Use at most one bounded retry, inspect available inbox/state, then one-shot independent fallback if necessary; never resend identical ACKs repeatedly or permit two writers.
-4. **Critical lead triage:** for EACH material agent finding or PR comment, independently identify its contractual basis, decisive observed evidence and whether it is a genuine mandatory violation. **ACCEPT** proven defects (fix or disclose in draft), **REJECT** speculation/nonmandatory or technically disproven claims with brief counterevidence, **DEFER** only a concrete unresolved verification need. Never treat votes, severity labels or repeated LLM statements as proof. Repair the underlying contract of accepted defects, test pertinent neighboring cases; do not iterate to please a reviewer.
-5. **Convergence checkpoints:** ask the guardian for a proof-backed minimal correction when it sees out-of-scope edits, repeated fruitless iterations, unnecessary layers, weak tests or evidence tied to an older revision. *Minimal sufficient diff* includes required tests and documentation; it does not mean minimum line count.
-6. **Qualification and asynchronous tests:** run targeted regressions during corrections, then a full applicable campaign on a stable candidate owned by lead or explicitly delegated task-runner. Reuse existing command/exit/revision/artifact results, not another suite per reviewer. Perform applicable local checks before CI. Run straightforward slow commands with native background Bash, whether tests or other jobs. Delegate to a `task-runner` only if it can independently perform meaningful multi-step work while the lead advances elsewhere; isolate mutable inputs and written outputs when needed. Join both kinds of results and rerun invalidated checks before the final gate. Where AP-02 applies, show at least one user-facing traversal of the **real** WSL/Docker/runner/LLM or distribution boundary. A simulated/mock response does not establish a real provider invocation. For C/SDD, protect original inputs and independently anchored test oracles.
-7. **Evidence and candidate freeze:** pin current base/head or uncommitted file hashes; re-run affected tests after any later edits; record the actual command, output/exit code and evidence revision. Sync the single Beads item and worklog, reconcile risk/limitations, and prepare a complete PR description **before** the final review.
-8. **Fresh independent final review — ALWAYS, but not a veto:** invoke a fresh isolated non-Team LLM on every `/develop-verified` stable candidate, including docs-only; bind its `READY | CHANGES_REQUIRED | NOT_VERIFIED` observations to exact candidate fingerprint, revision-bound evidence and PR comments. It must independently classify material findings without imposing future requirements. **The lead** evaluates every material objection independently as ACCEPT/REJECT/DEFER with proof and makes the explicit `PUBLISH_READY | PUBLISH_DRAFT | HOLD` decision. Even a `CHANGES_REQUIRED` may be rejected if unfounded, with demonstrable contract/refutation; even a `READY` cannot excuse missing mandatory proof. When reviewer output is unavailable or mandatory evidence is incomplete, the lead may publish only a candid **draft** or HOLD, not review-ready. Material changes invalidate applicable prior evidence; a new stable candidate seeking review-ready requires a fresh isolated final critique. Reuse unchanged tests, avoid repeated reviewers for identical rejected hypotheses and use bounded strategy escalation for confirmed recurring defects.
-9. **Delivery boundary:** the lead chooses whether to commit/push and open/update the same PR as **review-ready** when all objective mandatory gates pass, as **draft** when limitations/verification gaps are accurately declared, or to **hold** with a reason; inspect short, credential-free CI after publication. If a correction changes the candidate, invalidate and refresh relevant evidence. **Never auto-merge; never start the next product milestone without explicit owner approval.** After PR submission stop for external review.
-
-This is a skill-described orchestration, **not** a guaranteed always-running background service, enforcement engine or fully isolated sandbox. The reviewer's LLM judgement remains probabilistic; the final gate's invocation, identity, input binding and outcome handling are the systematic part. If the live team cannot spawn or deliver a matching checkpoint artifact (for example with a CCR/provider integration), inspect its assigned report then available native inbox/status before declaring failure. After one bounded retry, use a fresh isolated one-shot subagent fallback and disclose degraded parallelism; never infer failure from a silent notification or fabricate communication. If fresh final verification, material PR feedback, mandatory tooling or evidence cannot be obtained, record `NOT_DEMONSTRATED` and prohibit falsely calling the work review-ready; the lead can still publish a clearly documented draft. No LLM has independent authority to block a defensible lead decision.
-
-## Evidence and document ownership
-
-| Location | Purpose | Source of authority / how it is used |
-| --- | --- | --- |
-| `docs/` | Approved product architecture, requirements, interfaces and qualification | **Normative product authority**; owner arbitration must be reconciled here |
-| `docs/plan/implementation.md` | Milestones and acceptance boundaries | Scope authority for the **current** milestone |
-| `CLAUDE.md` and `.claude/` | Developer-agent policy, roles, skill implementation | Normative developer session procedure, subordinate to approved product scope |
-| `worklog/log/`, `worklog/decisions/` | Dated observations, rejected attempts, decisions, superseded records | Detailed versioned developer memory; not a second product spec |
-| Beads / `.beads/issues.jsonl` | Feature status, brief arbitration rationale, acceptance evidence by criterion | Beads is execution tracking; JSONL is an **export**, not a complete Dolt backup |
-| GitHub PR | Delivered diff, changed behavior, executed checks, links to Beads and remaining limits | Reviewable delivery; does not replace source specs |
-| `docs/project/risks.md` | Cross-PR risks and impact families | Independent risk review only; normal developer agents do not edit it |
-
-Example compact evidence hand-off to the keeper (illustrative, **not** a claim that these commands ran):
+The teammate's **atomic** report contains these literal headers, followed by proof:
 
 ```text
-REVISION: base=<commit>; candidate=<commit or file hashes>
-CRITERION: AP-01/feature-R2
-COMMAND: <exact local command>
-PROVENANCE: executor=<lead or task-runner>; exit=0; <relevant result/artifact path>
-STATUS: DEMONSTRATED | NOT_DEMONSTRATED
-FINDING: PR comment URL -> RESOLVED/PARTIAL/...; adjacent test
-INVALIDATES: <earlier test or draft proof, if candidate changed>
+MISSION_ID: m-01
+FINGERPRINT: commit-or-effective-input-hash
+STATUS: COMPLETED
 ```
 
-Scratch checkpoint protocol: use ignored `.claude/.runtime-reports/<session-id>/`, distinct reporter-owned files, atomic write/rename, CHECKPOINT_ID and reviewed fingerprint. The lead consumes matching reports before proceeding. Only substantive disposition/evidence is promoted to Beads/worklog; scratch is neither a permanent report nor a new tracker. The final one-shot reviewer returns its report directly to the lead, which stores `final-verification.md` under that session directory. Don't commit scratch or include private runtime details in PRs.
+The **project-level** `TeammateIdle` command hook (installed in `.claude/settings.json` so teammates can load it) checks an *explicitly assigned* active receipt: if it cannot find a matching completed report, it requests **one** immediate handback (exit 2) and creates one ignored retry marker per mission/fingerprint. Subsequent idle is allowed. This does **not** prove the agent finished, wake a stalled model, monitor elapsed time, or guarantee that the hook runs in a teammate's process; inspect actual `/hooks` and Team behavior under CCR. The coordinator owns further recovery: read report then task/teammate state, make one bounded resume request, terminate or confirm takeover before replacing an agent, use one isolated fallback when essential and otherwise declare `NOT_VERIFIED`/DRAFT/HOLD. Optional advice never blocks. **Do not regard missing native messages as missing files or IDLE as crash.** The existing `SubagentStop` (short handback), opt-in native Task `Proof-file:` and `Stop` (READY while active background tasks) remain.
 
-The keeper checks run provenance rather than rerunning tests, and records only genuine state changes and essential links, not repeated narrative or pasted full logs. Keeper ACKs exclusive writer ownership and explicitly RELEASES it; lead fallback requires confirmed handoff/termination, not silence or idle. A final review cannot certify stale evidence: **revision changes invalidate the corresponding checks**. The lead must independently confirm important Beads/worklog claims at delivery.
+Star routing is a **workflow contract**, not an OS permission guarantee. Claude Code can technically permit direct teammate messaging. Verify compliance in real sessions; a bypass is not a valid task or Beads instruction. Do not change global Claude configuration, launch a polling daemon or invent a persistent queue.
 
-## Operational guardrails
+## Tests, reviews and decision ownership
 
-- Work within the repository and permitted local venv/container; request authorization before host/global installations or host configuration changes.
-- Keep original C/headers/SDDs immutable and prevent silent oracle weakening. No accidental activation of product, router or application verbose logging; `worklog/` is **developer memory**, not runtime logs.
-- No tokens, credentials, private gateway URLs, private host paths or unnecessary network details in commits or public PR evidence; review all added/tracked artifacts before publication (AP-05).
-- Do not let the reviewer, guardian or challenger silently create new requirements, or let developer implementation claims become acceptance evidence by repetition.
-- A failing workflow/tool is not a passing feature. A mandatory `NOT_DEMONSTRATED` blocks `READY` even if unit tests or CI are green.
-- Do not require tests for unimplemented later milestones. Use bounded, risk-proportional independent checks, not combinatorial matrices as default.
+| Stage | When | Executor / proof |
+| --- | --- | --- |
+| **Focused checks** | Developer finishes coupled surfaces of a lot | Developer executes isolated positive/negative regressions with command/exit/snapshot, free to iterate without coordinator approval on each test. |
+| **Early independent challenge** | Material oracle/type/scope/state risk | Coordinator launches one `test-challenger` on contract and stable inputs; finding returns to coordinator, not directly to developer. |
+| **Targeted critique** | Stable lot checkpoint; only when useful | `implementation-reviewer` inspects exact fingerprint without full-suite rerun; developer can work on a disjoint lot. |
+| **Full campaign** | Coordinator integrated/froze suitable candidate | ONE designated owner: native background Bash for one command or isolated `task-runner` for multi-step test campaign. Never duplicate concurrent Docker/pytest/CI work. |
+| **Final gate** | DoD evidence joined and candidate frozen | ONE fresh independent non-Team `contract-reviewer` via `/verify-feature` OR equivalent direct Task. Advisory READY/CHANGES_REQUIRED/NOT_VERIFIED. At most one fallback if no usable handback. |
 
-## What is demonstrated — and what remains to be proved
+**Revision fidelity:** freeze remote merge-base, effective tracked/untracked source and test/config hashes, profile, flags, container/compiler version and evidence inputs. If a full campaign is slow, isolate a committed/snapshotted worktree or stop editing consumed files; compare effective-input fingerprints **before AND after**. An exit-0 on moved inputs is stale, not final proof. Metadata-only worklog/Beads/PR text changes do not invalidate unchanged executable test evidence. Reuse affected/unaffected proof appropriately, do not repeat full suites per review.
 
-**Observed in disposable local laboratory:** native teammate messaging (experiment 3); standalone `/goal` operation (experiment 5); parallel live reviewer, corrections and recheck (experiment 6); one-prompt developer/reviewer/keeper/challenger and fresh verifier with real Beads/worklog (experiment 7). In experiment 7, final local checks reported **21/21** unit tests and **12/12** separate contract checks; final verification reached `READY` **on its third pass** after PR-draft/evidence corrections. The experimental log was extensive and included revision-bound rechecks.
+**Meaningful quality:** real C/Unity/Ceedling compilation + behavioral correct/faulty SUT contrasts for generator type/call/oracle changes; AP-01 acceptance evidence, AP-02 real user/environment path, AP-03 state transitions, AP-04 concise work memory, AP-05 no secret leakage. Critiques do not invent new mandatory gates and never independently run full suites. R04/R22/R24 boundaries and original C/SDD immutability remain.
 
-**Not established by these experiments:** a controlled improvement in real-project elapsed time or defect escape rate; reliable upstream CCR model attribution from every call; multi-agent safety enforcement by the OS; and an end-to-end run of this exact integrated skill on uTest Machinery PR feedback, publishing real GitHub corrections. The skill was integrated by [PR #18](https://github.com/aradenac/utest-machinery/pull/18); successful repository CI for that configuration is **not** proof that each agent path has run here.
+The coordinator chooses `PUBLISH_READY` only with complete applicable mandatory proofs, no objectively unresolved mandatory defects and a usable fresh final independent review. A false reviewer objection may be technically rejected with evidence; missing proof or an unavailable review requires `PUBLISH_DRAFT` with explicit gaps or `HOLD`. Normal fast CI follows PR creation if required, **not** as a debugging/test replacement. Explicit owner instructions can request a merge without waiting on CI; otherwise stop for owner review.
 
-See [RETEX across the entire PO → specification → implementation → review process](llm-development-retrospective.md) for the evidence, anti-patterns, transferable recommendations and measurement plan.
+## Existing mechanisms retained
 
-## Choose background Bash or a parallel task-runner
+- **Beads** is the durable feature backlog/evidence; `worklog/` is dated working memory; PR is delivery; `docs/` is normative product authority. An optional evidence-keeper may write Beads/worklog ONLY after exclusive `ACCEPTED` and before `RELEASED`, with no parallel coordinator write; it never modifies code/tests.
+- **Tests:** one runner per full campaign; targeted tests by developer; genuine correct/faulty counterexamples; actual compiler/host/LLM proof where applicable; no new custom test framework.
+- **Review:** early challenger, optional stable-snapshot critiques, guardian when actually stuck, independent bounded final gate, explicit proof-backed `ACCEPT/REJECT/DEFER`. No reviewer veto or unbounded retries.
+- **Async:** native background Bash for a single long command, isolated `task-runner` for bounded multi-step tasks. Task state can lag; check artifacts and native state rather than blindly trusting status. One-shot agent results are a valid fallback if Agent Teams/CCR delivery fails.
+- **Release:** coordinator prepares one PR, performs diff hygiene and credential review, reports exact checks and gaps, and stops before owner-authorized merge.
 
-The default for a slow **single command** (tests, build, Docker run, download or local probe) is the built-in Claude Code Bash background task: launch, retain its task ID, continue with independent work if available, then inspect actual exit code/output. Do not spawn an LLM just to wait. If the result is a prerequisite for the next meaningful step, await it rather than inventing parallelism.
-
-An optional [`task-runner`](../../.claude/agents/task-runner.md) is justified **only when all three conditions hold**: (1) the lead has useful independent work to do, (2) the long task can be isolated from concurrent edits and resource conflicts, and (3) autonomous multi-step execution or investigation adds value beyond one background shell command. Examples: a bounded multi-command qualification, comparative build diagnostic or independent dependency/environment investigation. Prefer a background subagent when a final result suffices, or a named teammate only when intermediate messages/coordination materially help. The worker returns completed facts and artifacts; it is neither an extra coder nor the final verifier.
-
-Source revision safety is proportional: read-only investigation on stable files may use documented hashes; if the lead might change consumed inputs, use an isolated committed worktree **or a reproducible snapshot including necessary uncommitted inputs**. Outputs must remain separate. Evidence from revision A does not validate revision B. The lead joins mandatory results, asks the keeper to record only observed proofs, re-runs checks invalidated by edits and still calls fresh final verification. If delegation is unavailable, native Bash background mode remains the fallback. No detached daemon or new tracking system is required; real CCR + Agent Teams execution still needs validation.
-
-## Reuse test results instead of re-running the same suite
-
-A **single executor** (lead or assigned task-runner) owns each complete test/build/Docker campaign for a given input revision, command and environment profile. After a correction run targeted regressions; run the applicable complete campaign on a stable candidate and reuse its exact command/exit/artifacts in independent reviews. Other agents can challenge the contracts and assertions, or run *small distinct isolated probes* when a material claim is not demonstrated; they must not repeat the full campaign. A guardian's scope/diff audit should normally require **zero** test executions. The keeper records proof provenance without executing code. When changes invalidate relevant evidence, selectively rerun affected checks; do not cite old green logs for a newer candidate.
-
-The final reviewer must be invoked systematically and independently classify material PR findings for the exact stable candidate fingerprint; the lead's documented technical disposition controls what happens next. A credible incomplete check becomes NOT_VERIFIED with the smallest next step; repeatedly resuming an open-ended sweep without new evidence is not convergence. A teammate's `idle` status does not change assignment or Beads ownership.
+This process is **not** an always-running autonomous service or automatic permission isolation. The observed PR #14 convergence problems motivate the refactor but do **not** demonstrate that the new workflow is faster: compare actual wait/retry cycles, stale reviews, full-suite duplicates, defect discovery timing and human intervention during the next approved feature. Do not add another tracker or a dedicated background supervisor just to measure it.
