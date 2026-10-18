@@ -2688,6 +2688,70 @@ def test_a_guarded_nested_conditional_body_still_shares(tmp_path):
         assert proc.returncode == 0, proc.stderr
 
 
+def test_a_guard_macro_undefined_in_the_header_is_not_protection(tmp_path):
+    """F-A6-review (independent PRE_PR, CONFIRMED MANDATORY): the guard only collapses
+    a re-inclusion while its macro stays **defined**. An ``#undef X`` anywhere in the
+    header — inside the guarded region before ``#endif``, or after it, even nested
+    under an ``#if`` — leaves ``X`` undefined when the header is included again, so the
+    second inclusion re-enters ``#ifndef X`` and repeats the ``{…}`` body. Such a
+    header must be refused with a named limitation, not shared: previously it read as
+    safe and the generated TU failed ``redefinition of 'struct…'`` with
+    ``limitations == []``."""
+    for name, header in (
+        ("undef-in-guard", "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+                           "typedef struct { int v; } S;\n#undef FOO_H\n#endif\n"
+                           "void dep_send(S *s);\nint use(int a);\n"),
+        ("undef-after-endif", "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+                              "typedef struct { int v; } S;\n#endif\n#undef FOO_H\n"
+                              "void dep_send(S *s);\nint use(int a);\n"),
+    ):
+        bench, out = _mock_bench(
+            tmp_path, name,
+            "int use(int a) { S s = {0}; dep_send(&s); return a; }\n", header,
+            {"id": "S1", "title": "t", "function": "use",
+             "requirement_ids": ["FOO-001"], "mocks": ["dep_send"],
+             "cases": [{"args": [1], "expected": 1,
+                        "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+        assert out.test_functions == [], (name, out.test_functions)
+        assert any("repeats an inline struct/union/enum" in lim
+                   for lim in out.limitations), (name, out.limitations)
+        assert not (bench / ".mtm" / "gen" / "interface"
+                    / "mtm_dep_dep_send.h").exists(), name
+
+
+def test_an_unrelated_undef_does_not_refuse_a_guarded_header(tmp_path):
+    """Control for F-A6: an ``#undef`` of a macro *other than* the guard macro does not
+    defeat the guard, so the header stays shareable and its scenario is generated."""
+    import shutil
+    import subprocess
+
+    bench, out = _mock_bench(
+        tmp_path, "unrelated-undef",
+        "int use(int a) { S s = {0}; dep_send(&s); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n#undef OTHER\n"
+        "typedef struct { int v; } S;\nvoid dep_send(S *s);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1,
+                    "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-undef-other"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_send.h"\n#include "foo.h"\n'
+                      "static S g;\nint main(void) { (void)g; return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
 def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     """An alias with no *header* that defines it has no includable definition, so
     the interface header must spell it verbatim. This exercises the fallback path

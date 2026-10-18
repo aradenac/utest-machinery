@@ -1386,7 +1386,13 @@ def _simple_guard_span(clean: str) -> "tuple[int, int] | None":
     directives, an ``#ifndef X`` (or ``#if !defined(X)``) **immediately** followed by
     ``#define X`` (so the define is live, not nested under a conditional), reaching a
     matching ``#endif`` with **no** ``#else``/``#elif`` at the guard's own level (so
-    the guarded region is unconditional). Any other structure returns ``None``.
+    the guarded region is unconditional) and **no** ``#undef X`` anywhere (so the
+    macro is still defined afterwards). Any other structure returns ``None``.
+
+    The predicate is sound because it reduces safety to "is the guard macro defined
+    after the first inclusion?": ``X`` is defined iff its ``#define`` executes (live
+    and immediate) and is never ``#undef``\\ ed — the two conditions checked here. A
+    repeated ``{…}`` body is then provably skipped on every re-inclusion.
     """
     prologue = re.match(r"(?s)(?:\s|/\*.*?\*/|//[^\n]*|#[ \t]*include[^\n]*)*", clean)
     i = prologue.end()
@@ -1397,6 +1403,14 @@ def _simple_guard_span(clean: str) -> "tuple[int, int] | None":
     if not open_m:
         return None
     macro = open_m.group(1) or open_m.group(2)
+    # The guard only collapses a re-inclusion while ``macro`` stays defined. An
+    # ``#undef macro`` anywhere — inside the guarded region (before ``#endif``) or
+    # after it — leaves the macro undefined when the header is included again, so the
+    # second inclusion re-enters ``#ifndef macro`` and repeats the body. Refuse (a
+    # named limitation upstream) rather than claim a safety we cannot prove: a header
+    # that ``#undef``\ s its own guard macro is not provably shareable.
+    if re.search(r"(?m)^[ \t]*#[ \t]*undef[ \t]+" + re.escape(macro) + r"\b", clean):
+        return None
     after_open = i + open_m.end()
     define_m = re.match(
         r"(?s)(?:\s|/\*.*?\*/|//[^\n]*)*#[ \t]*define[ \t]+" + re.escape(macro) + r"\b",
