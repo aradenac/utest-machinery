@@ -149,6 +149,7 @@ def _resolve_type_map(
     include_dirs: list[Path] | None = None,
     resolve: Callable[..., Any] | None = None,
     resolver: Any = None,
+    probe_headers: dict[str, str] | None = None,
 ) -> Any:
     """Resolve the selected inputs with the clang adapter (fail-soft).
 
@@ -157,12 +158,15 @@ def _resolve_type_map(
     ``TOOL_FAILED`` fact set, so a broken resolver can never abort generation with
     an uncaught error (I4). *resolve* is the injectable seam (defaults to
     :func:`mtm.ctypes_clang.resolve`); *resolver* is the adapter's own resolver
-    seam (an image-backed transport override).
+    seam (an image-backed transport override). *probe_headers* rides this same
+    call so each proposed interface header is compiled in the selected context
+    without a second driver invocation.
     """
     source = resolve or ctypes_clang.resolve
     try:
         return source(inputs, bench_root=bench_root, image=image,
-                      include_dirs=list(include_dirs or []), resolver=resolver)
+                      include_dirs=list(include_dirs or []), resolver=resolver,
+                      probe_headers=dict(probe_headers or {}))
     except Exception as exc:  # noqa: BLE001 - surfaced as a tool fault, never a crash
         return ctypes_clang.CTypeResolution(
             status=ctypes_clang.TOOL_FAILED,
@@ -509,25 +513,6 @@ def _functions_declared_by(unit, scenarios: list[Scenario] | None,
 _STORAGE_CLASS = {"extern", "static", "inline", "register", "auto", "typedef",
                   "_Noreturn"}
 _QUALIFIERS = {"const", "volatile", "restrict"}
-
-#: C type-specifier vocabulary a declaration can name without any definition. The
-#: `struct`/`union`/`enum` keywords are included: their *tag* identity comes from
-#: clang's record facts, not from a name, so a tag is not treated as an undefined
-#: named type here (see `_undefined_type_in_decl`).
-_C_TYPE_WORDS = frozenset(
-    set(_CTYPE_WORDS) | set(_STORAGE_CLASS) | set(_QUALIFIERS)
-    | {"void", "struct", "union", "enum", "_Complex", "_Imaginary"})
-
-#: `<stdint.h>` fixed/convenience integer types, matched by name so the whole
-#: family (`int32_t`, `uint_fast16_t`, `intptr_t`, `intmax_t`, …) is covered
-#: without enumeration. The private interface header always `#include`s
-#: `<stdint.h>`, so a declaration naming one of these is self-sufficient. The
-#: `_least`/`_fast` variants carry a leading underscore (`uint_fast16_t`).
-#: Deliberately **not** extended to `<stddef.h>` names (`size_t`, `ptrdiff_t`,
-#: `wchar_t`): `<stdint.h>` does not provide those, so admitting them would be the
-#: very uncompilable-C false success this guard exists to prevent.
-_STDINT_TYPE_RE = re.compile(
-    r"^u?int(?:8|16|32|64|ptr|max|_least\d+|_fast\d+)_t$")
 
 
 def _type_key(raw: str, name: str = "", *, drop_top: bool = True) -> str:
@@ -1285,7 +1270,21 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             # interface header. Empty for the real clang/header authorities, whose
             # aliases come from the selected build context.
             llm_field_aliases_by_symbol[symbol] = field_aliases
+
+    # Assemble (do not yet write) the interface-header body for every symbol that
+    # has a usable declaration and whose alias machinery could share its types. The
+    # compiler is the gate (AP-08): all bodies are collected first and handed to the
+    # **same** clang adapter in one batched ``probe_headers`` request, so a body
+    # naming a type nothing in the selected build context defines — or whose
+    # ``#include``s cannot be resolved — is refused with a named per-symbol
+    # limitation instead of being emitted as uncompilable C behind empty
+    # limitations (I1/AP-06). No bespoke parser and no lexical undefined-type guard:
+    # the real compiler answers.
+    bodies: dict[str, str] = {}
+    header_for: dict[str, str] = {}
     for symbol, decl in sorted(declarations.items()):
+        if symbol in refused_mocks:
+            continue
         if not decl.strip():
             # No real declaration resolved and no unambiguous usable prototype in
             # the plan's text: record a precise limitation (never an invented
@@ -1304,25 +1303,6 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
                 f"mocked symbol {symbol!r} has no usable declaration; {detail}, so "
                 "its scenarios are not executed")
             continue
-        # I1/AP-06: a declaration extracted from the plan's text may name a type
-        # nothing defines — an alias the LLM restated with no companion `typedef`
-        # and no definition in the selected build context (`int dep_write(Q q);`).
-        # Carrying no defining statement would leave `Q` undefined while every
-        # scenario still ran: a false success behind empty limitations. The alias
-        # machinery below cannot see such a name (it only carries what the field or
-        # clang provides), so it is refused here with a precise per-symbol
-        # limitation. Only the LLM branch is guarded: the clang/selected-header
-        # authorities are real declarations and must not be second-guessed.
-        if declaration_sources.get(symbol) == DECL_FROM_LLM:
-            undefined = _undefined_type_in_decl(
-                decl, alias_facts, llm_field_aliases_by_symbol.get(symbol))
-            if undefined:
-                refused_mocks[symbol] = (
-                    f"the plan's declaration for {symbol!r} names undefined type "
-                    f"{undefined!r} (no selected header defines it and the plan "
-                    "supplied no `typedef` for it); it cannot be emitted as "
-                    "compilable C")
-                continue
         # A declaration may name a `typedef` alias (`typedef int *P; void dep(P p);`).
         # The private header is compiled on its own (CMock generates the mock from
         # it, and the test includes it before the unit header), so every alias its
@@ -1348,7 +1328,7 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
-        body = (
+        bodies[symbol] = (
             f"/* Private interface for the mocked dependency {symbol!r}.\n"
             f" * Declared from the plan/SDD so CMock can generate a mock. This\n"
             f" * header is NEVER written into the source directory. */\n"
@@ -1358,7 +1338,46 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             f"{alias_defs}{decl.strip()}\n\n"
             f"#endif /* {interface_guard} */\n"
         )
-        (iface_dir / header_name).write_text(body, encoding="utf-8")
+        header_for[symbol] = header_name
+
+    # One batched request: every proposed header is compiled by the same driver,
+    # in the selected build context, in a **single** invocation (one extra parse
+    # per header, not N docker runs). A genuine tool fault here is a run-level tool
+    # fault, surfaced through the existing ``types.status`` path (exit 30) — this
+    # adds no second fault path.
+    probe_verdicts: dict[str, Any] = {}
+    if bodies:
+        probe_spec = {header_for[sym]: text for sym, text in bodies.items()}
+        probe_facts = _resolve_type_map(
+            bench_root, resolve_inputs, image=image, resolve=resolve,
+            resolver=resolver, include_dirs=[shim_dir, src_dir],
+            probe_headers=probe_spec)
+        probe_verdicts = getattr(probe_facts, "header_probe", None) or {}
+        if getattr(probe_facts, "status", "") == ctypes_clang.TOOL_FAILED:
+            # The adapter could not be used to compile the proposed headers: no
+            # header may be emitted on an unverified guess. Surface the tool fault
+            # through the same run-level path the fact resolution uses.
+            out.types["status"] = ctypes_clang.TOOL_FAILED
+            out.types["message"] = getattr(probe_facts, "message", "")
+    for symbol in sorted(bodies):
+        key = header_for[symbol]
+        verdict = probe_verdicts.get(key)
+        if not getattr(verdict, "ok", False):
+            diagnostic = str(getattr(verdict, "diagnostic", "") or "").strip()
+            if diagnostic:
+                detail = f"clang: {diagnostic}"
+            elif key in probe_verdicts:
+                detail = "clang reported an error in the selected build context"
+            else:
+                detail = ("the selected C build context could not be re-resolved by "
+                          "libclang to compile it")
+            refused_mocks[symbol] = (
+                f"mocked symbol {symbol!r}'s interface header does not compile in "
+                f"the selected build context ({detail}); its scenarios are not "
+                "executed")
+            continue
+        header_name = header_for[symbol]
+        (iface_dir / header_name).write_text(bodies[symbol], encoding="utf-8")
         out.files[f"{INTERFACE_DIRNAME}/{header_name}"] = "interface"
         out.mocks.append(symbol)
         interfaces[symbol] = header_name
@@ -1593,91 +1612,6 @@ def _llm_field_aliases(raw: str) -> dict[str, str]:
     if not raw:
         return {}
     return cscan.typedef_statement_map(raw)
-
-
-def _undefined_type_token(spelling: str, known: set[str]) -> str:
-    """The first token in a **type** *spelling* that nothing defines, or ``""``.
-
-    The acceptance rule shared by :func:`_undefined_type_in_decl` for both the
-    prototype's own type spellings and the base of a field-carried ``typedef``: a
-    C type word/qualifier/keyword, a ``<stdint.h>`` scalar, or a *known* alias
-    (clang-resolved or field-carried). A ``struct``/``union``/``enum`` tag is
-    skipped: it names an aggregate by identity, not an alias needing a definition.
-    """
-    skip_tag = False
-    for token in re.findall(r"[A-Za-z_]\w*", spelling or ""):
-        if skip_tag:
-            skip_tag = False  # the token after struct/union/enum is a tag
-            continue
-        if token in ("struct", "union", "enum"):
-            skip_tag = True
-            continue
-        if token in _C_TYPE_WORDS or _STDINT_TYPE_RE.match(token):
-            continue
-        if token in known:
-            continue
-        return token
-    return ""
-
-
-def _field_statement_base_undefined(statement: str, known: set[str]) -> str:
-    """The undefined base type a brace/paren-free ``typedef`` statement names.
-
-    A field-carried statement can itself rest on an undefined type
-    (``typedef P *Q;`` with ``P`` defined nowhere), so carrying it verbatim would
-    emit uncompilable C just like a bare undefined prototype. Only the simplest,
-    unambiguous shape is checked — identifiers and ``*`` — so a struct body,
-    array or function declarator (which this lexical helper must not second-guess)
-    is left alone; conservatism means a missed residual is a lesser fault than a
-    false refusal.
-    """
-    text = statement.strip()
-    if not text.startswith("typedef") or any(c in text for c in "{}()[]"):
-        return ""
-    tokens = re.findall(r"[A-Za-z_]\w*", text[len("typedef"):])
-    if len(tokens) < 2:
-        return ""
-    # The trailing identifier is the alias being defined; only the base precedes it.
-    return _undefined_type_token(" ".join(tokens[:-1]), known)
-
-
-def _undefined_type_in_decl(decl: str, alias_facts: dict[str, Any],
-                            field_aliases: dict[str, str] | None = None) -> str:
-    """The first token in *decl* (or its carried aliases) with no definition, or ``""``.
-
-    A lexical, **conservative** guard for the LLM-fallback branch (I1/AP-06). The
-    plan's model-supplied declaration may name a type the emitted interface header
-    never defines — an alias with neither a companion ``typedef`` in the same field
-    nor a definition in the selected build context (``int dep_write(Q q);``). The
-    header would then be uncompilable while every scenario still ran — a false
-    success behind empty limitations. This names that type so the caller records a
-    precise per-symbol limitation instead of emitting the body-less declaration.
-
-    It walks only the **type** spellings — the return type and each parameter's
-    base, with parameter *names* already stripped by :func:`split_declaration` — so
-    a parameter called ``channel`` is never mistaken for a type. It also checks the
-    base of each field-carried ``typedef`` (``typedef P *Q;`` with ``P`` undefined
-    is the same defect one level down). A token is accepted when it is a C type
-    word/qualifier/keyword, a ``<stdint.h>`` scalar (the interface header always
-    ``#include``s ``<stdint.h>``), a clang-resolved alias, or a ``typedef`` the
-    plan's own field carries. Only the residue is reported; anything the generator
-    cannot parse is left to the existing "no usable declaration" refusal, so this
-    never invents a refusal. Lexical text only; it makes no type claim.
-    """
-    split = split_declaration(decl)
-    if split is None:
-        return ""
-    ret, params = split
-    known = set(alias_facts or {}) | set(field_aliases or {})
-    for spelling in [ret, *[p.type for p in params]]:
-        undefined = _undefined_type_token(spelling, known)
-        if undefined:
-            return undefined
-    for statement in (field_aliases or {}).values():
-        undefined = _field_statement_base_undefined(statement, known)
-        if undefined:
-            return undefined
-    return ""
 
 
 def _authoritative_declaration(

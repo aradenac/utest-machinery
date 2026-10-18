@@ -139,14 +139,49 @@ def host_double_include_unsafe(files, include_dirs) -> dict:
     return unsafe
 
 
+def host_header_probe(spec, include_dirs) -> dict:
+    """The **real host compiler**'s verdict on each proposed header body.
+
+    Mirrors the adapter driver's ``header_probe`` with gcc: each body is written to
+    a scratch file and compiled ``-fsyntax-only`` with the same ``-I`` include
+    dirs, so a body naming a type nothing defines (or whose ``#include``s do not
+    resolve) is reported as an error. Returns the driver's ``{name: {"ok",
+    "diagnostic"}}`` shape. A missing compiler yields an empty map, which only
+    weakens the offline contrast, never the docker-tier proof.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    gcc = shutil.which("gcc") or shutil.which("cc")
+    if gcc is None:
+        return {}
+    incs = [str(Path(d)) for d in include_dirs]
+    probe: dict = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, text in (spec or {}).items():
+            path = Path(tmp) / Path(name).name
+            path.write_text(str(text))
+            proc = subprocess.run(
+                [gcc, "-xc", "-std=c99", "-Wall",
+                 *[f"-I{i}" for i in incs], "-I", str(path.parent),
+                 "-fsyntax-only", str(path)],
+                capture_output=True, text=True)
+            out = ((proc.stderr or "") + (proc.stdout or "")).strip()
+            first = out.splitlines()[0] if out else ""
+            probe[str(name)] = {"ok": proc.returncode == 0, "diagnostic": first}
+    return probe
+
+
 def fake_resolve(paths, *, bench_root=None, include_dirs=(), defines=(), args=(),
-                 image=None, user=None, timeout=300, resolver=None):
+                 image=None, user=None, timeout=300, resolver=None,
+                 probe_headers=None):
     """An offline clang-adapter stub shared by the generate/qualify/runner tests.
 
-    Charts the input aliases into the adapter's ``CTypeResolution`` shape and asks
-    the **real host compiler** whether each header may be included twice in one TU,
-    so the generator's clang-driven, compiler-gated path is exercised without
-    Docker. It never guesses a type — a *test double*, not the authority.
+    Charts the input aliases into the adapter's ``CTypeResolution`` shape, asks the
+    **real host compiler** whether each header may be included twice in one TU, and
+    compiles each proposed interface header (``probe_headers``) the same way, so the
+    generator's clang-driven, compiler-gated path is exercised without Docker. It
+    never guesses a type — a *test double*, not the authority.
     """
     from mtm import ctypes_clang
     from mtm.cscan import typedef_statement_map
@@ -168,7 +203,11 @@ def fake_resolve(paths, *, bench_root=None, include_dirs=(), defines=(), args=()
             aliases[alias] = ctypes_clang.AliasFact(
                 name=alias, file=path.name, line=1, base=base, depth=depth,
                 record=record, inline_body=inline, opaque=opaque)
+    probes = {name: ctypes_clang.HeaderProbe(ok=bool(v.get("ok")),
+                                             diagnostic=str(v.get("diagnostic", "")))
+              for name, v in host_header_probe(probe_headers, include_dirs).items()}
     return ctypes_clang.CTypeResolution(
         status="RESOLVED", clang_version="test-double", functions=[],
         aliases=aliases,
-        double_include_unsafe=host_double_include_unsafe(files, include_dirs))
+        double_include_unsafe=host_double_include_unsafe(files, include_dirs),
+        header_probe=probes)

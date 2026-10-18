@@ -3014,14 +3014,16 @@ def test_an_llm_prototype_naming_an_undefined_type_is_a_named_limitation(tmp_pat
     ``8a640be``, it emitted ``int dep_write(Q q);`` with ``Q`` undefined and ran the
     scenario behind ``limitations: []`` — uncompilable C as a false success. The
     declaration must be refused with a precise per-symbol limitation naming the
-    undefined type; no test function and no body-less interface header.
+    symbol (and the compiler diagnostic naming the undefined type); no test function
+    and no body-less interface header. The gate is the **compiler** (AP-08), not a
+    lexical guard.
     """
     bench, out = _llm_fallback_bench(
         tmp_path, "tc2-bare-undefined",
         "int dep_write(Q q);")
     assert out.test_functions == [], out.test_functions
-    assert any("undefined type 'Q'" in lim and "dep_write" in lim
-               for lim in out.limitations), out.limitations
+    assert any("dep_write" in lim and "interface header does not compile" in lim
+               and "Q" in lim for lim in out.limitations), out.limitations
     # Nothing dangling: no interface header was emitted for the refused mock.
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").exists()
 
@@ -3067,26 +3069,28 @@ def test_a_struct_or_enum_tag_in_an_llm_prototype_is_not_an_undefined_type(tmp_p
 
 def test_an_undefined_alias_in_an_llm_return_type_is_also_refused(tmp_path):
     """Neighboring shape: the undefined type may be the **return** type, not a
-    parameter. The guard must cover both spellings, or the same uncompilable-C
+    parameter. The compiler gate covers both spellings, or the same uncompilable-C
     false success returns through the return position."""
     bench, out = _llm_fallback_bench(
         tmp_path, "tc2-undefined-return",
         "Q dep_write(int a);")
     assert out.test_functions == [], out.test_functions
-    assert any("undefined type 'Q'" in lim for lim in out.limitations), out.limitations
+    assert any("interface header does not compile" in lim and "Q" in lim
+               for lim in out.limitations), out.limitations
 
 
 def test_a_field_typedef_resting_on_an_undefined_base_is_refused(tmp_path):
     """Same class one level down: the field's own companion ``typedef`` may rest on
     a type nothing defines (``typedef P *Q;`` with ``P`` undefined), so carrying it
     verbatim would emit ``typedef P *Q;`` — uncompilable C — behind empty
-    limitations. The guard must follow the field statements, not just the
-    prototype's own spellings."""
+    limitations. The compiler gate sees the whole proposed header (field statements
+    included), not just the prototype's own spellings."""
     bench, out = _llm_fallback_bench(
         tmp_path, "tc2-field-base-undefined",
         "typedef P *Q;\nint dep_write(Q q);")
     assert out.test_functions == [], out.test_functions
-    assert any("undefined type 'P'" in lim for lim in out.limitations), out.limitations
+    assert any("interface header does not compile" in lim and "P" in lim
+               for lim in out.limitations), out.limitations
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").exists()
 
 
@@ -3113,6 +3117,172 @@ def test_a_field_typedef_with_a_defined_chain_is_still_carried(tmp_path):
              "-c", str(tu), "-o", str(comp / "tu.o")],
             capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
+
+
+# --- AP-08: the compiler gates every emitted interface header (lot F) ---------
+#
+# The retired lexical guard `_undefined_type_in_decl` leaked four times (TC-2, V2,
+# a nested-array typedef, V3) because it re-derived C semantics from text. The
+# gate is now the compiler: every proposed header body rides ONE batched
+# `probe_headers` request on the same resolution call, and is written only when
+# clang (offline: gcc, via the test double) says it compiles in the selected
+# context. These tests fix the V3 reproduction, its same-class neighbours, and the
+# discriminating positive control against over-refusal.
+
+
+def test_v3_an_alias_resting_on_a_selected_but_incomplete_typedef_is_refused(tmp_path):
+    """V3 (MANDATORY, the leak that motivated lot F): the selected header defines
+    ``typedef unsigned short Q;`` but the plan's field adds ``typedef Q Q2;`` and
+    uses ``Q2``. The retired lexical guard saw the field-carried statement's base
+    ``Q`` as known (it *is* a selected alias) and admitted the header; the emitted
+    ``typedef Q Q2;`` then failed gcc with ``unknown type name 'Q'`` behind
+    ``limitations: []`` — uncompilable C as a false success. The compiler gate must
+    refuse it with a precise per-symbol limitation and emit no body-less header."""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "v3-incomplete-typedef",
+        "typedef Q Q2;\nint dep_write(Q2 q);",
+        header_extra="typedef unsigned short Q;\n")
+    assert out.test_functions == [], out.test_functions
+    assert any("dep_write" in lim and "interface header does not compile" in lim
+               for lim in out.limitations), out.limitations
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").exists()
+
+
+def _generated_header_compiles(bench: Path, tmp_path: Path, name: str) -> bool:
+    """Compile the interface header (then the unit header, the test's order)."""
+    import shutil
+    import subprocess
+    if not shutil.which("gcc"):
+        return True
+    comp = tmp_path / f"compile-{name}"
+    comp.mkdir()
+    tu = comp / "tu.c"
+    tu.write_text(f'#include "mtm_dep_{name}.h"\n#include "foo.h"\n'
+                  "int main(void) { return 0; }\n")
+    proc = subprocess.run(
+        ["gcc", "-std=c99", "-Wall", "-Werror",
+         "-I", str(bench / ".mtm" / "gen" / "src"),
+         "-I", str(bench / ".mtm" / "gen" / "interface"),
+         "-c", str(tu), "-o", str(comp / "tu.o")],
+        capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+@pytest.mark.parametrize("field", [
+    "typedef struct { Undef u; } S;\nint dep_write(S s);",   # nested-record typedef
+    "typedef Undef Arr[4];\nint dep_write(Arr a);",          # array typedef
+    "int dep_write(Undef u);",                               # bare alias (V2 shape)
+])
+def test_lot_f_neighbours_of_the_v3_class_are_refused_or_compile(tmp_path, field):
+    """Same-class neighbours (MANDATORY): a nested ``typedef struct { Undef u; }``,
+    an array typedef ``typedef Undef Arr[4];`` and a bare undefined alias (the V2
+    shape) must each yield a **compiling header** or a **named limitation** —
+    never a body-less header beside ``limitations: []``. The compiler gate covers
+    all four shapes the lexical guard leaked on."""
+    bench, out = _llm_fallback_bench(tmp_path, f"neighbour-{abs(hash(field))}", field)
+    hdr = bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h"
+    if out.test_functions:
+        assert hdr.exists() and _generated_header_compiles(bench, tmp_path, "dep_write"), \
+            (out.limitations, hdr.read_text() if hdr.exists() else "")
+    else:
+        assert any("interface header does not compile" in lim and "dep_write" in lim
+                   for lim in out.limitations), out.limitations
+        assert not hdr.exists()
+
+
+def test_lot_f_positive_control_a_selected_alias_is_admitted_and_compiles(tmp_path):
+    """Discriminating POSITIVE control (MANDATORY, guard against over-refusal): a
+    legitimate declaration whose alias IS defined by a selected header must still be
+    admitted and its header compile. ``typedef unsigned short Q;`` in ``foo.h`` plus
+    an LLM prototype ``int dep_write(Q q);`` is resolvable — refusing it would shrink
+    the verified domain. The probe must pass a good header, not just fail bad ones."""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "lotf-positive",
+        "int dep_write(Q q);",
+        header_extra="typedef unsigned short Q;\n")
+    assert out.test_functions, out.limitations
+    hdr = bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h"
+    assert hdr.exists()
+    assert '#include "foo.h"' in hdr.read_text()
+    assert _generated_header_compiles(bench, tmp_path, "dep_write")
+
+
+def test_lot_f_probes_all_proposed_headers_in_one_batched_request(tmp_path):
+    """AP-08 / efficiency: the compiler verdict rides the **same** resolution call —
+    ONE ``probe_headers`` request carrying every proposed body, not one docker
+    invocation per symbol."""
+    import yaml
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    seen: list = []
+
+    def recording(paths, **kwargs):
+        seen.append(dict(kwargs.get("probe_headers") or {}))
+        return _fake_resolve(paths, **kwargs)
+
+    bench = tmp_path / "lotf-batched"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        "int use(int a) { dep_write(0); dep_other(0); return a ? 1 : 2; }\n")
+    (bench / "foo.h").write_text("#ifndef FOO_H\n#define FOO_H\nint use(int a);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **FOO-001**: `use` returns 1.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(
+        bench, yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", []))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_write", "dep_other"],
+        "mock_declarations": {"dep_write": "int dep_write(int a);",
+                              "dep_other": "int dep_other(int b);"},
+        "cases": [{"args": [5], "expected": 1,
+                   "mocks": {"dep_write": {"ret": 0}, "dep_other": {"ret": 0}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, resolve=recording)
+    assert out.test_functions, out.limitations
+    # Exactly one call carried a batched probe, and it proposed BOTH headers.
+    probe_calls = [p for p in seen if p]
+    assert len(probe_calls) == 1, seen
+    assert len(probe_calls[0]) == 2, probe_calls[0]
+    assert {Path(name).name for name in probe_calls[0]} == {
+        "mtm_dep_dep_write.h", "mtm_dep_dep_other.h"}, probe_calls[0]
+
+
+def test_lot_f_a_tool_fault_while_compiling_a_proposed_header_is_a_run_level_fault(
+        fixture_bench):
+    """I4 preserved: if the adapter that compiles the proposed headers is itself
+    broken, that is the existing run-level ``TOOL_FAILURE`` (exit 30) — the probe
+    adds no second fault path, and no header is emitted on an unverified guess."""
+    from mtm import ctypes_clang
+    from mtm.generate import run_generate
+    from mtm.llm import MockProvider
+
+    def broken(paths, **kwargs):
+        # The resolve call itself is fine, but the probe request fails as a tool
+        # fault — the adapter cannot be used to compile the headers.
+        if kwargs.get("probe_headers"):
+            return ctypes_clang.CTypeResolution(
+                status=ctypes_clang.TOOL_FAILED,
+                message="libclang could not be used: ModuleNotFoundError: clang")
+        return ctypes_clang.CTypeResolution(status=ctypes_clang.RESOLVED,
+                                            clang_version="test-double")
+
+    bench = fixture_bench("mocked-sensor")
+
+    def runner(*a, **k):
+        raise AssertionError("the suite must not be executed on a resolver fault")
+
+    result = run_generate(bench, _scopes(bench), provider=MockProvider(),
+                          image="img:test", runner=runner, resolve=broken)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+    assert result.smoke["ran"] is False
+    assert result.findings == []  # never a SUT defect
 
 
 # --- AP-08 / IMP-18: a real declaration is authoritative over an LLM proposal --

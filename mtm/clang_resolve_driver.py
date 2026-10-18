@@ -20,6 +20,12 @@ Only an incomplete **build context** (a missing header/define/include root)
 makes resolution impossible, reported as a ``MISSING_CONTEXT`` issue the host
 adapter maps to ``BLOCKED``.
 
+Two compiler-as-authority probes ride the same invocation: ``double_include_unsafe``
+(which input headers cannot be ``#include``-d twice in one TU) and
+``header_probe`` (``probe_headers``: each *proposed* private interface header,
+compiled unsaved under the same flags). Neither is a bespoke parser: the real
+clang answers, and only an ``Error``/``Fatal`` diagnostic makes a probe fail.
+
 Importing this module on the host must not fail (only ``main`` touches libclang),
 so that the package stays importable where clang is absent.
 """
@@ -310,6 +316,14 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
     # statement (or a named limitation) instead of emitting uncompilable C.
     double_include_bad = _double_include_unsafe(index, spec, args, root, messages)
 
+    # Generated-header compilability (I1/AP-06, AP-08): a *proposed* private
+    # interface header must be compilable in the selected build context, so let
+    # clang compile it, unsaved, under the same `-I`/`-D` flags — the same
+    # compiler-is-the-authority idiom as the double-include probe above. The
+    # header is emitted *inside* the resolution root so its own `#include "..."`
+    # lines resolve through the same include paths.
+    header_probe = _probe_headers(index, spec, args, root, messages)
+
     version = _libclang_version(clang)
 
     return {
@@ -318,9 +332,43 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
         "functions": functions,
         "aliases": aliases,
         "double_include_unsafe": double_include_bad,
+        "header_probe": header_probe,
         "issues": issues,
         "diagnostics": messages,
     }
+
+
+def _probe_headers(index: Any, spec: dict[str, Any], args: list[str],
+                   root: str, messages: list[str]) -> dict[str, dict[str, Any]]:
+    """Compile each proposed header text in the selected context: ``ok`` or not.
+
+    ``spec["probe_headers"]`` maps a filename to the full header *text* a caller
+    proposes to emit. Each is parsed as an **unsaved** file placed under *root*,
+    with the request's own ``args`` (the resolved include dirs/defines), so a body
+    that names a type nothing in the selected build context defines — or whose
+    ``#include``s cannot be resolved — is reported as an ``Error``/``Fatal``
+    diagnostic by the real compiler instead of being silently emitted as
+    uncompilable C. Only ``Error``/``Fatal`` fails the probe: the profiles compile
+    ``-Wall -Wextra`` without ``-Werror``, so a warning (an incomplete tag in a
+    parameter list) still compiles. Batched: one parse per requested header, in the
+    caller's single driver invocation.
+    """
+    probe: dict[str, dict[str, Any]] = {}
+    for name, text in (spec.get("probe_headers") or {}).items():
+        rel = _relpath(str(name), root)
+        path = root.rstrip("/") + "/" + rel.lstrip("/")
+        try:
+            tu = index.parse(path, args=list(args), unsaved_files=[(path, str(text))])
+        except Exception as exc:  # noqa: BLE001 - a probe failure is not a fact about the text
+            probe[str(name)] = {"ok": False,
+                                "diagnostic": f"could not parse the header: {exc}"}
+            continue
+        bad = [f"{d.location.line}:{d.location.column}: {d.spelling}"
+               for d in tu.diagnostics
+               if _severity_name(d.severity) in ("Error", "Fatal")]
+        probe[str(name)] = {"ok": not bad, "diagnostic": bad[0] if bad else ""}
+        messages.extend(f"{path}: Error: {text}" for text in bad)
+    return probe
 
 
 def _double_include_unsafe(index: Any, spec: dict[str, Any], args: list[str],
