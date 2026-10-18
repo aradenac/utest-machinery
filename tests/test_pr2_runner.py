@@ -1429,6 +1429,12 @@ def test_compatible_qualifiers_and_storage_class_are_never_falsely_refused(tmp_p
     assert _signature_key("int sensor_read(int x)") == \
         _signature_key("extern int sensor_read(int x);")
     assert _signature_key("int foo_a(int *p)") == _signature_key("int foo_a(int * p)")
+    # A qualifier on a POINTER parameter is part of the type (`char *` and
+    # `const char *` differ; gcc reports "conflicting types"), so it must stay a
+    # conflict — dropping it reopened the E2 opaque-build class (found by the
+    # convergence-guardian).
+    assert _signature_key("int foo_a(char *p)") != \
+        _signature_key("int foo_a(const char *p)")
     # Still refused: a real type difference.
     assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int *x)")
     assert _signature_key("int foo_a(int x)") != _signature_key("int foo_a(int x, int y)")
@@ -1516,6 +1522,11 @@ def test_an_array_or_function_pointer_parameter_is_refused_not_misrendered(tmp_p
     assert _unsupported_param_shape(func_params("int foo_a(int (*cb)(int))"))
     # A plain pointer parameter with a supplied pointed-to value stays supported.
     assert not _unsupported_param_shape(func_params("int foo_a(int *p)"))
+    # An UNNAMED parameter is legal C17 and renders fine — never refused (a false
+    # refusal of this form was found by the convergence-guardian).
+    for sig in ("int foo_a(int)", "int foo_a(char *)", "int foo_a(const char *)",
+                "int foo_a(uint8_t)", "int foo_a(void)"):
+        assert not _unsupported_param_shape(func_params(sig)), sig
 
     bench = tmp_path / "unsupported-array"
     bench.mkdir()
@@ -1569,3 +1580,37 @@ def test_real_image_builds_a_previously_refused_compatible_declaration(
     run = run_ceedling(bench, image_ref=product_image)
     assert run.ran, f"no Unity summary: {run.diagnostics[-2000:]}"
     assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1000:])
+
+
+def test_a_pointer_parameter_qualifier_conflict_is_refused(tmp_path):
+    """E2-residual contrast (found by the convergence-guardian): a qualifier on a
+    POINTER parameter is part of the type, so a header declaring `int f(char *p)`
+    against a source defining `int f(const char *p)` is a genuine conflict (gcc:
+    "conflicting types"). It must be refused with a limitation — normalising the
+    qualifier away admitted it and reopened the opaque-build class E2 removes."""
+    from mtm.gen import _signature_key, generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    assert _signature_key("int foo_a(char *p)") != \
+        _signature_key("int foo_a(const char *p)")
+
+    bench = tmp_path / "ptr-qualifier-conflict"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo_a(const char *p) { return p[0]; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(char *p);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+         "mocks": [], "cases": [{"args": ["x"], "expected": 1}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == [], out.test_functions
+    assert any("incompatible" in lim for lim in out.limitations), out.limitations
