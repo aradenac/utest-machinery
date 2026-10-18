@@ -73,6 +73,21 @@ def _run(ok: bool, returncode: int, *, stdout="", stderr="", timed_out=False,
     )
 
 
+def _generated_count(bench_root: Path) -> int:
+    """The number of test functions the generated revision would run.
+
+    A stub runner must report a realistic total: the classifier now requires the
+    executed count to cover the generated manifest, so a hard-coded 1 would mask
+    the very coverage check under test.
+    """
+    import re
+    revision = Path(bench_root) / ".mtm" / "gen" / "test"
+    total = 0
+    for path in sorted(revision.glob("test_*.c")):
+        total += len(re.findall(r"\nvoid (test_\w+)\(void\)", path.read_text()))
+    return total
+
+
 # --- B2: a tool fault is never a clean success or a defect -------------------
 
 
@@ -113,6 +128,54 @@ def test_signal_kill_with_no_summary_is_a_tool_failure(fixture_bench):
     assert "signal" in result.smoke["reason"].lower()
 
 
+def test_timeout_output_is_decoded_and_serialisable(fixture_bench, monkeypatch):
+    """C4: `subprocess.TimeoutExpired.stdout` is bytes even under `text=True`.
+    The runner must decode it, or the result cannot be published as JSON."""
+    import subprocess as sp
+    from mtm import ceedling
+
+    def fake_run(*a, **k):
+        raise sp.TimeoutExpired(cmd=a[0], timeout=1,
+                                output=b"...running test_abc...\n")  # bytes on purpose
+
+    monkeypatch.setattr(ceedling.subprocess, "run", fake_run)
+    run = ceedling.run_ceedling(Path("/tmp/bench"), image_ref="img:test")
+    assert run.timed_out is True
+    assert isinstance(run.stdout, str) and "running test_abc" in run.stdout
+    # The result must serialize (the old bytes payload raised TypeError).
+    from mtm.paths import write_json_atomic
+    import tempfile
+    target = Path(tempfile.mkdtemp()) / "smoke.json"
+    write_json_atomic(target, {"stdout": run.stdout, "stderr": run.stderr})
+
+
+def test_ceedling_mounts_the_bench_read_only_and_only_the_revision_writable(
+        fixture_bench, monkeypatch):
+    """C3: the container must not be able to write selected inputs. The bench is
+    mounted read-only with only the generated revision writable (SYS-004)."""
+    captured = {}
+    from mtm import ceedling
+
+    bench = fixture_bench("mocked-sensor")
+
+    def fake_run(argv, **k):
+        captured["argv"] = argv
+
+        class _P:
+            returncode = 0
+            stdout = "1 Tests 0 Failures 0 Ignored\n"
+            stderr = ""
+        return _P()
+
+    monkeypatch.setattr(ceedling.subprocess, "run", fake_run)
+    ceedling.run_ceedling(bench, image_ref="img:test")
+    argv = captured["argv"]
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+    bench_str = str(bench.resolve())
+    assert f"{bench_str}:/bench:ro" in mounts           # whole bench read-only
+    assert f"{bench_str}/.mtm/gen:/bench/.mtm/gen" in mounts  # only the revision RW
+
+
 def test_nonzero_exit_without_a_unity_summary_is_a_tool_failure(fixture_bench):
     bench = fixture_bench("mocked-sensor")
     result = _generate(bench, lambda *a, **k: _run(
@@ -134,11 +197,16 @@ def test_nonzero_exit_with_an_all_pass_summary_is_a_tool_failure(fixture_bench):
 def test_valid_asserted_failure_is_a_finding_not_a_tool_failure(fixture_bench):
     """Contrast: a parsed Unity FAIL with a summary is a real SDD contradiction."""
     bench = fixture_bench("saturation")
-    summary = ("test_saturation.c:12:test_u_abc_S1:FAIL: Expected 10 Was 9\n"
-               "-----------------------\n1 Tests 1 Failures 0 Ignored\nFAIL\n")
-    result = _generate(bench, lambda *a, **k: _run(
-        False, 1, stdout=summary, ran=True, total=1, passed=0, failed=1,
-        failures=[("test_u_abc_S1", "Expected 10 Was 9")]))
+
+    def runner(bench_root, *, image_ref):
+        total = _generated_count(bench_root)
+        summary = ("test_saturation.c:12:test_u_abc_S1:FAIL: Expected 10 Was 9\n"
+                   f"-----------------------\n{total} Tests 1 Failures 0 Ignored\nFAIL\n")
+        return _run(False, 1, stdout=summary, ran=True, total=total,
+                    passed=total - 1, failed=1,
+                    failures=[("test_u_abc_S1", "Expected 10 Was 9")])
+
+    result = _generate(bench, runner)
     assert result.status == "FINDINGS" and result.exit_code == 10
     assert result.findings and result.findings[0]["category"] == "IMPLEMENTATION_DEFECT"
     assert "Expected 10 Was 9" == result.findings[0]["observed"]
@@ -146,9 +214,13 @@ def test_valid_asserted_failure_is_a_finding_not_a_tool_failure(fixture_bench):
 
 def test_clean_pass_is_succeeded(fixture_bench):
     bench = fixture_bench("mocked-sensor")
-    summary = "-----------------------\n3 Tests 0 Failures 0 Ignored\nOK\n"
-    result = _generate(bench, lambda *a, **k: _run(
-        True, 0, stdout=summary, ran=True, total=3, passed=3, failed=0))
+
+    def runner(bench_root, *, image_ref):
+        total = _generated_count(bench_root)
+        summary = f"-----------------------\n{total} Tests 0 Failures 0 Ignored\nOK\n"
+        return _run(True, 0, stdout=summary, ran=True, total=total, passed=total, failed=0)
+
+    result = _generate(bench, runner)
     assert result.status == "SUCCEEDED" and result.exit_code == 0
 
 
@@ -157,10 +229,14 @@ def test_counted_failure_with_unparseable_detail_is_still_a_finding(fixture_benc
     Unity format), the run must not fall through to SUCCEEDED — a counted failure
     is a defect, recorded even without a per-test detail line."""
     bench = fixture_bench("saturation")
-    summary = "Something odd happened\n1 Tests 1 Failures 0 Ignored\nFAIL\n"
-    result = _generate(bench, lambda *a, **k: _run(
-        False, 1, stdout=summary, ran=True, total=1, passed=0, failed=1,
-        failures=[]))
+
+    def runner(bench_root, *, image_ref):
+        total = _generated_count(bench_root)
+        summary = f"Something odd happened\n{total} Tests 1 Failures 0 Ignored\nFAIL\n"
+        return _run(False, 1, stdout=summary, ran=True, total=total,
+                    passed=total - 1, failed=1, failures=[])
+
+    result = _generate(bench, runner)
     assert result.status == "FINDINGS" and result.exit_code == 10
     assert result.findings and "no failing test could be parsed" in result.findings[0]["observed"]
 
@@ -233,8 +309,9 @@ def test_blocked_unit_is_excluded_from_the_project_but_stays_in_denominator(
         revision = bench_root / ".mtm" / "gen"
         captured["srcs"] = sorted(p.name for p in (revision / "src").glob("*.c"))
         captured["shim"] = sorted(p.name for p in (revision / "shim").glob("*.h"))
-        summary = "-----------------------\n1 Tests 0 Failures 0 Ignored\nOK\n"
-        return _run(True, 0, stdout=summary, ran=True, total=1, passed=1, failed=0)
+        total = _generated_count(bench_root)
+        summary = f"-----------------------\n{total} Tests 0 Failures 0 Ignored\nOK\n"
+        return _run(True, 0, stdout=summary, ran=True, total=total, passed=total, failed=0)
 
     result = _generate(bench, runner)
     assert result.counts.get("BLOCKED", 0) >= 1
@@ -440,6 +517,124 @@ def test_a_declared_mock_without_a_per_case_expectation_is_refused(fixture_bench
         "args": [1], "expected": "SENSOR_OK", "expect_calls": {"platform_read_sensor": 0}}])])
     out = generate_suite(bench, plan, inventory)
     assert len(out.test_functions) == 1 and not out.limitations
+
+
+# --- PR #14 re-review findings C1–C5 ----------------------------------------
+
+
+def test_expect_calls_zero_with_a_configured_mock_emits_no_expectation(fixture_bench):
+    """C1: `expect_calls: 0` must mean *zero* calls, even when the case also
+    supplies `mocks` config for the symbol. The old truthy-only guard turned 0
+    into one expected call, so a forbidden dependency call could pass."""
+    from mtm.gen import generate_suite
+
+    bench = fixture_bench("mocked-sensor")
+
+    def src_for(case: dict) -> str:
+        scen = {"id": "S1", "title": "t", "function": "sample_sensor",
+                "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+                "cases": [case],
+                "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+        plan, inventory = _plan_for(bench, [scen])
+        generate_suite(bench, plan, inventory)
+        return (bench / ".mtm" / "gen" / "test" / "test_sensor.c").read_text()
+
+    zero = src_for({"args": [1], "expected": "SENSOR_OK",
+                    "mocks": {"platform_read_sensor": {"ret": 0}},
+                    "expect_calls": {"platform_read_sensor": 0}})
+    assert "platform_read_sensor_ExpectAnyArgsAndReturn(" not in zero
+    assert "platform_read_sensor_ExpectAnyArgs(" not in zero
+    # Contrast: an explicit positive count emits exactly that many expectations.
+    two = src_for({"args": [1], "expected": "SENSOR_OK",
+                   "mocks": {"platform_read_sensor": {"ret": 0}},
+                   "expect_calls": {"platform_read_sensor": 2}})
+    assert two.count("platform_read_sensor_ExpectAnyArgsAndReturn(") == 2
+
+
+def test_expect_calls_for_an_unmocked_symbol_is_refused(fixture_bench):
+    """C1: a call-count planned for a symbol the scenario does not mock would be
+    silently dropped (no expectation emitted). It is refused instead."""
+    from mtm.gen import generate_suite
+
+    bench = fixture_bench("mocked-sensor")
+    scen = {"id": "S1", "title": "t", "function": "sample_sensor",
+            "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+            "cases": [{"args": [1], "expected": "SENSOR_OK",
+                       "mocks": {"platform_read_sensor": {"ret": 0}},
+                       "expect_calls": {"not_a_mock": 3}}],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan, inventory = _plan_for(bench, [scen])
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("not_a_mock" in lim for lim in out.limitations)
+
+
+def test_a_scenario_with_no_cases_is_refused_not_a_vacuous_pass(fixture_bench):
+    """C2: a scenario with `cases: []` would emit an empty test function Unity
+    counts as a pass ("1 Tests 0 Failures") without exercising any C."""
+    from mtm.gen import generate_suite
+
+    bench = fixture_bench("saturation")
+    scen = {"id": "S1", "title": "t", "function": "saturate_u16",
+            "requirement_ids": ["SAT-002"], "mocks": [], "cases": [],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan, inventory = _plan_for(bench, [scen])
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("no cases" in lim for lim in out.limitations)
+
+
+def test_fewer_executed_tests_than_generated_is_a_tool_failure(fixture_bench):
+    """C2: the generated manifest is the authority on how many tests must run. A
+    summary covering fewer tests than were generated is an incomplete execution,
+    never a clean SUCCEEDED."""
+    bench = fixture_bench("mocked-sensor")  # generates 3 tests
+
+    def runner(bench_root, *, image_ref):
+        # Report only one of the three generated tests as executed.
+        return _run(True, 0, stdout="-----------------------\n1 Tests 0 Failures 0 Ignored\nOK\n",
+                    ran=True, total=1, passed=1, failed=0)
+
+    result = _generate(bench, runner)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+    assert result.findings == []
+
+
+def test_a_unit_without_a_selected_header_gets_a_private_declaration(fixture_bench,
+                                                                    tmp_path):
+    """C5: a standalone `foo.c` with no `foo.h` must not include a fabricated
+    header. A private declaration header, grounded in the scanner's prototypes,
+    is materialised under the interface directory instead."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "headerless"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int foo_add(int a, int b) { return a + b; }\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo_add` SHALL return the sum of its arguments.\n")
+    run_mtm_json("init", str(bench))
+    run_mtm_json("scope", "add", "foo.c", "--kind", "source", cwd=bench)
+    run_mtm_json("scope", "add", "sdd.md", "--kind", "spec", cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [{
+        "id": "S1", "title": "t", "function": "foo_add",
+        "requirement_ids": ["FOO-001"], "mocks": [],
+        "cases": [{"args": [2, 3], "expected": 5}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert len(out.test_functions) == 1
+    # A private declaration header exists and is included; no fabricated foo.h.
+    private = bench / ".mtm" / "gen" / "interface" / "mtm_unit_foo.h"
+    assert private.is_file()
+    assert "int foo_add(int a, int b);" in private.read_text()
+    assert 'mtm_unit_foo.h' in (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert not (bench / ".mtm" / "gen" / "src" / "foo.h").exists()
+
 
 
 def test_finding_maps_back_to_its_oracle_for_ids_with_dashes_and_underscores():

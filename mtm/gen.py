@@ -134,15 +134,16 @@ def return_is_void(signature: str) -> bool:
 def _unit_header(unit) -> str:
     """The header a test file should include for *unit*.
 
-    Prefers a selected header with the same stem (``foo.c`` -> ``foo.h``) so the
-    test links against the compiled translation unit; otherwise falls back to the
-    source path so a headerless fixture still builds.
+    Prefers a selected header with the same stem (``foo.c`` -> ``foo.h``); else a
+    local ``.h`` the source already includes. Returns ``""`` when neither exists,
+    so the caller can synthesise a private declaration instead of fabricating a
+    header name that would make Ceedling fail as an opaque build error.
     """
     for inc in getattr(unit, "includes_local", []) or []:
         if inc.endswith(".h"):
             return inc
     stem = Path(unit.path).stem
-    return f"{stem}.h" if stem else Path(unit.path).name
+    return f"{stem}.h" if stem else ""
 
 
 # --- declarations -----------------------------------------------------------
@@ -266,6 +267,13 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
                 return (f"the case declares the mock {symbol!r} but sets no expectation "
                         f"for it; give `mocks`/`expect_calls` for {symbol!r} (use "
                         "`expect_calls: 0` to assert it is not called)")
+    # An `expect_calls` entry naming a symbol the scenario does not mock would be
+    # silently ignored (no expectation emitted), so a planned call-count is
+    # dropped without a trace. Refuse it — the count would otherwise be unproven.
+    for symbol in (case.expect_calls or {}):
+        if symbol not in controls:
+            return (f"`expect_calls` names {symbol!r}, which the scenario does not "
+                    "mock; list it in `mocks` or remove the entry")
     for symbol, config in (case.mocks or {}).items():
         control = controls.get(symbol)
         if control is None:
@@ -492,8 +500,17 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         unit = units.get(unit_id)
         if unit is None or unit_id in excluded:
             continue
+        # Resolve the header the test includes against what was actually copied.
+        # A fabricated name (e.g. `foo.h` for a standalone `foo.c` with no such
+        # header selected) would make Ceedling fail as an opaque build error; a
+        # private declaration header, grounded in the scanner's own prototypes for
+        # this unit, is materialised instead.
+        unit_header = _unit_header(unit)
+        if unit_header not in copied and unit_header not in interfaces.values():
+            unit_header = _synthesise_unit_header(unit, scenarios, iface_dir, out)
         code, names, skipped = _emit_test_file(
-            unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates)
+            unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates,
+            unit_header=unit_header)
         path = test_dir / f"test_{Path(unit.path).stem}.c"
         path.write_text(code, encoding="utf-8")
         out.files[f"{TEST_DIRNAME}/{path.name}"] = "test"
@@ -510,6 +527,33 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
 
 def _ident(symbol: str) -> str:
     return re.sub(r"\W", "_", symbol)
+
+
+def _synthesise_unit_header(unit, scenarios: list[Scenario], iface_dir: Path,
+                            out: "Generated") -> str:
+    """Materialise a private declaration header for a unit with no selected header.
+
+    A test must include *something* that declares the functions under test. When
+    the unit has no `.h` (a standalone ``foo.c``), the declarations are taken from
+    the deterministic scanner's own prototypes for that unit — never invented —
+    and written under the private interface directory (never into the source
+    directory or the inputs). Returns the include name.
+    """
+    wanted = {sc.function for sc in scenarios}
+    decls = [f"{fn['signature']};" for fn in getattr(unit, "functions", []) or []
+             if fn.get("name") in wanted and fn.get("signature")]
+    header_name = f"mtm_unit_{Path(unit.path).stem}.h"
+    guard = f"MTM_UNIT_{_ident(Path(unit.path).stem).upper()}_H"
+    body = (
+        f"/* Private declarations for {unit.path} — no selected header exists, so\n"
+        " * the prototypes are taken verbatim from the input scanner (never\n"
+        " * invented). This header is NEVER written into the source directory. */\n"
+        f"#ifndef {guard}\n#define {guard}\n#include <stdint.h>\n\n"
+        + "\n".join(decls) + f"\n\n#endif /* {guard} */\n"
+    )
+    (iface_dir / header_name).write_text(body, encoding="utf-8")
+    out.files[f"{INTERFACE_DIRNAME}/{header_name}"] = "interface"
+    return header_name
 
 
 def test_name_for(unit_id: str, scenario_id: str) -> str:
@@ -608,7 +652,10 @@ def _emit_mock_setup(symbol: str, config: dict[str, Any], control: dict[str, Any
     count = 1
     if determined:
         raw = config.get("_calls")
-        count = int(raw) if isinstance(raw, int) and raw > 0 else 1
+        # Preserve an explicit zero: `expect_calls: 0` must emit NO expectation so
+        # CMock's strictness makes any real call fail. A truthy-only guard would
+        # silently turn 0 into one expected call and accept a forbidden call.
+        count = raw if isinstance(raw, int) and raw >= 0 else 1
 
     def emit_one_expectation() -> None:
         if determined:
@@ -638,8 +685,9 @@ def _emit_mock_setup(symbol: str, config: dict[str, Any], control: dict[str, Any
 def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                     interfaces: dict[str, str], declarations: dict[str, str],
                     shim_names: list[str] | None = None,
-                    aggregates: set[str] | None = None) -> tuple[str, list[str], list[str]]:
-    unit_header = _unit_header(unit)
+                    aggregates: set[str] | None = None,
+                    unit_header: str | None = None) -> tuple[str, list[str], list[str]]:
+    unit_header = unit_header if unit_header is not None else _unit_header(unit)
     lines: list[str] = [
         f"/* Generated Unity tests for {unit.path} — materialised from the plan. */",
         '#include "unity.h"',
@@ -664,6 +712,14 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
         test_name = test_name_for(scenario.unit_id, scenario.id)
         controls: dict[str, dict[str, Any]] = {}
         problem: str | None = None
+        # A scenario with no cases would emit an empty test function that Unity
+        # counts as a pass ("1 Tests 0 Failures") without exercising any C — a
+        # vacuous SUCCEEDED. Refuse it as a limitation instead.
+        if not scenario.cases:
+            skipped.append(
+                f"scenario {scenario.id} of {fn} not generated: it declares no cases, "
+                "so it would exercise no C behaviour")
+            continue
         for symbol in scenario.mocks:
             control = mock_controls(declarations.get(symbol, ""), symbol, aggregates)
             if control is None:

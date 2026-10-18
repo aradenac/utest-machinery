@@ -240,6 +240,18 @@ def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
         smoke["diagnostics"] = run.diagnostics[-4000:]
         return smoke
 
+    # The generated manifest is the authority on how many tests must run. If Unity
+    # executed fewer, a partial execution (a skipped binary, an ignored test) would
+    # otherwise be presented as complete coverage of the plan.
+    expected = len(generated.test_functions)
+    smoke["expected_tests"] = expected
+    if run.total < expected:
+        smoke["ran"] = False
+        smoke["reason"] = (f"only {run.total} of the {expected} generated test(s) "
+                           "executed; the run does not cover the plan")
+        smoke["diagnostics"] = run.diagnostics[-4000:]
+        return smoke
+
     smoke["findings"] = _findings(run, plan)
     if run.failed and not smoke["findings"]:
         # The summary counted failures but no ``:FAIL`` line could be parsed (an

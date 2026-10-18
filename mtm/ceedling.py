@@ -101,35 +101,64 @@ def run_ceedling(
     user: str | None = None,
     timeout: int = 300,
 ) -> CeedlingRun:
-    """Run ``ceedling test:all`` on the bench's generated project in the image."""
+    """Run ``ceedling test:all`` on the bench's generated project in the image.
+
+    The bench is mounted **read-only** and only the generated revision directory
+    is writable: Ceedling reads the copied sources under ``.mtm/gen`` and writes
+    its build output there, but the selected inputs elsewhere in the bench stay
+    unreachable for writing (SYS-004). This mirrors the Dagu path's separation
+    (``engine.py``: ``/bench:ro`` plus a writable ``/bench/.mtm``).
+    """
+    bench = Path(bench_root).resolve()
+    revision = REVISION_DIRNAME.as_posix()
     argv = ["docker", "run", "--rm", "--user", user or _invoking_user() or "0:0",
             "--entrypoint", "ceedling",
             "-e", f"HOME={CONTAINER_HOME}",
-            "-v", f"{Path(bench_root).resolve()}:{CONTAINER_BENCH}",
-            "-w", f"{CONTAINER_BENCH}/{REVISION_DIRNAME.as_posix()}",
+            "-v", f"{bench}:{CONTAINER_BENCH}:ro",
+            "-v", f"{bench / REVISION_DIRNAME}:{CONTAINER_BENCH}/{revision}",
+            "-w", f"{CONTAINER_BENCH}/{revision}",
             image_ref, "test:all"]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
+        # ``TimeoutExpired.stdout`` is ``bytes`` even when the call used
+        # ``text=True`` (a documented Python quirk). Decode it so the caller can
+        # carry it into the JSON result; a raw bytes payload would make
+        # ``json.dumps`` raise instead of publishing a structured TOOL_FAILURE.
         return CeedlingRun(
             ok=False, returncode=124, timed_out=True, argv=argv,
-            stdout=(exc.stdout or ""), stderr=f"Ceedling timed out after {timeout}s",
+            stdout=_as_text(exc.stdout),
+            stderr=f"Ceedling timed out after {timeout}s",
         )
     except OSError as exc:
         return CeedlingRun(ok=False, returncode=127, argv=argv, stderr=str(exc))
 
-    out = proc.stdout or ""
+    out = _as_text(proc.stdout)
     summary = _unity_summary(out)
     run = CeedlingRun(
         ok=proc.returncode == 0, returncode=proc.returncode, argv=argv,
-        stdout=out, stderr=proc.stderr or "",
+        stdout=out, stderr=_as_text(proc.stderr),
     )
     if summary is not None:
         run.ran = True
         run.total, run.passed, run.failed = summary
         run.failures = parse_failures(out)
     return run
+
+
+def _as_text(value: str | bytes | None) -> str:
+    """Coerce possibly-bytes subprocess output to ``str`` (lossy, never raising).
+
+    ``subprocess`` returns ``bytes`` from ``TimeoutExpired`` even under
+    ``text=True``; every string that reaches the JSON result must already be
+    ``str`` or serialization fails.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _invoking_user() -> str | None:

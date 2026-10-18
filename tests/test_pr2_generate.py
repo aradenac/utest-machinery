@@ -123,9 +123,16 @@ def _offline_generate(bench: Path):
     from mtm.llm import MockProvider
 
     def runner(bench_root, *, image_ref):  # noqa: ARG001
-        return CeedlingRun(ok=True, returncode=0, stdout="1 Tests 0 Failures 0 Ignored\n",
+        # Report the real generated count: the classifier requires the executed
+        # tests to cover the generated manifest.
+        import re
+        revision = Path(bench_root) / ".mtm" / "gen" / "test"
+        total = sum(len(re.findall(r"\nvoid (test_\w+)\(void\)", p.read_text()))
+                    for p in sorted(revision.glob("test_*.c")))
+        return CeedlingRun(ok=True, returncode=0,
+                           stdout=f"{total} Tests 0 Failures 0 Ignored\n",
                            stderr="", argv=["ceedling", "test:all"], timed_out=False,
-                           ran=True, total=1, passed=1, failed=0, failures=[])
+                           ran=True, total=total, passed=total, failed=0, failures=[])
 
     scopes = yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
     return run_generate(bench, scopes, provider=MockProvider(), image="img:test", runner=runner)
