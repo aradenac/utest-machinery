@@ -739,9 +739,26 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
     aggregate_params = {i for i, p in enumerate(params)
                         if p.pointer and is_aggregate_base(_base_type(p), aggregates)}
     for index in range(min(len(case.args), len(params))):
-        if index in aggregate_params and not _is_c_expression(case.args[index]):
+        value = case.args[index]
+        if index in aggregate_params:
+            if _is_c_expression(value):
+                continue
             return (f"argument {index} points at an aggregate type; supply its initial "
                     "value as {\"expr\": \"<C initializer>\"} instead of a scalar")
+        # A pointer argument is materialised as a *pointed-to scalar*: the emitter
+        # builds an object of the pointee type and passes its address. A plan value
+        # that renders as a C string literal (any free text the model supplies)
+        # cannot be that scalar — `_literal` quotes it, and casting a string
+        # literal to the pointee (`char v = (char)"hi there";`) is a pointer-to-int
+        # cast: it does not compile under -Werror and, worse, silently drops the
+        # planned value and lets the case assert a fabricated result. Refuse it
+        # with a named limitation instead (numbers, enum identifiers and the
+        # `{"expr": …}` escape hatch still work).
+        if index in pointer_indices and not _is_c_expression(value) \
+                and _literal(value).startswith('"'):
+            return (f"argument {index} is a string for a pointer parameter; a pointer "
+                    "argument is materialised as a pointed-to scalar — supply a number, "
+                    "an enum identifier or {\"expr\": \"<C pointer target>\"}")
     for index, value in (case.expect_out or {}).items():
         try:
             position = int(index)

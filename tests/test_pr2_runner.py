@@ -1739,6 +1739,10 @@ def test_a_multi_level_pointer_argument_is_passed_at_its_declared_depth(tmp_path
     assert "int out0_0_v0 = (int)42;" in source
     assert "int * out0_0_p1 = &out0_0_v0;" in source
     assert "foo_a(&out0_0_p1)" in source
+    # The oracle must really assert: a bare substring `foo_a(&out0_0_p1)` also
+    # appears in the vacuous `(void)foo_a(...)` form an ungrounded scenario emits,
+    # so assert the full assertion — self-defending against a grounding regression.
+    assert "TEST_ASSERT_EQUAL(42, foo_a(&out0_0_p1))" in source
 
 
 def test_a_void_pointer_argument_is_backed_and_cast_not_an_invalid_void_local(tmp_path):
@@ -1823,6 +1827,33 @@ def test_a_qualified_void_pointer_is_backed_like_plain_void(tmp_path):
     assert "TEST_ASSERT_EQUAL(7, foo_a((const void *)&out0_0_v0))" in source
 
 
+def test_a_string_argument_for_a_pointer_is_refused_not_truncated(tmp_path):
+    """Same admit-then-fabricate class as F1: a pointer argument is materialised as
+    a *pointed-to scalar*, so a plan value that renders as a C string literal
+    cannot be it. It previously emitted ``const char out0_0 = (const char)"hi
+    there";`` — a pointer-to-int cast (uncompilable under ``-Werror``) that
+    silently dropped the planned value and let the case assert a fabricated
+    result. Refuse it with a named limitation; identifiers/enums/numbers and the
+    ``{"expr": …}`` escape hatch still work."""
+    bench, out, _ = _ptr_bench(
+        tmp_path, "char-string",
+        "#include <string.h>\nint foo_a(const char *s) { return (int)strlen(s); }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(const char *s);\n#endif\n",
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return the length.\n",
+        [_one_scenario("foo_a", ["hi there"], 8)])
+    assert out.test_functions == [], out.test_functions
+    assert any("string for a pointer parameter" in lim for lim in out.limitations), \
+        out.limitations
+    # An enum/identifier or an explicit expression is still accepted for a pointer.
+    _, ok, _ = _ptr_bench(
+        tmp_path, "char-enum",
+        "int foo_a(const char *s) { return (int)strlen(s); }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(const char *s);\n#endif\n",
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return the length.\n",
+        [_one_scenario("foo_a", [{"expr": "kMessage"}], 8)])
+    assert ok.test_functions, ok.limitations
+
+
 def test_unsupported_parameter_shapes_stay_refused_after_the_depth_fix(tmp_path):
     """F1 negative contrast (unchanged scope): variadic, array and
     function-pointer parameters remain refused with a named limitation — the F1
@@ -1896,6 +1927,14 @@ def test_a_pointer_level_qualifier_is_not_hoisted_onto_the_pointee(tmp_path):
     # `const int **` keeps the pointee `const`.
     lines2, _, _ = _pointer_arg(p_pointee_const, "o0", 5)
     assert any("const int * o0_p1" in l for l in lines2)
+    # `void **` is a named F1 contract shape and takes its own branch: the backing
+    # is `int`-shaped and the argument is cast to `void **` (the pointer-to-void
+    # exception does not recurse, so the level above the first is cast explicitly).
+    p_void_star_star = func_params("int foo_a(void **pp)")[0]
+    assert (p_void_star_star.type, p_void_star_star.depth) == ("void", 2)
+    lines3, arg3, _ = _pointer_arg(p_void_star_star, "o0", 5)
+    assert lines3 == ["    int o0_v0 = (int)5;", "    int * o0_p1 = &o0_v0;"], lines3
+    assert arg3 == "(void * *)&o0_p1", arg3
 
 
 def test_a_mock_write_through_to_a_void_or_multi_level_pointer_is_refused(tmp_path):
