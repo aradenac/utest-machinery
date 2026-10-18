@@ -63,6 +63,46 @@ derived from `typedef_statement_map` (already recorded) as `alias_inline_body`
 (statement contains `{`), which covers `struct`, `union` and `enum` uniformly and
 correctly excludes tag references and plain/pointer typedefs.
 
+**F-A2 correction — F-A1 narrowed the predicate and regressed the tag-reference
+shape (second independent PRE_PR review).** The reviewer ran on revision 3 (head
+`fa753d9`) and returned CHANGES_REQUIRED with one mandatory new finding the lead
+reproduced and accepted. F-A1's `"{" in alias_statement` predicate is
+*complementary to*, not a substitute for, the earlier `aggregate` predicate:
+
+* `typedef struct { … } S;` (anonymous body): `aggregate=True`, alias statement has `{`.
+* `struct S { … }; typedef struct S S_t;` (tag reference): `aggregate=True`, alias
+  statement has **no** `{` — the body lives in the *same header*, not in the alias
+  statement.
+
+So keying only on the alias statement dropped the tag-reference shape: a guard-less
+header `struct S {…}; typedef struct S S_t;` with `void dep_send(S_t s)` emitted
+`limitations == []` and an interface header `#include`ing the unguarded header →
+`redefinition of 'struct S'` / `conflicting types for 'S_t'`. (Honesty note: at the
+true base `dd122e7` this shape was *also* broken — verified in a `dd122e7`
+worktree — so F-A2 is a *narrowing* of a fix, not a fresh regression; it is
+nonetheless correct on the merits.) **F-A2 decision — restate the invariant at the
+right level:** *a header is unsafe to include twice iff it **defines** a
+`struct`/`union`/`enum` with an inline `{…}` body* — a **header-level** property
+(`_header_defines_inline_type`, comment/string-stripped), covering anonymous and
+tag-named bodies uniformly while still admitting a header whose only typedefs are
+plain/pointer.
+
+**F-A3 (self-found, pre-existing) — statement-line anchoring of the typedef
+scanners.** An exhaustive guard-predicate probe surfaced a *separate* pre-existing
+gap: `_TYPEDEF_RE`, `_AGGREGATE_REF_RE` and `_TYPEDEF_STMT_RE` all anchored at
+`^[ \t]*typedef`, so a file-scope alias following an earlier declaration on the
+**same line** (`struct S { int v; }; typedef struct S T;`, or
+`int g(void); typedef unsigned short vendor_t;`) was never recorded; a mocked
+declaration through it then lost its defining header and the interface header
+carried the alias unresolved → `unknown type name '…'`, i.e. uncompilable C with
+`limitations == []`. Confirmed pre-existing at base `dd122e7`. **Decision:** anchor
+each statement on the start of a line *or* a `(?<=[;}])` lookbehind, so the
+separating `;` is **not consumed** (a candidate that consumed it, `[;}][ \t]*typedef`,
+was rejected by the probe: it swallowed the alias after a `;` and leaked a leading
+`;` into the verbatim statement). Scope stays a statement-level scanner — a
+`typedef` inside a function body on its own line keeps its pre-existing behaviour.
+
+
 ## Options considered
 
 1. **Refuse every parameter/return that names any typedef alias.** Simplest, but it
@@ -124,12 +164,14 @@ correctly excludes tag references and plain/pointer typedefs.
 
 ## References
 
-* `mtm/cscan.py` (`scan_typedefs`, `typedef_statement_map`), `mtm/gen.py`
+* `mtm/cscan.py` (`scan_typedefs`, `typedef_statement_map`, `_TYPEDEF_RE`,
+  `_AGGREGATE_REF_RE`, `_TYPEDEF_STMT_RE`), `mtm/gen.py`
   (`split_declaration`, `mock_controls`, `_typedef_aliases_for_decl`,
   `_decl_alias_tokens`, `_header_has_guard`, `generate_suite`).
-* `tests/test_pr2_runner.py` (six regression tests: opaque alias, pointer-typedef
+* `tests/test_pr2_runner.py` (eight regression tests: opaque alias, pointer-typedef
   depth, interface-header alias, anonymous-aggregate sharing, guard-less aggregate
-  limitation, guard-less enum limitation + guarded-enum compile), `tests/test_pr2_units.py`
+  limitation, guard-less enum limitation + guarded-enum compile, guard-less inline
+  tag-body limitation, combined-line alias + in-image execution), `tests/test_pr2_units.py`
   (opaque-alias scanner test).
 * PR 3 §A/§B/§C and DoD 3 in `docs/plan/implementation.md`;
   `worklog/log/2026-10-18-pr3.md` (sessions 4–6).
