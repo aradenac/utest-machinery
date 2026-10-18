@@ -1,5 +1,7 @@
 # uTest Machinery
 
+![uTest Machinery overview: select C sources and SDDs, generate a traceable test bench, verify offline, and review test evidence](docs/assets/utest-machinery-overview.svg)
+
 **From embedded C and detailed design specifications to traceable, reproducible host-executed verification.**
 
 Embedded C unit verification is often labor-intensive: engineers reconstruct target-dependent build contexts, isolate SDK dependencies, author mocks and test oracles, chase structural-coverage gaps, then manually correlate disparate reports with software detailed design (SDD) requirements. Coverage alone does not establish conformance; an apparently passing test may even assert behavior unsupported by the specification.
