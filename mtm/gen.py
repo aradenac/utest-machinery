@@ -1340,62 +1340,83 @@ def _header_shares_safely(text: str) -> bool:
     """Whether *text* may be included twice in one TU without redefining a type.
 
     True for a ``#pragma once`` header, for a header with **no** inline
-    ``struct``/``union``/``enum`` body, and for a header whose **every** inline body
-    lies inside an include guard (``#ifndef X`` … ``#endif`` with a matching
-    ``#define X``, or ``#if !defined(X)``).
+    ``struct``/``union``/``enum`` body, and for a header wrapped in a **simple**
+    include guard (see :func:`_simple_guard_span`) whose guard encloses every inline
+    body.
 
-    A guard-like ``#ifndef`` that does *not* enclose the definition does not protect
-    it: a mid-file feature toggle (``#ifndef FEATURE_X … #endif``) or a definition
-    written **before** the real guard both leave the ``{…}`` body repeated on a
-    second inclusion, so the header must not be treated as shareable — doing so
-    emits uncompilable C (``conflicting types``) with ``limitations == []``, the
-    shape plan §C forbids. Checking the *pair* ``defines-an-inline-body`` AND
-    ``has-some-guard`` (two independent weaker properties) is unsound for exactly
-    that reason; this function checks the implication instead.
+    This is deliberately *conservative*: it proves safety by a linear scan of a
+    single, unconditional ``#ifndef X`` / ``#if !defined(X)`` … ``#define X`` …
+    ``#endif`` wrapper, and treats any **other** structure as unshareable. That is
+    what makes it sound. A predicate that instead reasoned over arbitrary text spans
+    (accepting a ``#define X`` merely *appearing* between an ``#ifndef`` and its
+    ``#endif``) was demonstrably unsound in three ways, each emitting uncompilable C
+    with ``limitations == []`` — the shape plan §C forbids:
+
+    * a guard-like block that does not *enclose* the definition (mid-file feature
+      toggle, or a definition written before the real guard);
+    * a ``#define X`` that is itself dead (nested under ``#if 0``), so the guard
+      never collapses and re-inclusion repeats the body;
+    * an inline body repeated in the guard's ``#else``/``#elif`` branch, which the
+      second inclusion takes.
+
+    Refusing these exotic structures as a **named limitation** (the caller records
+    one) is the §C-permitted route: never a proof we cannot actually make.
     """
     from .cscan import strip_comments_and_strings
 
     clean = strip_comments_and_strings(text)
     if re.search(r"(?m)^[ \t]*#\s*pragma\s+once\b", clean):
         return True
-    spans = _guard_spans(clean)
-    defs = list(re.finditer(r"\b(?:struct|union|enum)\b[^;{}]*\{", clean))
-    for m in defs:
-        pos = m.start()
-        if not any(start <= pos < end for start, end in spans):
-            return False
-    return True
+    body_re = re.compile(r"\b(?:struct|union|enum)\b[^;{}]*\{")
+    bodies = [m.start() for m in body_re.finditer(clean)]
+    if not bodies:
+        return True
+    span = _simple_guard_span(clean)
+    if span is None:
+        return False
+    start, end = span
+    return all(start <= p < end for p in bodies)
 
 
-def _guard_spans(clean: str) -> list[tuple[int, int]]:
-    """Spans ``[start, end)`` of real include-guard regions in comment/string-stripped
-    C *clean*.
+def _simple_guard_span(clean: str) -> "tuple[int, int] | None":
+    """The ``(start, end)`` span of a **simple** enclosing include guard in *clean*,
+    or ``None`` when the header is not provably single-guarded.
 
-    A real guard is an ``#ifndef X`` / ``#if !defined(X)`` whose matching ``#endif``
-    encloses a ``#define X`` — so re-inclusion is collapsed. Nesting is tracked with
-    a stack, so a guard containing inner conditionals is measured to the right
-    ``#endif``.
+    Simple means: after a prologue of only blank lines, comments and ``#include``
+    directives, an ``#ifndef X`` (or ``#if !defined(X)``) **immediately** followed by
+    ``#define X`` (so the define is live, not nested under a conditional), reaching a
+    matching ``#endif`` with **no** ``#else``/``#elif`` at the guard's own level (so
+    the guarded region is unconditional). Any other structure returns ``None``.
     """
-    spans: list[tuple[int, int]] = []
-    stack: list[list] = []  # [start, macro_or_None]
-    for m in re.finditer(r"(?m)^[ \t]*#[ \t]*(\w+)([^\n]*)", clean):
-        kw, rest = m.group(1), m.group(2)
+    prologue = re.match(r"(?s)(?:\s|/\*.*?\*/|//[^\n]*|#[ \t]*include[^\n]*)*", clean)
+    i = prologue.end()
+    open_m = re.match(
+        r"#[ \t]*(?:ifndef[ \t]+([A-Za-z_]\w*)"
+        r"|if[ \t]+![ \t]*defined[ \t]*\([ \t]*([A-Za-z_]\w*)[ \t]*\))[ \t]*\r?\n",
+        clean[i:])
+    if not open_m:
+        return None
+    macro = open_m.group(1) or open_m.group(2)
+    after_open = i + open_m.end()
+    define_m = re.match(
+        r"(?s)(?:\s|/\*.*?\*/|//[^\n]*)*#[ \t]*define[ \t]+" + re.escape(macro) + r"\b",
+        clean[after_open:])
+    if not define_m:
+        return None
+    depth = 0
+    for d in re.finditer(r"(?m)^[ \t]*#[ \t]*(if|ifdef|ifndef|endif|else|elif)\b",
+                         clean[i:]):
+        kw = d.group(1)
         if kw in ("if", "ifdef", "ifndef"):
-            macro = None
-            if kw == "ifndef":
-                macro = re.match(r"\s+([A-Za-z_]\w*)", rest)
-                macro = macro.group(1) if macro else None
-            elif kw == "if":
-                nd = re.search(r"!\s*defined\s*\(?\s*([A-Za-z_]\w*)", rest)
-                macro = nd.group(1) if nd else None
-            stack.append([m.start(), macro])
-        elif kw == "endif" and stack:
-            start, macro = stack.pop()
-            if macro and re.search(
-                    rf"(?m)^[ \t]*#[ \t]*define[ \t]+{re.escape(macro)}\b",
-                    clean[start:m.end()]):
-                spans.append((start, m.end()))
-    return spans
+            depth += 1
+        elif kw == "endif":
+            depth -= 1
+            if depth == 0:
+                return (i, i + d.end())
+        elif depth == 1:
+            # An #else/#elif of the guard itself: the then-branch is not unconditional.
+            return None
+    return None
 
 
 def _project_yml() -> str:

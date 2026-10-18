@@ -2615,6 +2615,79 @@ def test_a_pragma_once_header_with_an_inline_body_stays_shareable(tmp_path):
         assert proc.returncode == 0, proc.stderr
 
 
+def test_a_conditional_branch_of_the_guard_is_not_protection(tmp_path):
+    """F-A5-review (independent PRE_PR, CONFIRMED MANDATORY): the guard check must
+    reason over preprocessor *branches*, not over text spans. Two shapes make a
+    **text-span** predicate read "guarded" while a second inclusion still repeats the
+    ``{…}`` body:
+
+    * the guard's ``#else``/``#elif`` branch repeats the inline body — taken on the
+      second inclusion, when the guard macro is already defined;
+    * the ``#define X`` is itself dead (nested under ``#if 0``), so the guard never
+      collapses and the body is redefined on re-inclusion.
+
+    Both previously emitted a test function with ``limitations == []`` and a
+    ``conflicting types`` build failure — the shape §C forbids. They must now be
+    refused with a named limitation."""
+    for name, header in (
+        ("else-branch", "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+                        "typedef struct { int v; } S;\n#else\n"
+                        "typedef struct { int v; } S;\n#endif\n"
+                        "void dep_send(S *s);\nint use(int a);\n"),
+        ("dead-define", "#ifndef FOO_H\n#if 0\n#define FOO_H\n#endif\n"
+                        "#include <stdint.h>\ntypedef struct { int v; } S;\n#endif\n"
+                        "void dep_send(S *s);\nint use(int a);\n"),
+    ):
+        bench, out = _mock_bench(
+            tmp_path, name,
+            "int use(int a) { S s = {0}; dep_send(&s); return a; }\n", header,
+            {"id": "S1", "title": "t", "function": "use",
+             "requirement_ids": ["FOO-001"], "mocks": ["dep_send"],
+             "cases": [{"args": [1], "expected": 1,
+                        "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+        assert out.test_functions == [], (name, out.test_functions)
+        assert any("repeats an inline struct/union/enum" in lim
+                   for lim in out.limitations), (name, out.limitations)
+        assert not (bench / ".mtm" / "gen" / "interface"
+                    / "mtm_dep_dep_send.h").exists(), name
+
+
+def test_a_guarded_nested_conditional_body_still_shares(tmp_path):
+    """The safe counterpart the conservative guard check must keep admitting: a
+    definition inside an inner ``#if`` that is itself inside an unconditional guard is
+    still protected (the outer guard collapses the re-inclusion), so its mock
+    scenario must be generated and its include order compile."""
+    import shutil
+    import subprocess
+
+    bench, out = _mock_bench(
+        tmp_path, "nested-cond-body",
+        "int use(int a) { S s = {0}; dep_send(&s); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n#if 1\n"
+        "typedef struct { int v; } S;\n#endif\n"
+        "void dep_send(S *s);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1,
+                    "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-nested"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_send.h"\n#include "foo.h"\n'
+                      "static S g;\nint main(void) { (void)g; return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
 def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     """An alias with no *header* that defines it has no includable definition, so
     the interface header must spell it verbatim. This exercises the fallback path
