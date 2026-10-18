@@ -40,7 +40,13 @@ def decide(event: dict, root: Path) -> tuple[int, str]:
         # A mere discussion of PUBLISH_READY must not trigger this check.
         message = event.get("last_assistant_message") or ""
         claimed = re.search(r"(?im)^\s*(?:(?:STATUS|DECISION|VERDICT):\s*)?PUBLISH_READY\b", message)
-        if claimed and event.get("background_tasks"):
+        active_tasks = [
+            task for task in (event.get("background_tasks") or [])
+            if isinstance(task, dict) and str(task.get("status", "")).lower()
+            not in {"completed", "finished", "done", "success", "failed",
+                    "error", "cancelled", "canceled", "stopped"}
+        ]
+        if claimed and active_tasks:
             return 2, ("PUBLISH_READY is claimed while background tasks are still "
                        "active. Collect or explicitly cancel them and reassess; "
                        "otherwise report PUBLISH_DRAFT or HOLD.")

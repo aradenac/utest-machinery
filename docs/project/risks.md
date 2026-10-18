@@ -177,6 +177,8 @@ Ce registre permanent regroupe les **familles d'impacts** observées ou mises en
 
 **Retex intermédiaire supplémentaire (18/10/2026) :** proposition mise en œuvre dans les consignes de développement : décomposition dynamique en lots par le lead, revues parallèles de snapshots stables et hooks Claude Code légers sur livraison de rapports / fin de tâches / déclaration finale. Les hooks ne jugent ni le code ni les critères métier et ne lancent pas de campagne de tests. **C'est une mesure de processus déployée, pas une efficacité démontrée** ; sa valeur doit être mesurée sur les prochaines sessions et la compatibilité réelle CCR/DeepSeek reste à confirmer.
 
+**Complément de mesure (quick wins après PR #33) :** les consignes ajoutent des contrastes représentatifs sur les consommateurs d'un invariant avant une série de patches locaux, la livraison immédiate d'un finding obligatoire démontré, la stabilité des entrées des campagnes complètes et une sortie rapide de revue indépendante sur verdict étayé. Aucun nouveau moteur de gates, agent ou campagne n'est imposé. **Efficacité non encore mesurée sur une session avec les nouvelles règles.**
+
 **Statut :** 🟡 **En attente de confirmation** — règles intégrées à main, efficacité réelle non encore observée.
 
 ### Revue et mesure d'efficacité
