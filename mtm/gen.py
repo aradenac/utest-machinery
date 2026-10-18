@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .ceedling import REVISION_DIRNAME
-from .inventory import Inventory
+from .inventory import Inventory, resolve_scope_paths
 from .plan import Plan, Scenario
 
 _VOID = {"void", ""}
@@ -365,11 +365,16 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     #    with a recorded limitation, rather than silently overwriting one unit and
     #    reporting an inflated scenario count (the file-namespace equivalent of the
     #    generator's refusal contract).
+    #
+    #    Resolve directory scopes to their files first: a scope entry may name a
+    #    directory, and its bytes (and any collision they carry) only become
+    #    visible once expanded — otherwise a directory scope would silently copy
+    #    nothing while still emitting a test file.
+    scope_files = [p for p in resolve_scope_paths(bench_root, inventory.selected)
+                   if p.suffix.lower() in (".c", ".h")]
     by_basename: dict[str, set[str]] = {}
-    for entry in inventory.selected:
-        candidate = bench_root / str(entry.get("path", ""))
-        if candidate.is_file() and candidate.suffix.lower() in (".c", ".h"):
-            by_basename.setdefault(candidate.name, set()).add(str(candidate.resolve()))
+    for candidate in scope_files:
+        by_basename.setdefault(candidate.name, set()).add(str(candidate.resolve()))
     colliding = {name for name, paths in by_basename.items() if len(paths) > 1}
     colliding_units: list[tuple[str, str, str]] = []  # (unit_id, path, colliding name)
     for unit in inventory.units:
@@ -391,10 +396,7 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             "was excluded from the executable suite")
 
     copied: set[str] = set()
-    for entry in inventory.selected:
-        candidate = bench_root / str(entry.get("path", ""))
-        if not candidate.is_file() or candidate.suffix.lower() not in (".c", ".h"):
-            continue
+    for candidate in scope_files:
         if candidate.name in colliding:
             continue
         if candidate.suffix.lower() == ".c":
@@ -498,12 +500,15 @@ def test_name_for(unit_id: str, scenario_id: str) -> str:
 
 
 def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -> str:
-    """Deterministically derive a dependency's prototype from the selected headers."""
+    """Deterministically derive a dependency's prototype from the selected headers.
+
+    Directory scopes are expanded first, so a header selected through a directory
+    contributes its prototypes just as a directly-selected header does.
+    """
     from .cscan import scan_prototypes
 
-    for entry in inventory.selected:
-        candidate = bench_root / str(entry.get("path", ""))
-        if candidate.suffix.lower() == ".h" and candidate.is_file():
+    for candidate in resolve_scope_paths(bench_root, inventory.selected):
+        if candidate.suffix.lower() == ".h":
             for name, decl in scan_prototypes(candidate):
                 if name == symbol:
                     return decl
@@ -627,6 +632,7 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
 
     names: list[str] = []
     skipped: list[str] = []
+    emitted: set[str] = set()
     for scenario in scenarios:
         fn = scenario.function
         signature = signatures.get(fn, "")
@@ -652,6 +658,17 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
         if problem is not None:
             skipped.append(f"scenario {scenario.id} of {fn} not generated: {problem}")
             continue
+        # Two scenario ids distinct in the plan can normalise (`-`/`:`/`_` -> `_`)
+        # to one C symbol; emitting both would be a duplicate definition, so the
+        # later one is refused with a recorded limitation rather than failing the
+        # whole unit as an opaque compile error.
+        if test_name in emitted:
+            skipped.append(
+                f"scenario {scenario.id} of {fn} not generated: its test name "
+                f"{test_name!r} collides with another scenario's after "
+                "normalisation; rename the scenario id")
+            continue
+        emitted.add(test_name)
 
         determined = not scenario.oracle.is_undetermined
         names.append(test_name)

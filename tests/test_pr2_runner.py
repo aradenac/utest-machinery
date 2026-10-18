@@ -290,6 +290,83 @@ def test_two_units_sharing_a_basename_are_refused_not_silently_overwritten(
     assert generated.test_functions == []
 
 
+def test_directory_scope_materialises_its_files_and_detects_inner_collisions(
+        fixture_bench):
+    """A scope entry may name a *directory*; its files must be expanded before the
+    revision is built. Iterating the raw scope entries would silently copy nothing
+    (an empty `src/`) while still emitting a test file, and would also miss a
+    collision between a directory's file and a file selected elsewhere."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = fixture_bench("mocked-sensor")
+    # Move the fixture's C/H into a subdirectory and select only that directory.
+    pkg = bench / "pkg"
+    pkg.mkdir()
+    for name in ("sensor.c", "sensor.h"):
+        shutil.move(bench / name, pkg / name)
+        run_mtm_json("scope", "remove", name, cwd=bench)
+    run_mtm_json("scope", "add", "pkg", "--kind", "source", cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({
+        "scenarios": [{
+            "id": "S1", "title": "t", "function": "sample_sensor",
+            "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+            "cases": [{"args": [1], "expected": "SENSOR_OK",
+                       "mocks": {"platform_read_sensor": {"ret": 0, "reading": 1}}}],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
+        }],
+    }), inventory, LLMIdentity(provider="test", model="t"))
+    generated = generate_suite(bench, plan, inventory)
+    src = bench / ".mtm" / "gen" / "src"
+    # The directory's sources are copied (not silently dropped).
+    assert sorted(p.name for p in src.iterdir()) == ["sensor.c", "sensor.h"]
+    assert generated.test_functions  # the suite is real, not vacuous
+
+    # A second unit whose basename also exists inside the directory is still a
+    # collision: the guard must see it after expansion.
+    clash = bench / "other"
+    clash.mkdir()
+    shutil.copy(pkg / "sensor.c", clash / "sensor.c")
+    run_mtm_json("scope", "add", "other/sensor.c", "--kind", "source", cwd=bench)
+    inventory2 = build_inventory(bench, _scopes(bench))
+    generated2 = generate_suite(bench, plan, inventory2)
+    assert any("basename" in lim for lim in generated2.limitations)
+
+
+def test_scenario_ids_normalising_to_one_test_name_are_refused_not_duplicated(
+        fixture_bench):
+    """Two scenario ids distinct in the plan (`S1-a`, `S1_a`) normalise to one C
+    symbol. Emitting both is a duplicate definition; the second must be refused
+    with a recorded limitation, never compiled into an opaque link error."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = fixture_bench("mocked-sensor")
+    inventory = build_inventory(bench, _scopes(bench))
+    payload = {
+        "scenarios": [
+            {"id": sid, "title": "t", "function": "sample_sensor",
+             "requirement_ids": ["SEN-001"], "mocks": ["platform_read_sensor"],
+             "cases": [{"args": [1], "expected": "SENSOR_OK",
+                        "mocks": {"platform_read_sensor": {"ret": 0, "reading": 1}}}],
+             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+            for sid in ("S1-a", "S1_a")
+        ],
+    }
+    plan = parse_plan(json.dumps(payload), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    generated = generate_suite(bench, plan, inventory)
+    # Exactly one test function survives, and the other is recorded, not lost.
+    assert len(generated.test_functions) == 1
+    assert any("normalisation" in lim for lim in generated.limitations)
+
+
 def test_finding_maps_back_to_its_oracle_for_ids_with_dashes_and_underscores():
     """The finding→scenario link must survive an id containing `-` or `_`; the old
     reverse-split returned a truncated id and an empty oracle statement."""
