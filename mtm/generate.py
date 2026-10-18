@@ -34,8 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import ctypes_clang
 from .ccompile import HostCompiler
 from .ceedling import CeedlingRun, docker_fault_reason, run_ceedling
+from .errors import EXIT_TOOL_FAILURE
 from .feasibility import BLOCKED, assess_inventory, summarize
 from .gen import generate_suite
 from .inventory import build_inventory
@@ -100,11 +102,14 @@ def run_generate(
     dry_run: bool = False,
     image: str = "utest-machinery/mtm:1.0.0",
     runner=run_ceedling,
+    resolve=None,
 ) -> GenerateResult:
     """Run the full generation pipeline for a bench.
 
     *runner* is the Ceedling executor (injectable so tests can drive the
     classification logic without Docker); it defaults to the real in-image run.
+    *resolve* is the libclang adapter seam (injectable for the same reason);
+    it defaults to :func:`mtm.ctypes_clang.resolve` running in *image*.
     """
     state = _state_dir(bench_root)
     # Derived artefacts are cleared before every run, so a run that stops early
@@ -149,9 +154,27 @@ def run_generate(
     # break the build of the independent, feasible units. It stays visible in
     # the feasibility report and the denominator (R03).
     excluded = {v.unit_id for v in verdicts if v.status == BLOCKED}
-    generated = generate_suite(bench_root, plan, inventory, excluded_units=excluded)
+    # The image ref is threaded through so the libclang type/declaration adapter
+    # resolves the selected C context (the semantic authority, owner decision
+    # 0017). A resolution tool fault is a run-level tool fault, not a SUT defect.
+    generated = generate_suite(bench_root, plan, inventory, excluded_units=excluded,
+                               image=image, resolve=resolve)
     suite_manifest = generated.to_dict()
     suite_path = write_json_atomic(state / SUITE_FILE, suite_manifest)
+
+    types_status = suite_manifest.get("types", {}).get("status")
+    if types_status == ctypes_clang.TOOL_FAILED:
+        # The C type resolver (libclang/docker/binding) could not be used at all:
+        # no declaration can be typed faithfully, so this is a tool fault of the
+        # *operation* — exit 30, never a SUT defect or a functional result (I4).
+        return GenerateResult(
+            status="TOOL_FAILURE", exit_code=EXIT_TOOL_FAILURE, inventory=inventory_path,
+            feasibility=feasibility, plan=plan_path, suite=suite_manifest,
+            smoke={"built": False, "ran": False,
+                   "reason": suite_manifest.get("types", {}).get("message")
+                   or "the C type resolver could not be used"},
+            counts=counts, model=plan.model, provider=provider_record,
+        )
 
     limitations = suite_manifest.get("limitations", [])
     if not generated.test_functions:

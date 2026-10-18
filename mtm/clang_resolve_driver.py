@@ -77,24 +77,7 @@ def _type_fact(clang: Any, type_obj: Any, tokens: list[str],
 
     aliases: list[dict[str, Any]] = []
     for name in dict.fromkeys(t for t in tokens if t in typedefs):
-        cursor = typedefs[name]
-        underlying = cursor.underlying_typedef_type.get_canonical()
-        decl = underlying.get_declaration()
-        ext = cursor.extent
-        inline_body = bool(
-            decl.location.file
-            and ext.start.line <= decl.location.line <= ext.end.line
-        )
-        at = underlying
-        while at.kind.name == "POINTER":
-            at = at.get_pointee().get_canonical()
-        aliases.append({
-            "name": name,
-            "file": _relpath(cursor.location.file.name if cursor.location.file else "", root),
-            "line": cursor.location.line,
-            "inline_body": inline_body,
-            "opaque": at.kind.name in _OPAQUE_KINDS,
-        })
+        aliases.append(_alias_fact(clang, typedefs[name], root))
 
     return {
         "spelling": type_obj.spelling,
@@ -109,11 +92,82 @@ def _type_fact(clang: Any, type_obj: Any, tokens: list[str],
     }
 
 
+def _alias_fact(clang: Any, cursor: Any, root: str) -> dict[str, Any]:
+    """One ``TYPEDEF_DECL`` cursor as this adapter's JSON alias fact.
+
+    The alias's own pointee base, pointer depth and record/aggregate identity come
+    from its canonical underlying type, so the generator can chart a type map from
+    clang rather than re-deriving ``typedef`` semantics with a regex. The defining
+    declaration location is carried so an interface header can ``#include`` the
+    original file instead of duplicating an inline body; ``inline_body`` is true
+    when that declaration's *own* extent encloses the named declaration (an
+    anonymous ``{…}`` body), which cannot be re-declared in a second TU.
+    """
+    underlying = cursor.underlying_typedef_type.get_canonical()
+    decl = underlying.get_declaration()
+    ext = cursor.extent
+    inline_body = bool(
+        decl.location.file
+        and ext.start.line <= decl.location.line <= ext.end.line
+    )
+    depth = 0
+    at = underlying
+    while at.kind.name == "POINTER":
+        depth += 1
+        at = at.get_pointee().get_canonical()
+    record: dict[str, Any] | None = None
+    if at.kind.name in _RECORD_KINDS:
+        record = {"kind": at.kind.name, "tag": at.get_declaration().spelling or ""}
+    return {
+        "name": cursor.spelling,
+        "base": at.spelling,
+        "depth": depth,
+        "kind": at.kind.name,
+        "record": record,
+        "opaque": at.kind.name in _OPAQUE_KINDS,
+        "file": _relpath(cursor.location.file.name if cursor.location.file else "", root),
+        "line": cursor.location.line,
+        "inline_body": inline_body,
+    }
+
+
+def _alias_facts(clang: Any, tu: Any, root: str) -> dict[str, dict[str, Any]]:
+    """Every alias declared under *root*, as a name -> fact map (the type map)."""
+    found: dict[str, dict[str, Any]] = {}
+    for cursor in tu.cursor.walk_preorder():
+        if cursor.kind != clang.CursorKind.TYPEDEF_DECL or not cursor.spelling:
+            continue
+        loc = cursor.location.file
+        if loc is None or (root and not loc.name.startswith(root.rstrip("/") + "/")):
+            continue
+        found.setdefault(cursor.spelling, _alias_fact(clang, cursor, root))
+    return found
+
+
 def _relpath(path: str, root: str) -> str:
     """Best-effort mount-relative path so facts are stable across containers."""
     if root and path.startswith(root.rstrip("/") + "/"):
         return path[len(root.rstrip("/")) + 1:]
     return path
+
+
+def _merge_alias(aliases: dict[str, dict[str, Any]], name: str,
+                 fact: dict[str, Any]) -> None:
+    """Record *fact* for *name*, preferring a **header** defining location.
+
+    An alias may be declared in both a ``.c`` and a ``.h`` (the header is included
+    by the ``.c``); only a *header* is includable in a shared interface header, so
+    when the two locations disagree the header's wins, letting the generator
+    ``#include`` the real definition rather than duplicate the ``.c``'s.
+    """
+    existing = aliases.get(name)
+    if existing is None:
+        aliases[name] = fact
+        return
+    existing_h = str(existing.get("file", "")).endswith(".h")
+    fact_h = str(fact.get("file", "")).endswith(".h")
+    if fact_h and not existing_h:
+        aliases[name] = fact
 
 
 def _collect_typedefs(clang: Any, tu: Any, root: str) -> dict[str, Any]:
@@ -171,7 +225,14 @@ def _severity_name(severity: Any) -> str:
 
 
 def _diagnostics(tu: Any) -> tuple[list[str], list[dict[str, Any]]]:
-    """Split diagnostics into renderable lines and structured issues."""
+    """Split diagnostics into renderable lines and structured issues.
+
+    Any **error or fatal** diagnostic means the selected build context could not
+    be resolved (a missing header, an unavailable macro/define, an unsupported
+    code path, a malformed flag): the declaration may be absent or partially
+    parsed, so the result must be BLOCKED rather than a guessed fact set. A
+    warning/note is preserved as a diagnostic but does not block resolution.
+    """
     messages: list[str] = []
     issues: list[dict[str, Any]] = []
     for diag in tu.diagnostics:
@@ -180,9 +241,11 @@ def _diagnostics(tu: Any) -> tuple[list[str], list[dict[str, Any]]]:
         where = ""
         if loc.file:
             where = f"{loc.file.name}:{loc.line}:{loc.column}: "
-        messages.append(f"{where}{_severity_name(diag.severity)}: {text}")
-        if "not found" in text and ("file not found" in text or "'" in text):
+        severity = _severity_name(diag.severity)
+        messages.append(f"{where}{severity}: {text}")
+        if severity in ("Error", "Fatal"):
             issues.append({"kind": MISSING_CONTEXT, "message": text,
+                           "severity": severity,
                            "file": loc.file.name if loc.file else "",
                            "line": loc.line})
     return messages, issues
@@ -208,6 +271,7 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
     args += list(spec.get("args", []))
 
     functions: list[dict[str, Any]] = []
+    aliases: dict[str, dict[str, Any]] = {}
     messages: list[str] = []
     issues: list[dict[str, Any]] = []
     for path in spec.get("inputs", []):
@@ -222,6 +286,8 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
         messages.extend(msgs)
         issues.extend(issues_here)
         functions.extend(_resolve_one(clang, tu, root)["functions"])
+        for name, fact in _alias_facts(clang, tu, root).items():
+            _merge_alias(aliases, name, fact)
 
     # One declaration may be reached through several inputs (a ``.c`` including a
     # header); keep the first sighting so the fact set has one entry per
@@ -231,15 +297,61 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
         unique.setdefault((fn["name"], fn["file"], fn["line"]), fn)
     functions = list(unique.values())
 
+    # Header double-inclusion safety: a private interface header must be able to
+    # `#include` a defining header while the test TU also includes it (directly or
+    # via its unit header). This is the compiler's question, not a guard-text
+    # question: build a tiny TU that includes every input header twice and let
+    # clang answer. A redefinition/conflicting-types diagnostic means the header
+    # cannot be shared by inclusion, so the generator must fall back to a verbatim
+    # statement (or a named limitation) instead of emitting uncompilable C.
+    double_include_bad = _double_include_unsafe(index, spec, args, root, messages)
+
     version = _libclang_version(clang)
 
     return {
         "ok": not issues,
         "clang_version": version,
         "functions": functions,
+        "aliases": aliases,
+        "double_include_unsafe": double_include_bad,
         "issues": issues,
         "diagnostics": messages,
     }
+
+
+def _double_include_unsafe(index: Any, spec: dict[str, Any], args: list[str],
+                           root: str, messages: list[str]) -> dict[str, bool]:
+    """Which input headers cannot be ``#include``-d twice in one translation unit.
+
+    Emitting a one-line TU that includes each header twice — in its own order, the
+    same order the generated test would use — lets clang decide. A header whose
+    second inclusion redefines a struct/enum/typedef is reported error by the real
+    compiler; no regex guard analysis is involved. Only *header* inputs are probed
+    (a ``.c`` supplies definitions, not shared declarations).
+    """
+    unsafe: dict[str, bool] = {}
+    headers = [p for p in spec.get("inputs", []) if str(p).endswith(".h")]
+    if not headers:
+        return unsafe
+    for path in headers:
+        rel = _relpath(path, root)
+        name = rel.rsplit("/", 1)[-1]
+        snippet = f'#include "{rel}"\n#include "{path}"\n'
+        probe = spec.get("root", "/src").rstrip("/") + "/.mtm_probe.c"
+        try:
+            tu = index.parse(probe, args=list(args), unsaved_files=[(probe, snippet)])
+        except Exception:  # noqa: BLE001 - a probe failure is not a fact about the header
+            unsafe[name] = True
+            continue
+        bad = any(
+            _severity_name(d.severity) in ("Error", "Fatal")
+            and any(k in d.spelling for k in
+                    ("redefinition", "conflicting types", "redeclaration",
+                     "previous definition", "redefine"))
+            for d in tu.diagnostics
+        )
+        unsafe[name] = bad
+    return unsafe
 
 
 def _libclang_version(clang: Any) -> str:

@@ -62,14 +62,27 @@ MISSING_CONTEXT = "MISSING_CONTEXT"
 
 @dataclass
 class AliasFact:
-    """A ``typedef`` alias a declaration uses, and where it is defined."""
+    """A ``typedef`` alias a declaration uses, and where/what it is defined as.
+
+    The adapter carries the alias's **own** resolved base/depth/record identity —
+    not only its location — so the generator's type map is sourced from clang
+    facts rather than re-derived by a regex. ``base``/``depth`` are the canonical
+    pointee type and ``*`` count (``typedef int *P`` → base ``int``, depth 1);
+    ``record`` is the record/enum identity when the ultimate base names one.
+    """
 
     name: str
     file: str
     line: int
+    #: The alias's canonical pointee base spelling (``int``, ``struct Tag`` …).
+    base: str = ""
+    #: The alias's own pointer depth (``typedef int *P`` → 1).
+    depth: int = 0
+    #: ``{"kind": "RECORD"|"ENUM"|"UNION", "tag": …}`` when the base names one.
+    record: dict[str, str] | None = None
     #: True when the alias's defining declaration has an inline ``{…}`` body
     #: (``typedef struct {…} S;`` / ``typedef enum {…} e_t;``) — such an alias
-    #: cannot be re-declared and must be guarded/shared by its defining file.
+    #: cannot be re-declared and must be shared by including its defining file.
     inline_body: bool = False
     #: True when the alias names a function-pointer/array shape (opaque).
     opaque: bool = False
@@ -119,6 +132,14 @@ class CTypeResolution:
     status: str
     clang_version: str = ""
     functions: list[FunctionFact] = field(default_factory=list)
+    #: Every alias declared under the resolution root (name -> fact), the
+    #: authoritative type map the generator charts its ``typedefs`` from.
+    aliases: dict[str, AliasFact] = field(default_factory=dict)
+    #: Header basenames clang proved cannot be ``#include``-d twice in one TU (a
+    #: redefinition/conflicting-types diagnostic). A private interface header must
+    #: substitute the alias's defining statement verbatim rather than include such
+    #: a header. The real compiler is the gate; no regex guard analysis is used.
+    double_include_unsafe: dict[str, bool] = field(default_factory=dict)
     diagnostics: list[str] = field(default_factory=list)
     issues: list[dict[str, Any]] = field(default_factory=list)
     message: str = ""
@@ -134,6 +155,10 @@ class CTypeResolution:
                 return fact
         return None
 
+    def by_alias(self, name: str) -> AliasFact | None:
+        """The resolved fact for alias *name*, or ``None`` when absent."""
+        return self.aliases.get(name)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
@@ -147,6 +172,13 @@ class CTypeResolution:
                 }
                 for f in self.functions
             ],
+            "aliases": {
+                name: {"name": a.name, "file": a.file, "line": a.line,
+                       "base": a.base, "depth": a.depth, "record": a.record,
+                       "inline_body": a.inline_body, "opaque": a.opaque}
+                for name, a in self.aliases.items()
+            },
+            "double_include_unsafe": self.double_include_unsafe,
             "diagnostics": self.diagnostics,
             "issues": self.issues,
             "message": self.message,
@@ -160,6 +192,7 @@ def _type_to_dict(t: TypeFact) -> dict[str, Any]:
         "record": t.record, "opaque": t.opaque,
         "aliases": [
             {"name": a.name, "file": a.file, "line": a.line,
+             "base": a.base, "depth": a.depth, "record": a.record,
              "inline_body": a.inline_body, "opaque": a.opaque}
             for a in t.aliases
         ],
@@ -260,8 +293,14 @@ def _map_result(raw: dict[str, Any]) -> CTypeResolution:
             message=f"types could not be resolved from the selected build context: {summary}",
         )
     functions = [_function_from_json(f) for f in raw.get("functions", [])]
+    aliases = {str(name): _alias_from_json(data)
+               for name, data in (raw.get("aliases") or {}).items()}
     return CTypeResolution(status=RESOLVED, clang_version=version,
-                           functions=functions, diagnostics=diagnostics, issues=[])
+                           functions=functions, aliases=aliases,
+                           double_include_unsafe={
+                               str(k): bool(v) for k, v in
+                               (raw.get("double_include_unsafe") or {}).items()},
+                           diagnostics=diagnostics, issues=[])
 
 
 def _function_from_json(data: dict[str, Any]) -> FunctionFact:
@@ -275,6 +314,19 @@ def _function_from_json(data: dict[str, Any]) -> FunctionFact:
     )
 
 
+def _alias_from_json(data: dict[str, Any]) -> AliasFact:
+    return AliasFact(
+        name=str(data.get("name", "")),
+        file=str(data.get("file", "")),
+        line=int(data.get("line", 0)),
+        base=str(data.get("base", "")),
+        depth=int(data.get("depth", 0)),
+        record=data.get("record"),
+        inline_body=bool(data.get("inline_body", False)),
+        opaque=bool(data.get("opaque", False)),
+    )
+
+
 def _type_from_json(data: dict[str, Any]) -> TypeFact:
     return TypeFact(
         spelling=str(data.get("spelling", "")),
@@ -285,13 +337,7 @@ def _type_from_json(data: dict[str, Any]) -> TypeFact:
         qualifiers=list(data.get("qualifiers", [])),
         record=data.get("record"),
         opaque=bool(data.get("opaque", False)),
-        aliases=[
-            AliasFact(name=str(a.get("name", "")), file=str(a.get("file", "")),
-                      line=int(a.get("line", 0)),
-                      inline_body=bool(a.get("inline_body", False)),
-                      opaque=bool(a.get("opaque", False)))
-            for a in data.get("aliases", [])
-        ],
+        aliases=[_alias_from_json(a) for a in data.get("aliases", [])],
     )
 
 

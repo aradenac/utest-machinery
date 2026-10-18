@@ -219,23 +219,26 @@ def test_aggregate_aliases_detected_from_typedef():
     assert "uint8_t" not in aggregate_aliases(_SHIM)
 
 
-def test_array_function_pointer_and_function_typedefs_are_marked_opaque(tmp_path):
+def test_array_function_pointer_and_function_typedefs_are_marked_opaque():
     """F1-review (challenger): a `typedef` of an array, a function pointer or a
     function *type* has no honest indirection depth, so it must be recorded
-    ``opaque`` and refused as a parameter — the refusal the commit that introduced
-    the marker intended. The alias-name extraction used to return ``None`` for all
-    three (the declarator ends in ``]``/``)``), leaving the refusal dead and the
-    generator emitting an uncompilable ``(Arr)5`` cast."""
-    from mtm.cscan import scan_typedefs
+    ``opaque`` and refused as a parameter — never emitted as an uncompilable
+    ``(Arr)5`` cast.
 
-    src = tmp_path / "decls.h"
-    src.write_text(
-        "typedef int Arr[4];\n"
-        "typedef void (*CB)(int);\n"
-        "typedef int Func(int);\n"
-        "typedef int *P;\n"
-        "typedef int myint;\n")
-    td = scan_typedefs(src)
+    Re-expressed to the clang contract (owner decision 0017): the ``opaque`` marker
+    is now a libclang fact, charted into the generator's type map by
+    :func:`mtm.gen._chart_type_map`. The invariant asserted is unchanged.
+    """
+    from mtm import ctypes_clang
+    from mtm.gen import _chart_type_map
+
+    td = _chart_type_map(ctypes_clang.CTypeResolution(status="RESOLVED", aliases={
+        "Arr": ctypes_clang.AliasFact("Arr", "decls.h", 1, opaque=True),
+        "CB": ctypes_clang.AliasFact("CB", "decls.h", 2, opaque=True),
+        "Func": ctypes_clang.AliasFact("Func", "decls.h", 3, opaque=True),
+        "P": ctypes_clang.AliasFact("P", "decls.h", 4, base="int", depth=1),
+        "myint": ctypes_clang.AliasFact("myint", "decls.h", 5, base="int", depth=0),
+    }))
     for name in ("Arr", "CB", "Func"):
         assert td[name].opaque, name
     # A pointer alias (resolvable) and a scalar alias (a real base) are NOT opaque.

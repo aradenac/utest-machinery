@@ -21,10 +21,10 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from . import cscan, ctypes_clang
 from .ceedling import REVISION_DIRNAME
-from .cscan import scan_typedefs, typedef_statement_map
 from .inventory import Inventory, resolve_scope_paths
 from .plan import Plan, Scenario
 
@@ -58,6 +58,89 @@ SOURCE_DIRNAME = "src"
 #: Where the generated Unity test files live (Ceedling ``:paths: :test``).
 TEST_DIRNAME = "test"
 
+#: Resolution status used when no clang resolver is available (offline unit
+#: tests, or a caller that does not thread an image). Distinct from
+#: ``ctypes_clang.TOOL_FAILED`` (a real tool fault) so the generator can tell "we
+#: could not ask" from "asking failed".
+UNRESOLVED = "UNRESOLVED"
+
+
+@dataclass
+class Typedef:
+    """One resolved C alias, charted from libclang facts (``_chart_type_map``).
+
+    ``base`` is the canonical pointee base and ``depth`` its ``*`` count;
+    ``opaque`` marks a function-pointer/array shape this generator cannot render;
+    ``aggregate`` marks an alias whose ultimate base is a record/enum (a scalar
+    cannot initialise a pointer to it). Both are clang's identity facts, replacing
+    the retired regex scanner's textual guesses on this path.
+    """
+
+    base: str
+    depth: int
+    opaque: bool = False
+    aggregate: bool = False
+
+
+def _safe_read(path: Path) -> str:
+    """Read *path* as text, tolerating a non-UTF-8 byte (the C inputs are external)."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _chart_type_map(facts: Any) -> dict[str, Typedef]:
+    """Chart the generator's ``typedefs`` map from clang's authoritative facts.
+
+    Each alias clang resolved becomes a :class:`Typedef` (base, depth, ``opaque``,
+    ``aggregate``) — the value type ``split_params``/``_resolve_typedef``/
+    ``mock_controls``/``_unsupported_param_shape`` consume unchanged. This is where
+    clang **replaces** the regex's semantic claims: the
+    depth of ``typedef int *P; P *pp`` is clang's 2, not a textual guess.
+
+    ``aggregate`` is set when the alias's ultimate base names a record/enum or a
+    function/array shape (``opaque``) — the *identity* clang reports, not a
+    ``struct``-in-braces text match. This keeps the aggregate-refusal family
+    (a scalar for an aggregate pointee) and the chained-alias case covered.
+    """
+    charted: dict[str, Typedef] = {}
+    aliases = getattr(facts, "aliases", None) or {}
+    for name, fact in aliases.items():
+        charted[name] = Typedef(
+            base=fact.base,
+            depth=fact.depth,
+            opaque=fact.opaque,
+            aggregate=bool(fact.record) or fact.opaque,
+        )
+    return charted
+
+
+def _resolve_type_map(
+    bench_root: Path, inputs: list[Path], *,
+    image: str | None = None,
+    include_dirs: list[Path] | None = None,
+    resolve: Callable[..., Any] | None = None,
+    resolver: Any = None,
+) -> Any:
+    """Resolve the selected inputs with the clang adapter (fail-soft).
+
+    Never raises: the adapter already maps a resolution/tool failure to a typed
+    status, and any unexpected exception here is caught and folded into a
+    ``TOOL_FAILED`` fact set, so a broken resolver can never abort generation with
+    an uncaught error (I4). *resolve* is the injectable seam (defaults to
+    :func:`mtm.ctypes_clang.resolve`); *resolver* is the adapter's own resolver
+    seam (an image-backed transport override).
+    """
+    source = resolve or ctypes_clang.resolve
+    try:
+        return source(inputs, bench_root=bench_root, image=image,
+                      include_dirs=list(include_dirs or []), resolver=resolver)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a tool fault, never a crash
+        return ctypes_clang.CTypeResolution(
+            status=ctypes_clang.TOOL_FAILED,
+            message=f"the C type resolver failed: {type(exc).__name__}: {exc}")
+
 
 @dataclass
 class CParam:
@@ -89,6 +172,11 @@ class Generated:
     test_functions: list[str] = field(default_factory=list)
     mocks: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    #: The clang resolution status the type map was charted from
+    #: (``RESOLVED``/``BLOCKED``/``TOOL_FAILED``/``UNRESOLVED`` — the last when no
+    #: resolver was available, e.g. an offline unit test driving the generator
+    #: without an image). A run-level tool fault is surfaced separately.
+    types: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +185,7 @@ class Generated:
             "test_functions": self.test_functions,
             "mocks": self.mocks,
             "limitations": self.limitations,
+            "types": self.types,
         }
 
 
@@ -136,7 +225,8 @@ def parse_param(text: str, typedefs: dict[str, Any] | None = None) -> CParam:
     so keeping it in the base would change the type (``char * const *`` would
     become the incompatible ``const char **``).
 
-    *typedefs* (from :func:`~mtm.cscan.scan_typedefs`) resolves a **pointer alias**
+    *typedefs* (charted from libclang facts by :func:`_chart_type_map`) resolves a
+    **pointer alias**
     so the reported depth is the parameter's real indirection count: with
     ``typedef int *P``, the declarator ``P *pp`` is an ``int **`` (depth 2), not an
     ``int *`` (depth 1) — the difference between emitting a compilable call that
@@ -946,7 +1036,10 @@ def _expression(value: Any) -> str:
 
 
 def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
-                   *, excluded_units: set[str] | None = None) -> Generated:
+                   *, excluded_units: set[str] | None = None,
+                   image: str | None = None,
+                   resolve: Callable[..., Any] | None = None,
+                   resolver: Any = None) -> Generated:
     """Write a Ceedling project under ``<bench>/.mtm/gen`` from the plan.
 
     *excluded_units* are feasibility-BLOCKED unit ids: they are left out of the
@@ -954,6 +1047,14 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     visible in the feasibility report and denominator (R03). A unit excluded for a
     *basename collision* (below) is added to the same exclusion set, so it too is
     driven out of the executable scope and recorded as a limitation.
+
+    *image* is the product image the libclang type/declaration adapter runs in;
+    the selected C inputs are resolved there into the authoritative type map (I2)
+    and the interface-header sharing decision (I3). ``resolve`` overrides the
+    adapter call (an offline test seam) and ``resolver`` its transport. Any
+    resolution failure is classified per I4 — ``BLOCKED`` into per-symbol
+    limitations, ``TOOL_FAILED`` into a run-level tool fault — never an uncaught
+    exception, and never a guessed type.
     """
     excluded = set(excluded_units or set())
     blocked_ids = set(excluded)
@@ -1038,50 +1139,61 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         shutil.copy2(candidate, src_dir / candidate.name)
         out.files[f"{SOURCE_DIRNAME}/{candidate.name}"] = "source"
 
-    # 2b. Resolve the C type aliases the compiled project sees, so a pointer
-    #     hidden behind a `typedef` (e.g. `typedef int *P; ... P *pp`) is
-    #     materialised at its real indirection depth instead of emitting an
-    #     uncompilable `P v = (P)scalar` that observes a stale local (the F3
-    #     defect). Scan every copied source/header — an alias may live in any of
-    #     them — and the shims, which the test also includes.
-    typedefs: dict[str, Any] = {}
+    # 2b. Resolve the C aliases the compiled project sees with libclang — the
+    #     **sole semantic authority** for declarations/types (owner decision
+    #     0017). A pointer hidden behind a `typedef` (`typedef int *P; … P *pp`)
+    #     is materialised at its real indirection depth — clang's depth 2, not a
+    #     textual guess — so the generator never emits the uncompilable
+    #     `P v = (P)scalar` that observes a stale local (the F3 defect). The
+    #     lexical scanner's own type claims are retired on this path: they were a
+    #     partial reimplementation of C semantics and accumulated same-class
+    #     counterexamples (`#if 0`, `#else` branches, `#undef`, mid-file guards).
+    resolve_inputs = [src_dir / name for name in sorted(copied)
+                      if name.endswith((".c", ".h"))]
+    resolve_inputs += [shim_dir / name for name in shim_names]
+    facts = _resolve_type_map(
+        bench_root, resolve_inputs, image=image, resolve=resolve, resolver=resolver,
+        include_dirs=[shim_dir, src_dir])
+    out.types = {
+        "status": facts.status,
+        "clang_version": facts.clang_version,
+        "message": facts.message,
+        "issues": list(getattr(facts, "issues", []) or []),
+        "diagnostics": list(getattr(facts, "diagnostics", []) or []),
+    }
+    typedefs: dict[str, Any] = _chart_type_map(facts)
+    # Headers clang proved cannot be `#include`-d twice in one TU (a redefinition
+    # diagnostic). The interface header substitutes such an alias's defining
+    # statement verbatim instead of including the header — the compiler decides,
+    # not a regex guard classifier.
+    unsafe_headers: set[str] = {name for name, bad in
+                                (getattr(facts, "double_include_unsafe", None) or {}).items()
+                                if bad}
+    # Which copied file defines each alias (clang's declaration location, mapped
+    # back into the revision by basename). An alias whose defining file is a
+    # copied *header* can be shared by `#include`; one defined in a `.c` has no
+    # includable definition and is carried verbatim (`_alias_source_for_decl`).
+    alias_source: dict[str, str] = {}
+    alias_facts: dict[str, Any] = {}
+    includable = set(copied) | set(shim_names)
+    for name, fact in (getattr(facts, "aliases", None) or {}).items():
+        defining = Path(fact.file).name if fact.file else ""
+        # Only a *header* is includable; an alias whose defining location is a `.c`
+        # has no includable definition and is carried verbatim (including a `.c`
+        # would duplicate the SUT's own definitions). A private shim header counts
+        # (it is on the include path), so an alias it defines is shared, not
+        # refused.
+        if defining.endswith(".h") and defining in includable:
+            alias_source[name] = defining
+        alias_facts[name] = fact
+    # Verbatim `typedef` text per alias, for an alias with no includable header
+    # (a lexical text fallback only — never a semantic type claim).
     alias_statements: dict[str, str] = {}
-    # The copied *header* that defines each alias, when one exists. A private
-    # interface header must see every alias its declaration names (else `unknown
-    # type name 'P'` and every mock scenario dies as an opaque build failure), but
-    # it must not *re-declare* an alias the test's own unit header also defines: a
-    # duplicate scalar/pointer typedef is legal C, while a duplicate of an alias
-    # whose statement has an **inline body** (`typedef struct {…} S;`,
-    # `typedef enum {…} e_t;`) re-declares *different* types and is a hard
-    # `conflicting types`/`redeclaration of enumerator` error under `-Werror`. So
-    # the interface header `#include`s the defining copied header (one guarded
-    # definition per TU) and falls back to verbatim text only for an alias with no
-    # includable header (e.g. one written in a .c).
-    alias_header: dict[str, str] = {}
-    unsafe_headers: set[str] = set()
     for name in sorted(copied):
-        if not name.endswith((".c", ".h")):
-            continue
-        text = (src_dir / name).read_text(encoding="utf-8", errors="replace")
-        for alias, typedef in scan_typedefs(src_dir / name).items():
-            typedefs.setdefault(alias, typedef)
-        for alias, statement in typedef_statement_map(text).items():
-            alias_statements.setdefault(alias, statement)
-            if name.endswith(".h"):
-                alias_header.setdefault(alias, name)
-        if name.endswith(".h"):
-            # A header cannot be shared (included twice in one TU) when re-inclusion
-            # repeats an inline `struct`/`union`/`enum` definition — whether the body
-            # is anonymous (`typedef struct {…} S;`) or tag-named
-            # (`struct S {…}; … typedef struct S S_t;`), and whether it is guarded
-            # *around the definition* or not. This is a *header-level* property
-            # (`_header_shares_safely`); a header with only plain/pointer typedefs, or
-            # whose every inline body lies inside an include guard, stays safe.
-            if not _header_shares_safely(text):
-                unsafe_headers.add(name)
-    for name in shim_names:
-        for alias, typedef in scan_typedefs(shim_dir / name).items():
-            typedefs.setdefault(alias, typedef)
+        if name.endswith((".c", ".h")):
+            for alias, statement in cscan.typedef_statement_map(
+                    _safe_read(src_dir / name)).items():
+                alias_statements.setdefault(alias, statement)
 
     # 3. One interface header per mocked symbol: CMock generates the mock from
     #    the header, so it declares only that symbol and the types it needs.
@@ -1102,36 +1214,36 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
                 f"mocked symbol {symbol!r} has no declared interface; its "
                 "scenarios are not executed")
             continue
+        # I4: an adapter BLOCKED status (incomplete build context) means we cannot
+        # trust any type in this declaration. Refuse every mock with a named
+        # per-symbol limitation carrying the diagnostic — never guess a type.
+        if facts.status == ctypes_clang.BLOCKED:
+            refused_mocks[symbol] = (
+                f"mocked symbol {symbol!r}: the selected C build context could not "
+                f"be resolved by libclang, so its declaration cannot be typed "
+                f"faithfully ({facts.message})")
+            continue
         # A declaration may name a `typedef` alias (`typedef int *P; void dep(P p);`).
         # The private header is compiled on its own (CMock generates the mock from
         # it, and the test includes it before the unit header), so every alias its
         # parameters mention must be visible here — otherwise the adapter and the
         # mock's TU see `unknown type name 'P'` and *every* scenario that mocks the
-        # symbol dies as an opaque build failure. Include the defining copied header
-        # where one exists (the guarded, single definition the test's unit header
-        # also sees); only an alias with no includable header is spelled verbatim.
-        alias_includes, alias_defs = _typedef_aliases_for_decl(decl, alias_statements,
-                                                               alias_header)
-        # The include-based alias sharing needs the defining header to be safe to
-        # include twice in one TU: the test includes it both directly (via its own
-        # unit header) and through this private header. A header that repeats an
-        # inline `struct`/`union`/`enum` definition on re-inclusion (`unsafe_headers`)
-        # makes that second definition a hard `redefinition`/`conflicting types`/
-        # `redeclaration of enumerator` error — whether the body is anonymous
-        # (`typedef struct {…} S;`) or tag-named (`struct S {…}; typedef struct S S_t;`),
-        # and regardless of any guard-like `#ifndef` that does *not* enclose the
-        # definition. Refuse with a named limitation rather than emit an opaque build
-        # failure — a shape §C demands be recorded, not silently broken.
-        unguarded = sorted({
-            alias_header[a] for a in _decl_alias_tokens(decl, alias_statements,
-                                                        alias_header)
-            if a in alias_header and alias_header[a] in unsafe_headers})
-        if unguarded:
+        # symbol dies as an opaque build failure. For each alias the declaration
+        # uses, `#include` the ORIGINAL defining header (one shared definition per
+        # TU) — the real compiler is the sharing gate. `:use_test_preprocessor:
+        # :none` means Ceedling does not preprocess the header, so a duplicate
+        # inline `{…}` body would be a hard redefinition error; an alias whose
+        # defining statement has such a body *and* no includable header cannot be
+        # duplicated and is refused with a named limitation instead.
+        alias_includes, alias_defs, unduplicable = _alias_source_for_decl(
+            decl, alias_source, alias_facts, alias_statements, unsafe_headers)
+        if unduplicable:
             refused_mocks[symbol] = (
-                f"mocked symbol {symbol!r} declares a parameter through a typedef "
-                f"defined in {unguarded!r}, which repeats an inline struct/union/enum "
-                "definition on re-inclusion (no include guard enclosing it); sharing "
-                "it with the unit's own header would redefine that type")
+                f"mocked symbol {symbol!r} declares a parameter through the "
+                f"typedef {unduplicable!r}, whose defining statement has an inline "
+                "`struct`/`union`/`enum` body and whose defining file clang proved "
+                "cannot be included twice in one translation unit; it cannot be "
+                "shared with the unit's own header without redefining that type")
             continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
@@ -1150,15 +1262,13 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         out.mocks.append(symbol)
         interfaces[symbol] = header_name
 
-    # Aggregate aliases from every C text the project compiles against.
-    aggregates: set[str] = set()
-    for content in (plan.shim_headers or {}).values():
-        aggregates |= aggregate_aliases(content)
-    for decl in declarations.values():
-        aggregates |= aggregate_aliases(decl)
-    for name in sorted(copied):
-        if name.endswith((".c", ".h")):
-            aggregates |= aggregate_aliases((src_dir / name).read_text(encoding="utf-8", errors="replace"))
+    # Aggregate identity comes from clang (a record/enum base), charted into the
+    # same `aggregates` name set `aggregate_aliases`/`is_aggregate_base` consume —
+    # a scalar supplied for a record pointee is refused before a verdict. Function/
+    # array aliases (opaque) are excluded here: they are refused by the `opaque`
+    # type map on the argument path, not treated as aggregates.
+    aggregates: set[str] = {name for name, fact in (getattr(facts, "aliases", None) or {}).items()
+                            if fact.record}
 
     # 4. One Unity test file per unit holding that unit's scenarios.
     by_unit: dict[str, list[Scenario]] = {}
@@ -1276,15 +1386,15 @@ def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -
     return ""
 
 
-def _decl_alias_tokens(decl: str, alias_statements: dict[str, str],
-                       alias_header: dict[str, str] | None = None) -> list[str]:
+def _decl_alias_tokens(decl: str, known: dict[str, Any]) -> list[str]:
     """Aliases a declaration references, transitively, in first-seen order.
 
-    A statement may itself name another alias (``typedef int *P; typedef P *Q;``),
-    so the walk runs to a fixpoint. Shared by :func:`_typedef_aliases_for_decl` and
-    the guard check so both agree on exactly which aliases a declaration needs.
+    A lexically cheap walk over the aliases clang resolved (``known``): an alias's
+    own clang ``base`` may name further aliases (``typedef int *P; typedef P *Q;``),
+    so the walk runs to a fixpoint. It selects *which* aliases a declaration needs;
+    the type facts themselves remain clang's.
     """
-    if not alias_statements:
+    if not known:
         return []
     ordered: list[str] = []
     seen: set[str] = set()
@@ -1293,144 +1403,64 @@ def _decl_alias_tokens(decl: str, alias_statements: dict[str, str],
     while changed:
         changed = False
         for token in list(tokens):
-            if token in seen or token not in alias_statements:
+            if token in seen or token not in known:
                 continue
             seen.add(token)
             ordered.append(token)
-            tokens |= set(re.findall(r"[A-Za-z_]\w*", alias_statements[token]))
+            base = getattr(known[token], "base", "") or ""
+            tokens |= set(re.findall(r"[A-Za-z_]\w*", base))
             changed = True
     return ordered
 
 
-def _typedef_aliases_for_decl(decl: str, alias_statements: dict[str, str],
-                              alias_header: dict[str, str] | None = None
-                              ) -> tuple[str, str]:
-    """The ``#include`` and verbatim ``typedef`` lines a declaration needs.
+def _alias_source_for_decl(decl: str, alias_source: dict[str, str],
+                           alias_facts: dict[str, Any],
+                           alias_statements: dict[str, str] | None = None,
+                           unsafe_headers: set[str] | None = None
+                           ) -> tuple[str, str, str]:
+    """The ``#include`` / verbatim ``typedef`` lines a declaration needs.
 
     The private CMock interface header is compiled standalone (CMock generates the
     mock from it, and the test includes it before the unit header), so an alias
     named anywhere in the declaration — a parameter *or* the return type — needs
-    its definition in the same TU. Transitive aliases (``typedef int *P; typedef P
-    *Q;``) are pulled in to a fixpoint, because ``Q``'s own statement names ``P``.
+    its definition in the same TU. Transitive aliases are pulled in to a fixpoint.
 
-    Returns ``(includes, statements)``. When the alias is defined in a copied
-    *header* that can be ``#include``d (``alias_header``), the header is included
-    instead of re-declaring it: the include guard gives one definition the test's
-    own unit header also sees, which is required for an anonymous-aggregate alias
-    (a duplicate such typedef names a different type — a hard ``conflicting
-    types`` error). An alias with no includable header is emitted verbatim.
+    Returns ``(includes, statements, unduplicable)``. For each alias whose defining
+    file is a copied header that clang proved double-includable (``alias_source``,
+    minus ``unsafe_headers``), that header is ``#include``-d — one shared
+    definition per TU, validated by the real compiler, no guard analysis. For an
+    alias whose defining header is *not* safe to re-include (clang: a redefinition
+    diagnostic), the defining statement is carried verbatim when that is safe (no
+    inline ``{…}`` body); when its defining statement *does* have an inline body
+    (``inline_body`` from clang) it cannot be duplicated, so the alias name is
+    returned as ``unduplicable`` for a named limitation.
     """
+    unsafe_headers = unsafe_headers or set()
     include_names: list[str] = []
     wanted: list[str] = []
-    for token in _decl_alias_tokens(decl, alias_statements, alias_header):
-        header = (alias_header or {}).get(token)
-        if header is not None:
+    for token in _decl_alias_tokens(decl, alias_facts):
+        header = alias_source.get(token)
+        fact = alias_facts.get(token)
+        if header is not None and header not in unsafe_headers:
             if header not in include_names:
                 include_names.append(header)
-        else:
-            wanted.append(alias_statements[token])
+            continue
+        # The alias is defined in a header clang proved double-include-unsafe, or
+        # has no includable header at all. Carrying its defining statement verbatim
+        # is only safe when that statement is self-contained: an inline `{…}` body,
+        # or an alias whose ultimate base is a record/enum whose body lives in that
+        # same unshareable file, cannot be repeated — record it as a named
+        # limitation instead of emitting uncompilable C.
+        if getattr(fact, "inline_body", False) or getattr(fact, "record", None):
+            return ("".join(f'#include "{n}"\n' for n in include_names), "", token)
+        statement = (alias_statements or {}).get(token)
+        if statement:
+            wanted.append(statement)
     includes = "".join(f'#include "{name}"\n' for name in include_names)
     statements = "".join(f"{statement}\n" for statement in wanted)
     if statements:
         statements += "\n"
-    return includes, statements
-
-
-def _header_shares_safely(text: str) -> bool:
-    """Whether *text* may be included twice in one TU without redefining a type.
-
-    True for a ``#pragma once`` header, for a header with **no** inline
-    ``struct``/``union``/``enum`` body, and for a header wrapped in a **simple**
-    include guard (see :func:`_simple_guard_span`) whose guard encloses every inline
-    body.
-
-    This is deliberately *conservative*: it proves safety by a linear scan of a
-    single, unconditional ``#ifndef X`` / ``#if !defined(X)`` … ``#define X`` …
-    ``#endif`` wrapper, and treats any **other** structure as unshareable. That is
-    what makes it sound. A predicate that instead reasoned over arbitrary text spans
-    (accepting a ``#define X`` merely *appearing* between an ``#ifndef`` and its
-    ``#endif``) was demonstrably unsound in three ways, each emitting uncompilable C
-    with ``limitations == []`` — the shape plan §C forbids:
-
-    * a guard-like block that does not *enclose* the definition (mid-file feature
-      toggle, or a definition written before the real guard);
-    * a ``#define X`` that is itself dead (nested under ``#if 0``), so the guard
-      never collapses and re-inclusion repeats the body;
-    * an inline body repeated in the guard's ``#else``/``#elif`` branch, which the
-      second inclusion takes.
-
-    Refusing these exotic structures as a **named limitation** (the caller records
-    one) is the §C-permitted route: never a proof we cannot actually make.
-    """
-    from .cscan import strip_comments_and_strings
-
-    clean = strip_comments_and_strings(text)
-    if re.search(r"(?m)^[ \t]*#\s*pragma\s+once\b", clean):
-        return True
-    body_re = re.compile(r"\b(?:struct|union|enum)\b[^;{}]*\{")
-    bodies = [m.start() for m in body_re.finditer(clean)]
-    if not bodies:
-        return True
-    span = _simple_guard_span(clean)
-    if span is None:
-        return False
-    start, end = span
-    return all(start <= p < end for p in bodies)
-
-
-def _simple_guard_span(clean: str) -> "tuple[int, int] | None":
-    """The ``(start, end)`` span of a **simple** enclosing include guard in *clean*,
-    or ``None`` when the header is not provably single-guarded.
-
-    Simple means: after a prologue of only blank lines, comments and ``#include``
-    directives, an ``#ifndef X`` (or ``#if !defined(X)``) **immediately** followed by
-    ``#define X`` (so the define is live, not nested under a conditional), reaching a
-    matching ``#endif`` with **no** ``#else``/``#elif`` at the guard's own level (so
-    the guarded region is unconditional) and **no** ``#undef X`` anywhere (so the
-    macro is still defined afterwards). Any other structure returns ``None``.
-
-    The predicate is sound because it reduces safety to "is the guard macro defined
-    after the first inclusion?": ``X`` is defined iff its ``#define`` executes (live
-    and immediate) and is never ``#undef``\\ ed — the two conditions checked here. A
-    repeated ``{…}`` body is then provably skipped on every re-inclusion.
-    """
-    prologue = re.match(r"(?s)(?:\s|/\*.*?\*/|//[^\n]*|#[ \t]*include[^\n]*)*", clean)
-    i = prologue.end()
-    open_m = re.match(
-        r"#[ \t]*(?:ifndef[ \t]+([A-Za-z_]\w*)"
-        r"|if[ \t]+![ \t]*defined[ \t]*\([ \t]*([A-Za-z_]\w*)[ \t]*\))[ \t]*\r?\n",
-        clean[i:])
-    if not open_m:
-        return None
-    macro = open_m.group(1) or open_m.group(2)
-    # The guard only collapses a re-inclusion while ``macro`` stays defined. An
-    # ``#undef macro`` anywhere — inside the guarded region (before ``#endif``) or
-    # after it — leaves the macro undefined when the header is included again, so the
-    # second inclusion re-enters ``#ifndef macro`` and repeats the body. Refuse (a
-    # named limitation upstream) rather than claim a safety we cannot prove: a header
-    # that ``#undef``\ s its own guard macro is not provably shareable.
-    if re.search(r"(?m)^[ \t]*#[ \t]*undef[ \t]+" + re.escape(macro) + r"\b", clean):
-        return None
-    after_open = i + open_m.end()
-    define_m = re.match(
-        r"(?s)(?:\s|/\*.*?\*/|//[^\n]*)*#[ \t]*define[ \t]+" + re.escape(macro) + r"\b",
-        clean[after_open:])
-    if not define_m:
-        return None
-    depth = 0
-    for d in re.finditer(r"(?m)^[ \t]*#[ \t]*(if|ifdef|ifndef|endif|else|elif)\b",
-                         clean[i:]):
-        kw = d.group(1)
-        if kw in ("if", "ifdef", "ifndef"):
-            depth += 1
-        elif kw == "endif":
-            depth -= 1
-            if depth == 0:
-                return (i, i + d.end())
-        elif depth == 1:
-            # An #else/#elif of the guard itself: the then-branch is not unconditional.
-            return None
-    return None
+    return includes, statements, ""
 
 
 def _project_yml() -> str:
