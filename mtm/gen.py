@@ -1058,8 +1058,8 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     # definition per TU) and falls back to verbatim text only for an alias with no
     # includable header (e.g. one written in a .c).
     alias_header: dict[str, str] = {}
-    alias_inline_body: set[str] = set()
     guarded_headers: dict[str, bool] = {}
+    unsafe_headers: set[str] = set()
     for name in sorted(copied):
         if not name.endswith((".c", ".h")):
             continue
@@ -1068,15 +1068,20 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             typedefs.setdefault(alias, typedef)
         for alias, statement in typedef_statement_map(text).items():
             alias_statements.setdefault(alias, statement)
-            # An inline `{ … }` body (struct/union/enum definition) is what makes a
-            # duplicate unsafe; a tag reference (`struct Tag`) or a plain/pointer
-            # typedef duplicates legally and needs no guard.
-            if "{" in statement:
-                alias_inline_body.add(alias)
             if name.endswith(".h"):
                 alias_header.setdefault(alias, name)
         if name.endswith(".h"):
             guarded_headers[name] = _header_has_guard(text)
+            # A header that *defines* a struct/union/enum with an inline body
+            # cannot be included twice in one TU: the second inclusion repeats the
+            # `{…}` definition (`redefinition of 'struct S'`) whether the body is
+            # anonymous (`typedef struct {…} S;`, `typedef enum {…} e_t;`) or tag-
+            # named (`struct S {…}; … typedef struct S S_t;`). This is a
+            # *header-level* property: it holds for a tag-reference alias whose own
+            # statement has no body, because the body lives in the same header. A
+            # header with only plain/pointer typedefs stays safe to duplicate.
+            if _header_defines_inline_type(text):
+                unsafe_headers.add(name)
     for name in shim_names:
         for alias, typedef in scan_typedefs(shim_dir / name).items():
             typedefs.setdefault(alias, typedef)
@@ -1111,26 +1116,28 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         alias_includes, alias_defs = _typedef_aliases_for_decl(decl, alias_statements,
                                                                alias_header)
         # The include-based alias sharing needs the defining header's own guard to
-        # give the TU one definition. A guard-less header that defines an alias with
-        # an **inline body** (anonymous `struct`/`union`/`enum`) is the one shape
-        # that cannot be shared safely: the test includes it both here and directly,
-        # and the second definition is a hard `conflicting types` / `redeclaration
-        # of enumerator` error. (A duplicate scalar/pointer typedef is legal C, so
-        # the guard-less scalar case is admitted.) Refuse with a named limitation
-        # rather than emit an opaque build failure — a shape §C demands be recorded,
-        # not silently broken.
+        # give the TU one definition. A guard-less header that **defines an inline
+        # `struct`/`union`/`enum`** is the one shape that cannot be shared safely:
+        # the test includes it both here and directly, and the second definition is
+        # a hard `redefinition`/`conflicting types`/`redeclaration of enumerator`
+        # error. This covers an anonymous body (`typedef struct {…} S;`) *and* a
+        # tag-named one (`struct S {…}; typedef struct S S_t;`) — the alias's own
+        # statement has no body, but the header still repeats it. A header with only
+        # plain/pointer typedefs duplicates legally and is admitted. Refuse with a
+        # named limitation rather than emit an opaque build failure — a shape §C
+        # demands be recorded, not silently broken.
         unguarded = sorted({
             alias_header[a] for a in _decl_alias_tokens(decl, alias_statements,
                                                         alias_header)
             if a in alias_header
             and not guarded_headers.get(alias_header[a], True)
-            and a in alias_inline_body})
+            and alias_header[a] in unsafe_headers})
         if unguarded:
             refused_mocks[symbol] = (
                 f"mocked symbol {symbol!r} declares a parameter through a typedef "
-                f"with an inline body (struct/union/enum) defined in {unguarded!r}, "
-                "which has no include guard; sharing it with the unit's own header "
-                "would redefine the anonymous type")
+                f"defined in {unguarded!r}, which has no include guard and defines "
+                "an inline struct/union/enum; sharing it with the unit's own header "
+                "would redefine that type")
             continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
@@ -1350,6 +1357,22 @@ def _header_has_guard(text: str) -> bool:
         return False
     guard = m.group(1)
     return re.search(rf"(?m)^[ \t]*#\s*define[ \t]+{re.escape(guard)}\b", clean) is not None
+
+
+def _header_defines_inline_type(text: str) -> bool:
+    """Whether *text* defines a ``struct``/``union``/``enum`` with an inline body.
+
+    Such a header cannot be included twice in one TU: the second inclusion repeats
+    the ``{…}`` definition (``redefinition of 'struct S'`` / ``redeclaration of
+    enumerator``), regardless of whether the body is anonymous or tag-named. A
+    header whose only type declarations are plain/pointer typedefs is idempotent.
+    Detected on the comment/string-stripped text so a ``{`` inside a comment or a
+    string literal is not mistaken for a body.
+    """
+    from .cscan import strip_comments_and_strings
+
+    clean = strip_comments_and_strings(text)
+    return re.search(r"\b(?:struct|union|enum)\b[^;{}]*\{", clean) is not None
 
 
 def _project_yml() -> str:

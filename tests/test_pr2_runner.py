@@ -2496,6 +2496,56 @@ def test_a_guardless_enum_alias_header_is_a_named_limitation(tmp_path):
         assert proc.returncode == 0, proc.stderr
 
 
+def test_a_guardless_header_with_an_inline_tag_body_is_a_named_limitation(tmp_path):
+    """The header-level invariant: it is the **defining header**, not the alias's
+    own statement, that decides whether a double inclusion is safe. ``struct S { int
+    v; }; typedef struct S S_t;`` — a *tag-reference* alias whose own statement has
+    no ``{`` — is still unsharable when that ``struct`` body lives in the same
+    guard-less header: the repeat is ``redefinition of 'struct S'``. Keying only on
+    the alias statement's ``{`` regressed exactly this shape (an earlier revision's
+    aggregate predicate caught it); the fix is a header-level check. A guarded
+    header with the same content shares cleanly."""
+    bench, out = _mock_bench(
+        tmp_path, "guardless-tag-body",
+        "struct S { int v; };\ntypedef struct S S_t;\nint use(int a) { return a; }\n",
+        "#include <stdint.h>\nstruct S { int v; };\ntypedef struct S S_t;\n"  # no guard
+        "void dep_send(S_t s);\nint use(int a);\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions == [], out.test_functions
+    assert any("no include guard" in lim for lim in out.limitations), out.limitations
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
+    # The guarded form shares and compiles.
+    import shutil
+    import subprocess
+
+    bench2, ok = _mock_bench(
+        tmp_path, "guarded-tag-body",
+        "int use(int a) { dep_send((S_t){0}); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\nstruct S { int v; };\n"
+        "typedef struct S S_t;\nvoid dep_send(S_t s);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_send"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert ok.test_functions, ok.limitations
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-tag"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_send.h"\n#include "foo.h"\n'
+                      "static S_t g;\nint main(void) { (void)g; return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench2 / ".mtm" / "gen" / "src"),
+             "-I", str(bench2 / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
 def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     """An alias with no *header* that defines it has no includable definition, so
     the interface header must spell it verbatim. This exercises the fallback path
