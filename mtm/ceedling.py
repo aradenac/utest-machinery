@@ -35,6 +35,50 @@ CONTAINER_BENCH = "/bench"
 #: A writable HOME is needed so Ceedling can stage its vendored Unity/CMock.
 CONTAINER_HOME = "/tmp"
 
+#: ``docker run`` exit statuses that are **not** a test result, from the Docker
+#: documentation. The reserved statuses are 125 (the daemon could not run the
+#: container), 126 (the requested command could not be invoked) and 127 (the
+#: requested command could not be found); a container killed by a Unix signal is
+#: reported as ``128 + signal`` (SIGKILL 9 → 137, SIGTERM 15 → 143, SIGABRT 6 →
+#: 134, …). Any of these can be observed *after* the runner already printed a
+#: parseable Unity failure summary (a kill mid-run), so they must be classified as
+#: a tool fault even when an assertion finding is also present — a genuine
+#: Ceedling assertion exit is a small positive status (Unity/Ceedling return 1).
+DOCKER_RESERVED_EXITS = frozenset({125, 126, 127})
+
+#: The highest Unix signal number Docker encodes as ``128 + signal``.
+DOCKER_MAX_SIGNAL = 64
+
+#: Names for the signals a Docker ``128 + signal`` status most commonly encodes.
+_SIGNAL_NAMES = {2: "SIGINT", 6: "SIGABRT", 9: "SIGKILL", 11: "SIGSEGV", 15: "SIGTERM"}
+
+
+def _signal_number(returncode: int) -> int | None:
+    """The signal Docker's ``128 + signal`` status encodes, or ``None``."""
+    if 128 < returncode <= 128 + DOCKER_MAX_SIGNAL:
+        return returncode - 128
+    return None
+
+
+def docker_fault_reason(returncode: int) -> str | None:
+    """Why a ``docker run`` status is a tool fault rather than a test result.
+
+    ``None`` when *returncode* is an ordinary Ceedling exit (e.g. 0 or 1), so the
+    caller classifies by the Unity evidence instead. Never reclassifies a normal
+    assertion exit: only Docker's own reserved statuses and signal deaths match.
+    """
+    if returncode in DOCKER_RESERVED_EXITS:
+        return {
+            125: f"the Docker daemon could not start the container ({returncode})",
+            126: f"the requested command could not be invoked in the container ({returncode})",
+            127: f"the requested command was not found in the container ({returncode})",
+        }[returncode]
+    signal = _signal_number(returncode)
+    if signal is not None:
+        name = _SIGNAL_NAMES.get(signal, f"signal {signal}")
+        return f"the container was killed ({returncode} = {name}) during the test run"
+    return None
+
 
 @dataclass
 class CeedlingRun:
@@ -76,7 +120,9 @@ def _unity_summary(stdout: str) -> tuple[int, int, int, int] | None:
     there is no summary at all — the only honest signal that nothing ran.
 
     The ignored count is retained: an ignored test is enumerated but its body does
-    not run, so it must not be mistaken for executed coverage.
+    not run, so it must not be mistaken for executed coverage — nor counted as a
+    *pass*. ``passed`` is therefore ``total - failures - ignored``, so an
+    all-ignored run honestly reports zero passes.
     """
     matches = list(re.finditer(r"(\d+)\s+Tests\s+(\d+)\s+Failures\s+(\d+)\s+Ignored", stdout))
     if not matches:
@@ -84,7 +130,7 @@ def _unity_summary(stdout: str) -> tuple[int, int, int, int] | None:
     total = sum(int(m.group(1)) for m in matches)
     failures = sum(int(m.group(2)) for m in matches)
     ignored = sum(int(m.group(3)) for m in matches)
-    return total, total - failures, failures, ignored
+    return total, max(total - failures - ignored, 0), failures, ignored
 
 
 def parse_failures(stdout: str) -> list[tuple[str, str]]:

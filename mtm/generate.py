@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from .ccompile import HostCompiler
-from .ceedling import CeedlingRun, run_ceedling
+from .ceedling import CeedlingRun, docker_fault_reason, run_ceedling
 from .feasibility import BLOCKED, assess_inventory, summarize
 from .gen import generate_suite
 from .inventory import build_inventory
@@ -232,19 +232,26 @@ def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
         smoke["diagnostics"] = run.diagnostics[-4000:]
         return smoke
 
-    # An abnormal termination (timeout, signal, or a runner-level non-zero exit)
-    # outranks *any* assertion also observed in the same run: a tool fault must
-    # never be masked by a co-observed finding (``workflow-failures.md``: surface
-    # the most severe operation-blocking category and preserve all findings). The
-    # assertion findings are computed first so they are carried alongside.
+    # An abnormal termination outranks *any* assertion also observed in the same
+    # run: a tool fault must never be masked by a co-observed finding
+    # (``workflow-failures.md``: surface the most severe operation-blocking
+    # category and preserve all findings). The assertion findings are computed
+    # first so they are carried alongside. ``docker_fault_reason`` carries the
+    # *Docker* statuses (a killed container is 128 + signal, e.g. 137/143; the
+    # reserved 125/126/127 are daemon/entrypoint errors) which the negative
+    # parent-shell status never surfaces, so a container killed mid-run is not
+    # mistaken for a plain assertion failure.
     smoke["findings"] = _findings(run, plan)
 
+    docker_fault = docker_fault_reason(run.returncode)
     abnormal = (run.timed_out or run.returncode < 0
+                or docker_fault is not None
                 or (run.returncode != 0 and run.failed == 0))
     if abnormal:
         # The suite produced a summary, so the fault is in the *run*, not in the
         # build: state it in those terms rather than the no-summary wording.
         kind = ("the test run timed out" if run.timed_out
+                else docker_fault if docker_fault is not None
                 else f"the test runner was killed by signal {-run.returncode}"
                 if run.returncode < 0
                 else f"the runner exited {run.returncode} although Unity reported no "
@@ -299,8 +306,10 @@ def _tool_fault_reason(run: CeedlingRun) -> str:
         return "the test run timed out before producing a Unity summary"
     if run.returncode < 0:
         return f"the test runner was killed by signal {-run.returncode}"
-    if run.returncode == 127:
-        return "the Ceedling runner could not be started"
+    docker_fault = docker_fault_reason(run.returncode)
+    if docker_fault is not None:
+        return (f"{docker_fault}; no Unity summary was produced, so the "
+                "suite did not run")
     if "BUILD FAILURE" in run.stdout:
         return ("the generated project failed to build (no Unity summary was "
                 "produced); see the build diagnostics")

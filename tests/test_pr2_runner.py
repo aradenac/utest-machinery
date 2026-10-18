@@ -649,7 +649,8 @@ def test_all_ignored_tests_are_not_a_complete_success(fixture_bench):
     the generated-count gate — zero test bodies ran."""
     from mtm.ceedling import _unity_summary
 
-    assert _unity_summary("3 Tests 0 Failures 3 Ignored") == (3, 3, 0, 3)
+    # `passed` excludes ignored tests: an all-ignored run reports 0 passes, not 3.
+    assert _unity_summary("3 Tests 0 Failures 3 Ignored") == (3, 0, 0, 3)
 
     bench = fixture_bench("mocked-sensor")  # generates 3 tests
 
@@ -939,3 +940,311 @@ def test_real_ceedling_run_executes_the_suite(fixture_bench, product_image):
     run = run_ceedling(bench, image_ref=product_image)
     assert run.ran, f"no Unity summary: {run.diagnostics[-2000:]}"
     assert run.total >= 1
+
+
+
+# --- PR #14 fourth review findings E1–E2 ------------------------------------
+
+
+def _failure_summary_runner(bench_root, returncode):
+    """A runner that printed a real Unity failure summary, then exited *returncode*."""
+    from test_pr2_runner import _generated_count, _run  # noqa: F811
+
+    total = _generated_count(bench_root)
+    summary = ("test_saturation.c:12:test_u_abc_S1:FAIL: Expected 10 Was 9\n"
+               f"-----------------------\n{total} Tests 1 Failures 0 Ignored\nFAIL\n")
+    return _run(returncode < 0, returncode, stdout=summary, ran=True, total=total,
+                passed=total - 1, failed=1,
+                failures=[("test_u_abc_S1", "Expected 10 Was 9")])
+
+
+@pytest.mark.parametrize("returncode,label", [
+    (137, "SIGKILL"),
+    (143, "SIGTERM"),
+    (134, "SIGABRT"),
+    (139, "SIGSEGV"),
+    (125, "daemon error"),
+    (126, "command not invokable"),
+    (127, "command not found"),
+])
+def test_docker_abnormal_exit_with_a_failure_summary_is_a_tool_failure(
+        fixture_bench, returncode, label):
+    """E1: ``docker run`` returns its own statuses for a run that is not a test
+    result — 128+signal for a killed container (137=SIGKILL, 143=SIGTERM,
+    134=SIGABRT, 139=SIGSEGV), and 125/126/127 for a daemon/entrypoint error —
+    *not* the negative parent-shell status the previous classifier tested. A kill
+    that happens after the runner already printed a parseable Unity failure summary
+    must still be a tool fault that outranks (and preserves) the assertion finding,
+    never a ``FINDINGS/10`` that hides the interrupted run."""
+    bench = fixture_bench("saturation")
+
+    def runner(bench_root, *, image_ref):
+        return _failure_summary_runner(bench_root, returncode)
+
+    result = _generate(bench, runner)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30, result.status
+    # The assertion evidence is preserved alongside the tool failure.
+    assert result.smoke["findings"] and \
+        result.smoke["findings"][0]["observed"] == "Expected 10 Was 9"
+    assert str(returncode) in result.smoke["reason"]
+
+
+def test_a_killed_container_names_the_signal(fixture_bench):
+    """E1: a 137/143 status is reported as a killed container, not as a plain
+    non-zero exit — the reason must name the signal."""
+    bench = fixture_bench("saturation")
+
+    def runner(bench_root, *, image_ref):
+        return _failure_summary_runner(bench_root, 137)
+
+    result = _generate(bench, runner)
+    assert "SIGKILL" in result.smoke["reason"] and "killed" in result.smoke["reason"]
+
+
+def test_a_docker_abnormal_exit_without_a_summary_is_a_tool_failure(fixture_bench):
+    """E1 adjacent: the same status with no summary keeps its honest wording."""
+    bench = fixture_bench("mocked-sensor")
+
+    def runner(bench_root, *, image_ref):
+        return _run(False, 137, stdout="Running...", stderr="Killed")
+
+    result = _generate(bench, runner)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+    assert result.smoke["ran"] is False
+
+
+def test_ordinary_ceedling_assertion_exit_stays_a_finding_not_a_tool_fault(
+        fixture_bench):
+    """E1 contrast: a *genuine* Ceedling assertion exit is a small positive status
+    (1), not a Docker reserved status, so it must stay ``FINDINGS/10`` — the
+    abnormal-status check must not swallow every nonzero exit."""
+    bench = fixture_bench("saturation")
+
+    def runner(bench_root, *, image_ref):
+        return _failure_summary_runner(bench_root, 1)
+
+    result = _generate(bench, runner)
+    assert result.status == "FINDINGS" and result.exit_code == 10
+
+
+def test_a_stem_header_declaring_only_some_functions_still_declares_the_rest(
+        tmp_path):
+    """E2: ``foo.c`` defines ``foo_a`` and ``foo_b``; the selected ``foo.h``
+    declares only ``foo_a`` and the plan tests both.
+
+    Including ``foo.h`` alone leaves the ``foo_b(...)`` call with no visible
+    prototype (implicit declaration under older C, or a hard error) while the
+    generator records no limitation. The test must additionally include a private
+    helper header declaring exactly the missing function, and the whole suite must
+    still link."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "partial-stem-header"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        "int foo_a(int x) { return x + 1; }\nint foo_b(int x) { return x + 2; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return x+1.\n"
+        "- **FOO-002**: `foo_b` SHALL return x+2.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "a", "function": "foo_a", "requirement_ids": ["FOO-001"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}},
+        {"id": "S2", "title": "b", "function": "foo_b", "requirement_ids": ["FOO-002"],
+         "mocks": [], "cases": [{"args": [1], "expected": 3}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    test_src = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert '"foo.h"' in test_src                      # the real, selected header
+    assert '"mtm_unit_foo_extra.h"' in test_src        # declares the omitted foo_b
+    helper = (bench / ".mtm" / "gen" / "interface" / "mtm_unit_foo_extra.h")
+    assert helper.is_file()
+    body = helper.read_text()
+    assert "int foo_b(int x);" in body
+    assert "foo_a" not in body                         # only the missing function
+    # The selected `foo.h` is never shadowed or overwritten.
+    assert (bench / "foo.h").read_text().count("foo_a") == 1
+
+
+def test_a_stem_header_declaring_every_function_needs_no_helper(tmp_path):
+    """E2 contrast: when the selected stem header declares all functions under
+    test, no helper header is added (the common, faithful case is unchanged)."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "full-stem-header"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        "int foo_a(int x) { return x + 1; }\nint foo_b(int x) { return x + 2; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int x);\nint foo_b(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo_a`.\n- **FOO-002**: `foo_b`.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "a", "function": "foo_a", "requirement_ids": ["FOO-001"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}},
+        {"id": "S2", "title": "b", "function": "foo_b", "requirement_ids": ["FOO-002"],
+         "mocks": [], "cases": [{"args": [1], "expected": 3}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    test_src = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert '"foo.h"' in test_src
+    assert "mtm_unit_foo_extra.h" not in test_src
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_unit_foo_extra.h").exists()
+
+
+def test_any_omitted_function_subset_is_declared_and_units_get_distinct_helpers(
+        tmp_path):
+    """E2 adjacent: the helper declares *exactly* the omitted functions, whatever
+    the subset (`foo.h` declares the middle function `foo_b` only), and two units
+    in the same bench each get a helper named after their own stem (no collision)."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "three-fn-two-unit"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        "int foo_a(int x) { return x + 1; }\nint foo_b(int x) { return x + 2; }\n"
+        "int foo_c(int x) { return x + 3; }\n")
+    (bench / "bar.c").write_text(
+        "int bar_a(int x) { return x; }\nint bar_b(int x) { return x; }\n")
+    # foo.h declares only the *middle* function under test; bar.h the first only.
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_b(int x);\n#endif\n")
+    (bench / "bar.h").write_text(
+        "#ifndef BAR_H\n#define BAR_H\nint bar_a(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **F1**: a\n- **F2**: b\n- **F3**: c\n- **B1**: d\n- **B2**: e\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("bar.c", "source"),
+                       ("bar.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    fns = [("foo_a", "F1"), ("foo_b", "F2"), ("foo_c", "F3"),
+           ("bar_a", "B1"), ("bar_b", "B2")]
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": f"S{i}", "title": "t", "function": f, "requirement_ids": [r], "mocks": [],
+         "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+        for i, (f, r) in enumerate(fns, 1)]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+
+    iface = bench / ".mtm" / "gen" / "interface"
+    foo_helper = (iface / "mtm_unit_foo_extra.h").read_text()
+    # `foo.h` declares `foo_b`, so the helper must declare the other two only.
+    assert "int foo_a(int x);" in foo_helper and "int foo_c(int x);" in foo_helper
+    assert "foo_b" not in foo_helper
+    bar_helper = (iface / "mtm_unit_bar_extra.h").read_text()
+    assert "int bar_b(int x);" in bar_helper and "bar_a" not in bar_helper
+    # Distinct helper names, so the two units never collide.
+    assert (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text().count(
+        "mtm_unit_foo_extra.h") == 1
+    assert (bench / ".mtm" / "gen" / "test" / "test_bar.c").read_text().count(
+        "mtm_unit_bar_extra.h") == 1
+
+
+@pytest.mark.docker
+def test_real_image_links_and_executes_a_partial_stem_header_unit(tmp_path, product_image):
+    """AP-02 for E2: the multi-function/partial-stem-header bench actually compiles,
+    links and executes in the product image (the failure mode E2 describes is a
+    compile/link outcome that a stub runner cannot prove)."""
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "real-partial-stem"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        "int foo_a(int x) { return x + 1; }\nint foo_b(int x) { return x + 2; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return x+1.\n"
+        "- **FOO-002**: `foo_b` SHALL return x+2.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "a", "function": "foo_a", "requirement_ids": ["FOO-001"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}},
+        {"id": "S2", "title": "b", "function": "foo_b", "requirement_ids": ["FOO-002"],
+         "mocks": [], "cases": [{"args": [1], "expected": 3}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran, f"no Unity summary: {run.diagnostics[-2000:]}"
+    assert run.total == 2 and run.failed == 0, (run.total, run.failed, run.stdout[-1000:])
+
+
+def test_a_selected_file_named_like_the_helper_is_refused_not_shadowed(tmp_path):
+    """E2 adjacent (same contract class): if a selected file already bears the
+    private helper's name (`mtm_unit_<stem>_extra.h`), writing our interface header
+    would shadow it — `interface/` precedes `src/` on the include path. The unit is
+    refused with a limitation rather than silently shadowing a selected input."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "helper-name-collision"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        "int foo_a(int x) { return x; }\nint foo_b(int x) { return x; }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int x);\n#endif\n")
+    (bench / "mtm_unit_foo_extra.h").write_text(
+        "#ifndef OTHER_H\n#define OTHER_H\nint unrelated(int x);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n- **B**: b\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"),
+                       ("mtm_unit_foo_extra.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}},
+        {"id": "S2", "title": "t", "function": "foo_b", "requirement_ids": ["B"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("cannot be shadowed" in lim for lim in out.limitations), out.limitations
+    # The selected file is untouched and never overwritten by the generator.
+    assert (bench / "mtm_unit_foo_extra.h").read_text().count("unrelated") == 1
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_unit_foo_extra.h").exists()

@@ -142,10 +142,14 @@ def _unit_includes(unit, scenarios: list[Scenario] | None, copied: set[str] | No
     compiles but never links ``sensor.c`` — an opaque ``undefined reference``. The
     resolution is:
 
-    * a real copied ``<stem>.h`` that declares a function under test → include it;
-    * a real copied ``<stem>.h`` that does **not** declare it → refuse (``None``):
-      the private header would need the same name and cannot be added without
-      shadowing the selected one;
+    * a real copied ``<stem>.h`` that declares **every** function under test →
+      include it alone;
+    * a real copied ``<stem>.h`` that declares only *some* of them → include it
+      (fidelity) **and** a private helper header that declares the remaining ones,
+      so the test never calls a function with no visible prototype;
+    * a real copied ``<stem>.h`` that declares **none** of them → refuse
+      (``None``): the private stem header would need the same name and cannot be
+      added without shadowing the selected one;
     * otherwise → synthesise a private ``<stem>.h`` from the scanner's prototypes
       (so the SUT links) and, for fidelity, also include any real header that
       declares it. Returns ``None`` (with a recorded limitation) when no
@@ -157,11 +161,36 @@ def _unit_includes(unit, scenarios: list[Scenario] | None, copied: set[str] | No
     stem_header = f"{stem}.h"
     declaring = _declaring_header(unit, scenarios, copied, src_dir)
     if copied is not None and stem_header in copied:
-        # A selected `<stem>.h` exists. It either declares the SUT (use it) or it
-        # does not — then we cannot add our own same-named header without shadowing
-        # the selected one, so refuse rather than emit a mislinked test.
+        # A selected `<stem>.h` exists. It either declares the functions under test
+        # (use it) or it does not — then we cannot add our own same-named header
+        # without shadowing the selected one, so refuse rather than emit a
+        # mislinked test.
+        covered = _functions_declared_by(unit, scenarios, copied, src_dir, stem_header)
         if declaring == stem_header:
-            return [stem_header]
+            missing = _wanted_functions(scenarios) - covered
+            if not missing:
+                return [stem_header]
+            # The stem header declares only *part* of the unit's functions under
+            # test (e.g. `foo.h` declares `foo_a` but not `foo_b`). The test would
+            # call the missing functions with no visible prototype; add a private
+            # helper header (a different name, so the selected file is not
+            # shadowed) declaring exactly those, grounded in the scanner.
+            helper_name = f"mtm_unit_{stem}_extra.h"
+            if copied is not None and helper_name in copied:
+                # A selected file already has the helper's name: writing our
+                # interface header would shadow it (interface/ precedes src/ on the
+                # include path), exactly the shadowing this rule exists to avoid.
+                out.limitations.append(
+                    f"unit {unit.id} ({unit.path}) cannot be linked: a selected "
+                    f"{helper_name!r} exists and cannot be shadowed by the private "
+                    "helper header")
+                return None
+            helper = _synthesise_unit_header(unit, scenarios, iface_dir, out,
+                                             header_name=helper_name,
+                                             only=sorted(missing))
+            if not helper:
+                return None
+            return [stem_header, helper]
         out.limitations.append(
             f"unit {unit.id} ({unit.path}) cannot be linked: a selected "
             f"{stem_header!r} exists but does not declare its functions under test")
@@ -175,6 +204,26 @@ def _unit_includes(unit, scenarios: list[Scenario] | None, copied: set[str] | No
     if synth not in include_names:
         include_names.append(synth)
     return include_names
+
+
+def _wanted_functions(scenarios: list[Scenario] | None) -> set[str]:
+    """The functions under test named by *scenarios*."""
+    return {sc.function for sc in (scenarios or [])}
+
+
+def _functions_declared_by(unit, scenarios: list[Scenario] | None,
+                           copied: set[str] | None, src_dir: Path | None,
+                           header: str) -> set[str]:
+    """Functions under test that a copied local *header* actually declares."""
+    if copied is not None and header not in copied:
+        return set()
+    path = (src_dir / header) if src_dir is not None else None
+    if path is None or not path.is_file():
+        return set()
+    from .cscan import scan_prototypes
+
+    declared = {n for n, _ in scan_prototypes(path)}
+    return declared & _wanted_functions(scenarios)
 
 
 def _declaring_header(unit, scenarios: list[Scenario] | None,
@@ -594,7 +643,8 @@ def _ident(symbol: str) -> str:
 
 
 def _synthesise_unit_header(unit, scenarios: list[Scenario], iface_dir: Path,
-                            out: "Generated") -> str:
+                            out: "Generated", *, header_name: str | None = None,
+                            only: list[str] | None = None) -> str:
     """Materialise a private ``<stem>.h`` declaring the unit's functions under test.
 
     Ceedling (``test_<stem>.c``) links the source ``<stem>.c`` **only when the test
@@ -604,10 +654,14 @@ def _synthesise_unit_header(unit, scenarios: list[Scenario], iface_dir: Path,
     invented) and written under the private interface directory (on the include
     path, never into the source directory or the inputs). Returns the include name,
     or ``""`` when no prototype for a function under test could be produced.
+
+    *header_name* overrides the stem name (used for the private *helper* header
+    that declares only the functions a selected stem header omits); *only*
+    restricts the declarations to that function set.
     """
     stem = Path(unit.path).stem
-    header_name = f"{stem}.h"
-    wanted = {sc.function for sc in scenarios}
+    header_name = header_name or f"{stem}.h"
+    wanted = set(only) if only is not None else {sc.function for sc in scenarios}
     decls = [f"{fn['signature']};" for fn in getattr(unit, "functions", []) or []
              if fn.get("name") in wanted and fn.get("signature")]
     if not decls:
@@ -615,7 +669,7 @@ def _synthesise_unit_header(unit, scenarios: list[Scenario], iface_dir: Path,
             f"unit {unit.id} ({unit.path}) cannot be materialised: no scanned "
             "prototype exists for its functions under test")
         return ""
-    guard = f"MTM_UNIT_{_ident(stem).upper()}_H"
+    guard = f"MTM_UNIT_{_ident(header_name.rsplit('.', 1)[0]).upper()}_H"
     body = (
         f"/* Private declarations for {unit.path} — its functions under test are\n"
         " * declared so the test can call them and Ceedling links the translation\n"
