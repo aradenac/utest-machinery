@@ -2881,6 +2881,240 @@ def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     assert "typedef unsigned short Q;" in body, body
 
 
+def _llm_fallback_bench(tmp_path, name, field, *, header_extra=""):
+    """A bench whose header declares only the SUT, plus an LLM mock field.
+
+    Returns ``(bench, out)`` from ``generate_suite``. ``dep_write`` is declared in
+    **no** selected file, so the plan's ``mock_declarations`` field is the only
+    authority for it — the LLM-fallback path.
+    """
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+    import yaml
+
+    bench = tmp_path / name
+    bench.mkdir()
+    (bench / "foo.c").write_text("int use(int a) { return a ? 1 : 2; }\n")
+    (bench / "foo.h").write_text(
+        f"#ifndef FOO_H\n#define FOO_H\n{header_extra}int use(int a);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **FOO-001**: `use` returns 1.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(
+        bench, yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", []))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_write"],
+        "mock_declarations": {"dep_write": field},
+        "cases": [{"args": [5], "expected": 1, "mocks": {"dep_write": {}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    return bench, generate_suite(bench, plan, inventory, resolve=_fake_resolve)
+
+
+def test_a_typedef_carried_in_an_llm_mock_field_travels_with_its_prototype(tmp_path):
+    """TC-2 (MANDATORY): the LLM-fallback prototype must not name an undefined alias.
+
+    A ``mock_declarations`` field may pair a ``typedef`` with the prototype that
+    uses it (``typedef unsigned short Q;\\nint dep_write(Q q);``) while **no**
+    selected file defines ``Q``. The pre-lot-D generator passed the whole field
+    through and carried the alias; the lot-D LLM path kept only the prototype,
+    emitted ``int dep_write(Q q);`` with ``Q`` undefined, ran the scenario and
+    reported ``limitations: []`` — uncompilable C behind a **false success**
+    (I1/AP-06). The alias must be carried with the prototype or a named limitation
+    recorded, never a body-less alias with empty limitations.
+    """
+    import shutil
+    import subprocess
+
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-typedef-in-field",
+        "typedef unsigned short Q;\nint dep_write(Q q);")
+    # Honest either way: the alias is defined in the interface header, OR the mock
+    # was refused with a named limitation. Never a declaration naming an undefined
+    # alias behind empty limitations.
+    if out.test_functions:
+        body = (bench / ".mtm" / "gen" / "interface"
+                / "mtm_dep_dep_write.h").read_text()
+        assert "typedef unsigned short Q;" in body, body
+    else:
+        assert any("has no usable declaration" in lim for lim in out.limitations), \
+            out.limitations
+    # The decisive proof: a TU that includes the interface header then the unit
+    # header (the order the generated test uses) must compile — it did not when `Q`
+    # was left undefined.
+    if out.test_functions and shutil.which("gcc"):
+        comp = tmp_path / "compile-tc2"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_write.h"\n#include "foo.h"\n'
+                      "int main(void) { return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_a_typedef_carried_in_an_llm_field_uses_the_alias_machinery_not_a_duplicate(tmp_path):
+    """Contrast for TC-2: when the selected build context *does* define the alias,
+    the interface header `#include`s its real defining header instead of
+    re-declaring it — the fix reuses the existing alias machinery, it does not
+    force a verbatim duplicate that would fight the compiler over the alias."""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-alias-also-real",
+        "typedef unsigned short Q;\nint dep_write(Q q);",
+        header_extra="typedef unsigned short Q;\n")
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
+    assert '#include "foo.h"' in body, body
+    assert "typedef unsigned short Q;" not in body, body
+
+
+def test_a_chained_typedef_in_an_llm_field_is_carried_whole(tmp_path):
+    """Neighbouring shape of TC-2: a field may define a chain
+    (``typedef int *P; typedef P *Q; int dep_write(Q q);``). Both statements must
+    be carried, or ``Q`` names a type whose ``P`` base is undefined."""
+    import shutil
+    import subprocess
+
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-chained",
+        "typedef int *P;\ntypedef P *Q;\nint dep_write(Q q);")
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
+    assert "typedef int *P;" in body and "typedef P *Q;" in body, body
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-tc2-chain"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_write.h"\n#include "foo.h"\n'
+                      "int main(void) { return 0; }\n")
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_an_llm_prototype_naming_an_undefined_type_is_a_named_limitation(tmp_path):
+    """TC-2 neighbor (MANDATORY): no companion `typedef`, the alias defined nowhere.
+
+    The same I1/AP-06 defect as TC-2 through the other route: a field that names an
+    alias but never defines it (``int dep_write(Q q);``) with **no** selected
+    definition and no companion ``typedef``. Pre-existing since at least base
+    ``8a640be``, it emitted ``int dep_write(Q q);`` with ``Q`` undefined and ran the
+    scenario behind ``limitations: []`` — uncompilable C as a false success. The
+    declaration must be refused with a precise per-symbol limitation naming the
+    undefined type; no test function and no body-less interface header.
+    """
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-bare-undefined",
+        "int dep_write(Q q);")
+    assert out.test_functions == [], out.test_functions
+    assert any("undefined type 'Q'" in lim and "dep_write" in lim
+               for lim in out.limitations), out.limitations
+    # Nothing dangling: no interface header was emitted for the refused mock.
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").exists()
+
+
+def test_llm_prototypes_using_only_standard_and_real_types_still_emit(tmp_path):
+    """Contrast for the undefined-type refusal: the guard must reject **only** a
+    genuinely undefined named type, never a primitive, a pointer, a `<stdint.h>`
+    scalar (the interface header always includes `<stdint.h>`) or a parameter's own
+    name. Over-refusing here would shrink the verified domain."""
+    import shutil
+    import subprocess
+
+    bench, out = _llm_fallback_bench(
+        tmp_path, "standard-types-ok",
+        "int dep_write(uint8_t channel, const uint16_t *samples, void *ctx);")
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
+    assert "int dep_write(uint8_t channel, const uint16_t *samples" in body, body
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-std-types"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_write.h"\nint main(void) { return 0; }\n')
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_a_struct_or_enum_tag_in_an_llm_prototype_is_not_an_undefined_type(tmp_path):
+    """Neighboring acceptance: a ``struct``/``union``/``enum`` *tag* names an
+    aggregate by identity, not an alias that must be defined; the guard must not
+    read the tag as an undefined named type. (The tag's own completeness is the
+    SUT's concern — the same declaration the selected header would supply.)"""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tag-ok",
+        "int dep_write(struct Foo *p, enum Bar e);")
+    assert out.test_functions, out.limitations
+
+
+def test_an_undefined_alias_in_an_llm_return_type_is_also_refused(tmp_path):
+    """Neighboring shape: the undefined type may be the **return** type, not a
+    parameter. The guard must cover both spellings, or the same uncompilable-C
+    false success returns through the return position."""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-undefined-return",
+        "Q dep_write(int a);")
+    assert out.test_functions == [], out.test_functions
+    assert any("undefined type 'Q'" in lim for lim in out.limitations), out.limitations
+
+
+def test_a_field_typedef_resting_on_an_undefined_base_is_refused(tmp_path):
+    """Same class one level down: the field's own companion ``typedef`` may rest on
+    a type nothing defines (``typedef P *Q;`` with ``P`` undefined), so carrying it
+    verbatim would emit ``typedef P *Q;`` — uncompilable C — behind empty
+    limitations. The guard must follow the field statements, not just the
+    prototype's own spellings."""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-field-base-undefined",
+        "typedef P *Q;\nint dep_write(Q q);")
+    assert out.test_functions == [], out.test_functions
+    assert any("undefined type 'P'" in lim for lim in out.limitations), out.limitations
+    assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").exists()
+
+
+def test_a_field_typedef_with_a_defined_chain_is_still_carried(tmp_path):
+    """Contrast: a self-contained chain in the field (``typedef int *P; typedef P
+    *Q;``) has no undefined base and must still emit and compile — the base check
+    must not over-refuse a legitimate chained alias."""
+    import shutil
+    import subprocess
+
+    bench, out = _llm_fallback_bench(
+        tmp_path, "tc2-chain-defined",
+        "typedef int *P;\ntypedef P *Q;\nint dep_write(Q q);")
+    assert out.test_functions, out.limitations
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-chain-defined"
+        comp.mkdir()
+        tu = comp / "tu.c"
+        tu.write_text('#include "mtm_dep_dep_write.h"\nint main(void) { return 0; }\n')
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-I", str(bench / ".mtm" / "gen" / "interface"),
+             "-c", str(tu), "-o", str(comp / "tu.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+
 # --- AP-08 / IMP-18: a real declaration is authoritative over an LLM proposal --
 
 
