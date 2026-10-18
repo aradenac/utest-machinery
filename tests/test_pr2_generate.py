@@ -109,6 +109,64 @@ def test_adapted_unit_with_absent_header_is_built_from_a_private_shim(fixture_be
     assert not (EXAMPLES / "vendor-adapter" / "vendor_adc.h").exists()
 
 
+@pytest.mark.docker
+def test_headerless_unit_is_linked_and_executed_from_its_private_declaration(
+        tmp_path, product_image):
+    """D3 / C5 end-to-end: a standalone `foo.c` (no `foo.h`) whose only local
+    include declares a *dependency* must still link and run.
+
+    The private declaration header is named after the source stem (`foo.h`), so
+    Ceedling links `foo.c` into the test executable. A synthetic name (e.g.
+    `mtm_unit_foo.h`) compiles but fails to link — `undefined reference to 'foo'`
+    — which the run would surface as an opaque `TOOL_FAILURE` rather than a result.
+    The input `foo.c` is never modified (SYS-004).
+    """
+    import hashlib
+    import json as _json
+
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "headerless"
+    bench.mkdir()
+    foo_before = "int foo(int a, int b) { return a + b; }\n"
+    (bench / "foo.c").write_text(foo_before)
+    # `dep.h` declares only a dependency — nothing declares `foo`.
+    (bench / "dep.h").write_text(
+        "#ifndef DEP_H\n#define DEP_H\nint dep(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo` SHALL return the sum of its arguments.\n")
+    digest = hashlib.sha256((bench / "foo.c").read_bytes()).hexdigest()
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("dep.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(_json.dumps({"scenarios": [{
+        "id": "S1", "title": "t", "function": "foo",
+        "requirement_ids": ["FOO-001"], "mocks": [],
+        "cases": [{"args": [2, 3], "expected": 5}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions, out.limitations
+    # The private header carries the source stem and lives under the revision.
+    assert (bench / REVISION / "interface" / "foo.h").is_file()
+    assert not (bench / REVISION / "src" / "foo.h").exists()
+
+    run = run_ceedling(bench, image_ref=product_image)
+    # Linked and executed: the point of the D3 fix. A synthetic header name would
+    # have left `foo` undefined and produced no Unity summary at all.
+    assert run.ran is True, run.diagnostics
+    assert run.executed >= 1, run.diagnostics
+    assert run.failed == 0, run.diagnostics
+    # The selected input is untouched.
+    assert hashlib.sha256((bench / "foo.c").read_bytes()).hexdigest() == digest
+
+
 def _offline_generate(bench: Path):
     """Run the full generate pipeline offline (injected runner, no Docker).
 

@@ -62,14 +62,14 @@ def _generate(bench: Path, runner):
 
 
 def _run(ok: bool, returncode: int, *, stdout="", stderr="", timed_out=False,
-         ran=False, total=0, passed=0, failed=0, failures=None):
+         ran=False, total=0, passed=0, failed=0, ignored=0, failures=None):
     from mtm.ceedling import CeedlingRun
 
     return CeedlingRun(
         ok=ok, returncode=returncode, stdout=stdout, stderr=stderr,
         argv=["docker", "run", "img:test", "ceedling", "test:all"],
         timed_out=timed_out, ran=ran, total=total, passed=passed, failed=failed,
-        failures=failures or [],
+        ignored=ignored, failures=failures or [],
     )
 
 
@@ -104,7 +104,7 @@ def test_unity_summary_aggregates_every_test_executable():
         "test_a.c:9:test_z:FAIL: Expected 5 Was 2\n"
         "3 Tests 0 Failures 0 Ignored\nOK\n"
     )
-    assert _unity_summary(stdout) == (5, 4, 1)
+    assert _unity_summary(stdout) == (5, 4, 1, 0)  # total, passed, failed, ignored
     assert _unity_summary("no summary here") is None
     failures = parse_failures(stdout)
     assert len(failures) == 1 and failures[0][1] == "Expected 5 Was 2"
@@ -629,11 +629,128 @@ def test_a_unit_without_a_selected_header_gets_a_private_declaration(fixture_ben
     out = generate_suite(bench, plan, inventory)
     assert len(out.test_functions) == 1
     # A private declaration header exists and is included; no fabricated foo.h.
-    private = bench / ".mtm" / "gen" / "interface" / "mtm_unit_foo.h"
+    # It carries the source stem (`foo.h`) so Ceedling links `foo.c` into the
+    # test's link line; a synthetic name would leave the SUT undefined.
+    private = bench / ".mtm" / "gen" / "interface" / "foo.h"
     assert private.is_file()
     assert "int foo_add(int a, int b);" in private.read_text()
-    assert 'mtm_unit_foo.h' in (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert '"foo.h"' in (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    # The declaration header must live in the private interface directory, never
+    # in the copied source directory (SYS-004: inputs are never written to).
     assert not (bench / ".mtm" / "gen" / "src" / "foo.h").exists()
+
+
+# --- PR #14 third review findings D1–D3 -------------------------------------
+
+
+def test_all_ignored_tests_are_not_a_complete_success(fixture_bench):
+    """D1: an ignored Unity test is enumerated (`N Tests ... K Ignored`) but its
+    body does not run. `executed = total - ignored`, so all-ignored must not pass
+    the generated-count gate — zero test bodies ran."""
+    from mtm.ceedling import _unity_summary
+
+    assert _unity_summary("3 Tests 0 Failures 3 Ignored") == (3, 3, 0, 3)
+
+    bench = fixture_bench("mocked-sensor")  # generates 3 tests
+
+    def runner(bench_root, *, image_ref):
+        # Unity enumerates 3 but ignores all 3 (none executed).
+        return _run(True, 0, stdout="-----------------------\n3 Tests 0 Failures 3 Ignored\nOK\n",
+                    ran=True, total=3, passed=3, failed=0, ignored=3)
+
+    result = _generate(bench, runner)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+    assert "ignored" in result.smoke["reason"].lower()
+    assert result.findings == []
+
+
+def test_a_partially_ignored_run_is_incomplete(fixture_bench):
+    """D1 contrast: 2 of 3 executed, 1 ignored -> not full coverage, not SUCCEEDED."""
+    bench = fixture_bench("mocked-sensor")  # generates 3 tests
+
+    def runner(bench_root, *, image_ref):
+        return _run(True, 0, stdout="-----------------------\n3 Tests 0 Failures 1 Ignored\nOK\n",
+                    ran=True, total=3, passed=3, failed=0, ignored=1)
+
+    result = _generate(bench, runner)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+
+
+def test_assertion_finding_with_a_signal_is_a_tool_failure_not_a_finding(fixture_bench):
+    """D2: a tool fault (signal/timeout) must outrank a co-observed assertion. A
+    parseable failure summary plus a killed runner is TOOL_FAILURE/30, with the
+    assertion finding preserved — never just FINDINGS/10."""
+    bench = fixture_bench("saturation")  # generates 2 tests
+
+    def runner(bench_root, *, image_ref):
+        total = _generated_count(bench_root)
+        summary = ("test_saturation.c:12:test_u_abc_S1:FAIL: Expected 10 Was 9\n"
+                   f"-----------------------\n{total} Tests 1 Failures 0 Ignored\nFAIL\n")
+        return _run(False, -9, stdout=summary, ran=True, total=total,
+                    passed=total - 1, failed=1,
+                    failures=[("test_u_abc_S1", "Expected 10 Was 9")])
+
+    result = _generate(bench, runner)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+    assert "signal" in result.smoke["reason"].lower()
+    # The assertion evidence is preserved alongside the tool failure.
+    assert result.smoke["findings"] and result.smoke["findings"][0]["observed"] == "Expected 10 Was 9"
+
+
+def test_ordinary_asserted_failure_stays_a_finding_contrast(fixture_bench):
+    """D2 contrast: a *normal* Unity failure exit (nonzero, no signal/timeout) with
+    a covering summary stays a FINDINGS/10, not a tool failure."""
+    bench = fixture_bench("saturation")
+
+    def runner(bench_root, *, image_ref):
+        total = _generated_count(bench_root)
+        summary = ("test_saturation.c:12:test_u_abc_S1:FAIL: Expected 10 Was 9\n"
+                   f"-----------------------\n{total} Tests 1 Failures 0 Ignored\nFAIL\n")
+        return _run(False, 1, stdout=summary, ran=True, total=total,
+                    passed=total - 1, failed=1,
+                    failures=[("test_u_abc_S1", "Expected 10 Was 9")])
+
+    result = _generate(bench, runner)
+    assert result.status == "FINDINGS" and result.exit_code == 10
+
+
+def test_a_source_with_an_unrelated_local_include_still_gets_its_own_declaration(
+        tmp_path):
+    """D3: `foo.c` includes `dep.h`, which declares only a dependency (no `foo.h`
+    exists). The chosen include must not be `dep.h` (it lacks the SUT prototype);
+    a scanner-grounded private declaration for `foo` is materialised instead."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "unrelated-include"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        '#include "dep.h"\nint foo(int x) { return dep(x) + 1; }\n')
+    (bench / "dep.h").write_text(
+        "#ifndef DEP_H\n#define DEP_H\nint dep(int x);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `foo` SHALL increment its dependency's result.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("dep.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [{
+        "id": "S1", "title": "t", "function": "foo",
+        "requirement_ids": ["FOO-001"], "mocks": [],
+        "cases": [{"args": [4], "expected": 5}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    generate_suite(bench, plan, inventory)
+    test_src = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    # The test must see a declaration of `foo`, not only of `dep` — and it must be
+    # named after the source stem so Ceedling links `foo.c`.
+    assert '"foo.h"' in test_src
+    assert '"dep.h"' not in test_src
+    decl = (bench / ".mtm" / "gen" / "interface" / "foo.h").read_text()
+    assert "int foo(int x);" in decl
 
 
 

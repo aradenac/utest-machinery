@@ -222,7 +222,8 @@ def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
         "command": " ".join(run.argv),
         "stdout": run.stdout[-6000:],
         "stderr": run.stderr[-2000:],
-        "unity": {"total": run.total, "passed": run.passed, "failed": run.failed},
+        "unity": {"total": run.total, "passed": run.passed, "failed": run.failed,
+                  "ignored": run.ignored, "executed": run.executed},
         "findings": [],
     }
     if not run.ran:
@@ -231,28 +232,53 @@ def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
         smoke["diagnostics"] = run.diagnostics[-4000:]
         return smoke
 
-    if run.failed == 0 and run.returncode != 0:
-        # Unity reported no failures yet the process exited non-zero: something
-        # outside the assertions failed. Treat it as a tool fault, not success.
+    # An abnormal termination (timeout, signal, or a runner-level non-zero exit)
+    # outranks *any* assertion also observed in the same run: a tool fault must
+    # never be masked by a co-observed finding (``workflow-failures.md``: surface
+    # the most severe operation-blocking category and preserve all findings). The
+    # assertion findings are computed first so they are carried alongside.
+    smoke["findings"] = _findings(run, plan)
+
+    abnormal = (run.timed_out or run.returncode < 0
+                or (run.returncode != 0 and run.failed == 0))
+    if abnormal:
+        # The suite produced a summary, so the fault is in the *run*, not in the
+        # build: state it in those terms rather than the no-summary wording.
+        kind = ("the test run timed out" if run.timed_out
+                else f"the test runner was killed by signal {-run.returncode}"
+                if run.returncode < 0
+                else f"the runner exited {run.returncode} although Unity reported no "
+                     "failures")
         smoke["ran"] = False
-        smoke["reason"] = (f"Unity reported no test failures but the runner exited "
-                           f"{run.returncode}; not a verified result")
+        smoke["reason"] = (
+            f"{kind}; the suite did not complete normally"
+            + (f" — {len(smoke['findings'])} assertion finding(s) were also observed "
+               "and are preserved alongside this tool failure" if smoke["findings"]
+               else "")
+        )
         smoke["diagnostics"] = run.diagnostics[-4000:]
         return smoke
 
-    # The generated manifest is the authority on how many tests must run. If Unity
-    # executed fewer, a partial execution (a skipped binary, an ignored test) would
-    # otherwise be presented as complete coverage of the plan.
+    # The generated manifest is the authority on how many tests must run. An
+    # *ignored* test is enumerated by Unity but its body does not run, so it is
+    # not executed coverage: require every generated test to have executed and
+    # none to be ignored, or the run does not cover the plan.
     expected = len(generated.test_functions)
     smoke["expected_tests"] = expected
-    if run.total < expected:
+    if run.executed < expected:
         smoke["ran"] = False
-        smoke["reason"] = (f"only {run.total} of the {expected} generated test(s) "
-                           "executed; the run does not cover the plan")
+        smoke["reason"] = (f"only {run.executed} of the {expected} generated test(s) "
+                           f"executed ({run.ignored} ignored); the run does not cover "
+                           "the plan")
+        smoke["diagnostics"] = run.diagnostics[-4000:]
+        return smoke
+    if run.ignored:
+        smoke["ran"] = False
+        smoke["reason"] = (f"{run.ignored} test(s) were ignored, so the run does not "
+                           "fully cover the plan")
         smoke["diagnostics"] = run.diagnostics[-4000:]
         return smoke
 
-    smoke["findings"] = _findings(run, plan)
     if run.failed and not smoke["findings"]:
         # The summary counted failures but no ``:FAIL`` line could be parsed (an
         # unexpected Unity format). A counted failure is still a real defect, not

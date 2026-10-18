@@ -51,28 +51,40 @@ class CeedlingRun:
     total: int = 0
     passed: int = 0
     failed: int = 0
+    #: Tests Unity enumerated but *skipped* (``K Ignored``). An ignored test did
+    #: not execute its body, so it must not count as executed coverage.
+    ignored: int = 0
     #: (test_function, reason) for each Unity assertion failure.
     failures: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def executed(self) -> int:
+        """Tests whose body actually ran (enumerated minus ignored)."""
+        return max(self.total - self.ignored, 0)
 
     @property
     def diagnostics(self) -> str:
         return (self.stderr or self.stdout).strip()
 
 
-def _unity_summary(stdout: str) -> tuple[int, int, int] | None:
+def _unity_summary(stdout: str) -> tuple[int, int, int, int] | None:
     """Parse Unity's ``N Tests M Failures K Ignored`` summary, or ``None``.
 
     Ceedling builds and runs **one executable per test file**, so a multi-unit
     scope produces several per-file summaries and no grand total. Sum them, so a
     multi-unit bench is not under-counted to its first file. Returns ``None`` when
     there is no summary at all — the only honest signal that nothing ran.
+
+    The ignored count is retained: an ignored test is enumerated but its body does
+    not run, so it must not be mistaken for executed coverage.
     """
     matches = list(re.finditer(r"(\d+)\s+Tests\s+(\d+)\s+Failures\s+(\d+)\s+Ignored", stdout))
     if not matches:
         return None
     total = sum(int(m.group(1)) for m in matches)
     failures = sum(int(m.group(2)) for m in matches)
-    return total, total - failures, failures
+    ignored = sum(int(m.group(3)) for m in matches)
+    return total, total - failures, failures, ignored
 
 
 def parse_failures(stdout: str) -> list[tuple[str, str]]:
@@ -142,7 +154,7 @@ def run_ceedling(
     )
     if summary is not None:
         run.ran = True
-        run.total, run.passed, run.failed = summary
+        run.total, run.passed, run.failed, run.ignored = summary
         run.failures = parse_failures(out)
     return run
 
