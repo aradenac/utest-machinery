@@ -261,6 +261,45 @@ def test_tag_form_struct_pointee_is_flagged_like_a_typedef_alias():
         PlannedCase(args=[{"expr": "(struct S){7}"}], expected=9), {}, [p], aggregates) is None
 
 
+def test_qualified_aggregate_alias_is_refused_like_the_bare_alias():
+    """Same class as the tag-form fix, on the *alias* spelling.
+
+    ``is_aggregate_base`` tested the raw base string against the recorded aliases
+    while the tag branch tested qualifier-stripped tokens, so ``Sample *p`` was
+    refused but ``const Sample *p`` / ``volatile Sample *p`` slipped through and
+    emitted ``const Sample out0_0 = (const Sample)9;`` — C that does not compile
+    (``conversion to non-scalar type requested``), the opaque ``TOOL_FAILURE`` the
+    refusal exists to prevent. A pointee qualifier does not change that the
+    pointed-to type is an aggregate.
+    """
+    from mtm.gen import is_aggregate_base
+    aggregates = aggregate_aliases("typedef struct { int v; } Sample;\n")
+    assert is_aggregate_base("Sample", aggregates)                  # bare alias
+    assert is_aggregate_base("const Sample", aggregates)            # qualified alias
+    assert is_aggregate_base("volatile Sample", aggregates)
+    assert is_aggregate_base("restrict Sample", aggregates)
+    assert is_aggregate_base("volatile const Sample", aggregates)   # keyword ordering
+    # Scalar pointees are unaffected — no over-refusal (incl. multi-token scalars).
+    assert not is_aggregate_base("int", aggregates)
+    assert not is_aggregate_base("const int", aggregates)
+    assert not is_aggregate_base("char", aggregates)
+    assert not is_aggregate_base("unsigned long", aggregates)
+    assert not is_aggregate_base("unsigned const long", aggregates)
+    assert not is_aggregate_base("float", aggregates)
+    # A scalar for any qualified alias is refused; the `{"expr": …}` hatch stays open.
+    for decl in ("int f(Sample *p)", "int f(const Sample *p)", "int f(volatile Sample *p)"):
+        p = func_params(decl)[0]
+        problem = _case_problem(PlannedCase(args=[9], expected=9), {}, [p], aggregates)
+        assert problem and "aggregate" in problem, decl
+        assert _case_problem(
+            PlannedCase(args=[{"expr": "(Sample){7}"}], expected=9),
+            {}, [p], aggregates) is None, decl
+    # The mock out-parameter path delegates to the same predicate: a qualified
+    # aggregate out-control must be flagged so its scalar write-through is refused.
+    assert mock_controls("void dep(Sample *out);", "dep", aggregates)["out_aggregate"] == {"out"}
+    assert mock_controls("void dep(const Sample *out);", "dep", aggregates)["out_aggregate"] == {"out"}
+
+
 def test_aggregate_pointee_accepts_an_explicit_c_initializer():
     aggregates = aggregate_aliases(_SHIM)
     ctrl = mock_controls("int vendor_adc_read(uint8_t channel, vendor_adc_sample_t *sample);",

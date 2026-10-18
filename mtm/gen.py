@@ -559,9 +559,17 @@ def is_aggregate_base(base: str, aggregates: set[str] | None = None) -> bool:
     ``struct S *p`` be admitted and emit ``struct S out0_0 = (struct S)9;``, which
     does not compile — the opaque-``TOOL_FAILURE`` class this refusal exists to
     prevent.
+
+    The alias test runs on the **qualifier-stripped** tokens, not the raw *base*:
+    the recorded aliases are bare type names, so ``const Sample``/``volatile
+    Sample`` name the same aggregate as ``Sample`` and must be refused too.
+    Testing ``base`` verbatim let a *qualified* alias (``const Sample *p``,
+    ``volatile Sample *p`` — common in C APIs) slip past the refusal and emit the
+    same uncompilable initialisation, the very class the tag branch above fixed
+    for ``struct S``.
     """
     tokens = [t for t in base.split() if t not in ("const", "volatile", "restrict")]
-    if base in (aggregates or set()):
+    if any(t in (aggregates or set()) for t in tokens):
         return True
     return bool(tokens) and tokens[0] in ("struct", "union")
 

@@ -2157,6 +2157,45 @@ def test_an_aggregate_expect_out_is_refused_not_emitted_uncompilable(tmp_path):
     assert ok.test_functions, ok.limitations
 
 
+def test_a_qualified_aggregate_pointee_scalar_is_refused_not_emitted_uncompilable(tmp_path):
+    """End-to-end for the qualifier+alias class (PR #14 recheck #10).
+
+    ``is_aggregate_base`` tested the raw base against the recorded aliases, so a
+    *qualified* alias pointee (``const Sample *p``) was admitted with a scalar and
+    emitted ``const Sample out0_0 = (const Sample)9;`` — ``conversion to non-scalar
+    type requested`` under ``-Werror``, an opaque ``TOOL_FAILURE`` with
+    ``limitations == []``. The bare ``Sample *`` form was already refused by the
+    same predicate, so the two spellings must behave alike.
+    """
+    bench, out, source = _out_bench(
+        tmp_path, "const-agg",
+        "typedef struct { int v; } Sample;\n"
+        "int f(const Sample *p) { return p->v; }\n",
+        "#ifndef FOO_H\n#define FOO_H\ntypedef struct { int v; } Sample;\n"
+        "int f(const Sample *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [9], "expected": 9}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions == [], out.test_functions
+    assert any("aggregate" in l for l in out.limitations), out.limitations
+    assert "const Sample" not in source  # nothing emitted an aggregate initialisation
+    # The explicit-initializer hatch is still admitted (the case becomes generatable).
+    _, ok, ok_src = _out_bench(
+        tmp_path, "const-agg-expr",
+        "typedef struct { int v; } Sample;\n"
+        "int f(const Sample *p) { return p->v; }\n",
+        "#ifndef FOO_H\n#define FOO_H\ntypedef struct { int v; } Sample;\n"
+        "int f(const Sample *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [{"expr": "(Sample){7}"}], "expected": 7}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert ok.test_functions, ok.limitations
+    assert "const Sample out0_0 = (const Sample)(Sample){7};" in ok_src, ok_src
+
+
+
 @pytest.mark.docker
 def test_real_image_observes_a_reassigned_multi_level_pointer(tmp_path, product_image):
     """AP-02 for the F1 residual: the generated ``int **`` and ``void **``
