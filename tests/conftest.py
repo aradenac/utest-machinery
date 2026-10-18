@@ -57,3 +57,20 @@ def bench(tmp_path: Path) -> Path:
     record, code = run_mtm_json("init", str(target))
     assert code == 0, record
     return target
+
+
+@pytest.fixture
+def product_image() -> str:
+    """The built product image ref, or skip the test when it is absent.
+
+    Execution-tier PR 2 tests need the image (Ruby/Ceedling and the C toolchain
+    live there). The fast CI matrix has no image, so these are skipped; the
+    ``generate-smoke`` CI job builds it and runs the end-to-end path.
+    """
+    from mtm.docker import image_exists
+    from mtm.docker import image_ref as _image_ref
+
+    ref = _image_ref()
+    if not image_exists(ref):
+        pytest.skip(f"product image {ref} is not built (execution-tier test)")
+    return ref

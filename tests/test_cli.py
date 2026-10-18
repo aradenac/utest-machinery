@@ -136,7 +136,7 @@ def test_doctor_flags_world_readable_credentials(bench: Path, tmp_path: Path):
     assert "600" in entry["action"]
 
 
-@pytest.mark.parametrize("command", ["plan", "generate", "verify", "interpret", "report"])
+@pytest.mark.parametrize("command", ["verify", "interpret", "report"])
 def test_unimplemented_commands_are_explicit(command: str, bench: Path):
     record, code = run_mtm_json(command, cwd=bench)
     assert code == 40

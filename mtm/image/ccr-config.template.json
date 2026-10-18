@@ -1,0 +1,24 @@
+{
+  "_comment": "Sanitized CCR route template. No secret is present: api_key is substituted at runtime from the credentials env file by mtm-llm.sh. Derived from the validated host route (worklog/decisions/0004-in-image-llm-route.md): provider scaleway, type openai_chat_completions, model deepseek-v4.1-flash. The base URL comes from SCW_BASE_URL at runtime. The loopback gateway block is required: without it CCR rejects the client key with an authentication plugin error.",
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "API_TIMEOUT_MS": 600000,
+  "LOG": false,
+  "gateway": { "enabled": true, "host": "127.0.0.1", "port": 3456 },
+  "Providers": [
+    {
+      "name": "scaleway",
+      "id": "scaleway",
+      "type": "openai_chat_completions",
+      "api_base_url": "${SCW_BASE_URL}",
+      "api_key": "${SCW_BEARER_TOKEN}",
+      "models": ["deepseek-v4.1-flash"],
+      "transformer": {}
+    }
+  ],
+  "Router": {
+    "builtInRules": { "claude-code": { "enabled": true } },
+    "fallback": { "mode": "off", "models": [], "retryCount": 1 },
+    "rules": []
+  }
+}

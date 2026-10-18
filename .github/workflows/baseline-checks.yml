@@ -64,3 +64,59 @@ jobs:
           cd /tmp/bench
           PYTHONPATH="$REPO" python3 -m mtm.cli workflow run --run-id ci-ro || true
           grep -q 'return 0' /tmp/bench/selected.c
+
+  # PR 2: generation THROUGH THE CLI with the recorded (mock) provider, then a
+  # real Ceedling execution of the generated project in the product image. The
+  # recorded provider keeps the *plan* offline and token-free (no LLM); the image
+  # build proves the generated suite actually compiles and runs, which is the PR 2
+  # acceptance ("a fresh selected C/SDD fixture becomes an executable unit suite").
+  generate-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CLI dependencies
+        run: python3 -m pip install --quiet PyYAML jsonschema
+      - name: Build the generic image (Ruby + Ceedling + C toolchain)
+        run: python3 -m mtm.cli install
+      - name: Generate and run a unit suite from a fixture (mock provider)
+        run: |
+          REPO="$PWD"
+          mkdir -p /tmp/gen-bench
+          cp examples/mocked-sensor/* /tmp/gen-bench/
+          cd /tmp/gen-bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli init .
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sensor.c --kind source
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sensor.h --kind source
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sdd.md --kind spec
+          PYTHONPATH="$REPO" python3 -m mtm.cli --json generate --provider mock \
+            | tee /tmp/gen.json
+          python3 -c "import json; r=json.load(open('/tmp/gen.json')); \
+            assert r['status'] == 'SUCCEEDED', r; \
+            assert r['smoke']['built'] and r['smoke']['ran'], r; \
+            assert r['smoke']['unity']['total'] >= 1, r; \
+            assert r['provider']['name'] == 'mock', r"
+      - name: An intentional defect is detected against the SDD (exit 10)
+        run: |
+          REPO="$GITHUB_WORKSPACE"
+          mkdir -p /tmp/sat-bench && cp examples/saturation/* /tmp/sat-bench/
+          cd /tmp/sat-bench
+          PYTHONPATH="$REPO" python3 -m mtm.cli init .
+          for f in saturation.c saturation.h; do PYTHONPATH="$REPO" python3 -m mtm.cli scope add "$f" --kind source; done
+          PYTHONPATH="$REPO" python3 -m mtm.cli scope add sdd.md --kind spec
+          PYTHONPATH="$REPO" python3 -m mtm.cli --json generate --provider mock > /tmp/sat.json || true
+          python3 -c "import json; r=json.load(open('/tmp/sat.json')); \
+            assert r['status'] == 'FINDINGS' and r['exit_code'] == 10, r; \
+            assert r['findings'][0]['category'] == 'IMPLEMENTATION_DEFECT', r"
+      - name: The selected inputs are unchanged by generation
+        run: |
+          REPO="$GITHUB_WORKSPACE"
+          cd /tmp/gen-bench
+          sha256sum sensor.c sensor.h sdd.md > /tmp/before.txt
+          PYTHONPATH="$REPO" python3 -m mtm.cli --json generate --provider mock >/dev/null
+          sha256sum -c /tmp/before.txt
+

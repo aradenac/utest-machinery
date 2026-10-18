@@ -20,9 +20,11 @@ from . import MILESTONE, __version__
 from .commands import (
     Context,
     cmd_doctor,
+    cmd_generate,
     cmd_init,
     cmd_install,
     cmd_not_implemented,
+    cmd_plan,
     cmd_scope_add,
     cmd_scope_list,
     cmd_scope_remove,
@@ -82,9 +84,20 @@ def build_parser() -> argparse.ArgumentParser:
     wstatus = wf_sub.add_parser("status", help="inspect a run; a dead owner reconciles to INTERRUPTED")
     wstatus.add_argument("--run-id", required=True, help="the run id to inspect")
 
+    generate = sub.add_parser("generate", help="assess selected inputs, plan and generate a unit-test bench")
+    generate.add_argument("--provider", default="auto", choices=["auto", "mock", "claude-code"],
+                          help="generation model provider: 'auto'/'claude-code' run the in-image "
+                               "model (requires the image and credentials); 'mock' explicitly uses "
+                               "a recorded fixture response, offline and token-free — it is never "
+                               "selected implicitly")
+    generate.add_argument("--model", default="scaleway/deepseek-v4.1-flash",
+                          help="in-image model route")
+    generate.add_argument("--dry-run", action="store_true",
+                          help="inventory and feasibility only; do not call a model")
+
+    sub.add_parser("plan", help="view the verification plan and planned vs generated scenarios")
+
     for name, help_text in (
-        ("plan", "view the verification plan (later milestone)"),
-        ("generate", "generate tests and mocks (later milestone)"),
         ("verify", "run the frozen suite offline (later milestone)"),
         ("interpret", "interpret evidence with the LLM (later milestone)"),
         ("report", "open the results report (later milestone)"),
@@ -105,6 +118,8 @@ DISPATCH: dict[str, Callable[[Any, Context], dict[str, Any]]] = {
     "workflow-view": cmd_workflow_view,
     "workflow-run": cmd_workflow_run,
     "workflow-status": cmd_workflow_status,
+    "generate": cmd_generate,
+    "plan": cmd_plan,
 }
 
 
@@ -137,6 +152,32 @@ def _print_human(record: dict[str, Any], command: str) -> None:
         print(record["text_dag"])
     if record.get("cause"):
         print(f"  cause: {record['cause']}")
+    # 'generate' / 'plan': render the plan and its gaps in text, not only JSON.
+    for scenario in record.get("scenarios", []):
+        mark = "generated" if scenario.get("generated") else "MISSING"
+        oracle = scenario.get("oracle_kind", "?")
+        print(f"  - {scenario.get('id')} {scenario.get('function')} "
+              f"[{oracle}, {mark}] reqs={','.join(scenario.get('requirement_ids', []))}")
+        for anchor in scenario.get("anchors", []):
+            statement = (anchor.get("statement") or "").strip()
+            if statement:
+                print(f"      ↳ {anchor.get('requirement_id')}: {statement}")
+    if record.get("planned") is not None:
+        print(f"  planned={record.get('planned')} generated={record.get('generated')} "
+              f"undetermined={record.get('undetermined')}")
+    for proposal in record.get("proposals", []):
+        if proposal.get("proposal"):
+            print(f"  ! clarify {proposal['scenario']}: {proposal['proposal']}")
+    for finding in record.get("findings", []):
+        print(f"  ! finding [{finding.get('category')}] {finding.get('test')}: "
+              f"{finding.get('observed', '')} (expected: {finding.get('expected_behavior', '')})")
+    if record.get("feasibility_counts"):
+        print(f"  feasibility: {record['feasibility_counts']}")
+    provider = record.get("provider")
+    if isinstance(provider, dict) and provider:
+        model = provider.get("model") or ""
+        print(f"  provider: {provider.get('name')} ({provider.get('mode')})"
+              + (f" model={model}" if model else ""))
     # A 'status' consultation must surface the last operation's diagnosis in
     # text too, not only in --json: otherwise the failure it exists to report is
     # invisible to a human.
@@ -201,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
 
 #: Read-only consultations: they must never overwrite the last-operation journal,
 #: otherwise simply looking at status would erase the failure being diagnosed.
-READ_ONLY_COMMANDS = {"status", "workflow-view", "workflow-status"}
+READ_ONLY_COMMANDS = {"status", "workflow-view", "workflow-status", "plan"}
 
 
 def _fail(args: argparse.Namespace, command: str, err: MtmError) -> int:

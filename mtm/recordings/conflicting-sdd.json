@@ -1,0 +1,54 @@
+{
+  "fixture": "conflicting-sdd",
+  "note": "Recorded generation response used offline (no token). Demonstrates SYS-010: at speed exactly 100, CNF-001 and CNF-002 conflict, so the scenario MUST stay UNDETERMINED and no expected value is asserted for that input.",
+  "match": {
+    "functions": ["overspeed"],
+    "requirements": ["CNF-001", "CNF-002"]
+  },
+  "identity": {"model": "recorded-deepseek-v4.1-flash", "prompt_version": "plan-v2"},
+  "response": {
+    "scenarios": [
+      {
+        "id": "S1",
+        "title": "clearly below the threshold is not overspeed",
+        "function": "overspeed",
+        "requirement_ids": ["CNF-002"],
+        "technique": "equivalence partition",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [{"args": [50], "expected": 0, "note": "50 <= 100, alarm inactive"}],
+        "oracle": {"kind": "SPECIFIED",
+                   "statement": "Below or at 100 km/h the alarm is inactive.",
+                   "rationale": "CNF-002 unambiguously covers 50 km/h.", "proposal": ""}
+      },
+      {
+        "id": "S2",
+        "title": "clearly above the threshold is overspeed",
+        "function": "overspeed",
+        "requirement_ids": ["CNF-001"],
+        "technique": "equivalence partition",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [{"args": [150], "expected": 1, "note": "150 >= 100, alarm active"}],
+        "oracle": {"kind": "SPECIFIED",
+                   "statement": "At or above 100 km/h the alarm is active.",
+                   "rationale": "CNF-001 unambiguously covers 150 km/h.", "proposal": ""}
+      },
+      {
+        "id": "S3",
+        "title": "exactly at the threshold is contradictory",
+        "function": "overspeed",
+        "requirement_ids": ["CNF-001", "CNF-002"],
+        "technique": "conflict boundary",
+        "mocks": [],
+        "mock_declarations": {},
+        "cases": [{"args": [100], "expected": null, "note": "CNF-001 and CNF-002 disagree at 100"}],
+        "oracle": {"kind": "UNDETERMINED",
+                   "statement": "At exactly 100 km/h the two requirements demand opposite results.",
+                   "rationale": "CNF-001 requires active (>=100) while CNF-002 requires inactive (<=100).",
+                   "proposal": "Resolve whether the equality case is overspeed (change CNF-002 to '< 100') or not (change CNF-001 to '> 100')."}
+      }
+    ],
+    "omitted": []
+  }
+}

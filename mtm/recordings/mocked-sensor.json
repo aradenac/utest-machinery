@@ -1,0 +1,88 @@
+{
+  "fixture": "mocked-sensor",
+  "note": "Recorded generation response used offline (no token). Target IS the mocked return value, so no expected value can depend on an unknown real value; SEN-002/003/004/005 oracles come from the SDD text.",
+  "match": {
+    "functions": ["sample_sensor"],
+    "requirements": ["SEN-002", "SEN-003"]
+  },
+  "identity": {
+    "model": "recorded-deepseek-v4.1-flash",
+    "prompt_version": "plan-v2"
+  },
+  "response": {
+    "scenarios": [
+      {
+        "id": "S1",
+        "title": "dependency error returns SENSOR_ERROR and is called once",
+        "function": "sample_sensor",
+        "requirement_ids": ["SEN-001", "SEN-002"],
+        "technique": "dependency error",
+        "mocks": ["platform_read_sensor"],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [0],
+           "expected": "SENSOR_ERROR",
+           "mocks": {"platform_read_sensor": {"ret": 1, "reading": 0}},
+           "expect_out": {},
+           "expect_calls": {"platform_read_sensor": 1},
+           "note": "nonzero status -> error"}
+        ],
+        "oracle": {
+          "kind": "SPECIFIED",
+          "statement": "On dependency error the function returns SENSOR_ERROR.",
+          "rationale": "SEN-002 states SENSOR_ERROR on a nonzero dependency status.",
+          "proposal": ""
+        }
+      },
+      {
+        "id": "S2",
+        "title": "in-range reading is stored and accepted",
+        "function": "sample_sensor",
+        "requirement_ids": ["SEN-001", "SEN-003"],
+        "technique": "boundary",
+        "mocks": ["platform_read_sensor"],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [0],
+           "expected": "SENSOR_OK",
+           "mocks": {"platform_read_sensor": {"ret": 0, "reading": 500}},
+           "expect_out": {"0": 500},
+           "expect_calls": {"platform_read_sensor": 1},
+           "note": "success, reading <= 1000 stored"}
+        ],
+        "oracle": {
+          "kind": "SPECIFIED",
+          "statement": "On success with reading <= 1000 the reading is stored and SENSOR_OK returned.",
+          "rationale": "SEN-003 states the stored value and SENSOR_OK.",
+          "proposal": ""
+        }
+      },
+      {
+        "id": "S3",
+        "title": "out-of-range reading is rejected without updating state",
+        "function": "sample_sensor",
+        "requirement_ids": ["SEN-001", "SEN-004"],
+        "technique": "boundary",
+        "mocks": ["platform_read_sensor"],
+        "mock_declarations": {},
+        "cases": [
+          {"args": [0],
+           "expected": "SENSOR_OUT_OF_RANGE",
+           "mocks": {"platform_read_sensor": {"ret": 0, "reading": 5000}},
+           "expect_out": {},
+           "expect_calls": {"platform_read_sensor": 1},
+           "note": "reading > 1000 -> out of range, no store"}
+        ],
+        "oracle": {
+          "kind": "SPECIFIED",
+          "statement": "On success with reading > 1000 the function returns SENSOR_OUT_OF_RANGE.",
+          "rationale": "SEN-004 states SENSOR_OUT_OF_RANGE for readings above 1000.",
+          "proposal": ""
+        }
+      }
+    ],
+    "omitted": [
+      {"function": "sample_sensor", "reason": "SEN-005 (recovery after an error) needs a two-call sequence; covered by the state-machine/mocked-sensor manual acceptance run rather than a single-call generated case."}
+    ]
+  }
+}

@@ -23,8 +23,16 @@ mtm = "mtm.cli:main"
 include = ["mtm*"]
 
 [tool.setuptools.package-data]
-mtm = ["schemas/*.json", "workflows/*.yaml", "image/*"]
+mtm = [
+    "schemas/*.json",
+    "workflows/*.yaml",
+    "image/*",
+    "recordings/*.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "docker: requires the built product image and a Docker daemon",
+]
