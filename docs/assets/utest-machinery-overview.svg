@@ -1,0 +1,205 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="990" viewBox="0 0 1440 990" role="img" aria-labelledby="title description"><title id="title">uTest Machinery — from C code and SDDs to executable test evidence</title><desc id="description">A four-step workflow: select C and SDD inputs, generate traceable test benches, verify offline, and understand results. Highlights traceability, source immutability, evidence and honesty about undetermined behavior.</desc>
+<defs>
+<linearGradient id="night" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#06162b"/><stop offset=".55" stop-color="#103760"/><stop offset="1" stop-color="#107b9e"/></linearGradient>
+<linearGradient id="page" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#eaf7ff"/><stop offset="1" stop-color="#e8f1fa"/></linearGradient>
+<linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#09c8bd"/><stop offset="1" stop-color="#1773e6"/></linearGradient>
+<linearGradient id="terminal" x1="0" y1="0" x2=".9" y2="1"><stop stop-color="#142b46"/><stop offset="1" stop-color="#071a32"/></linearGradient>
+<linearGradient id="blue" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#31c4f7"/><stop offset="1" stop-color="#1163cd"/></linearGradient>
+<linearGradient id="teal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#15ded0"/><stop offset="1" stop-color="#008c93"/></linearGradient>
+<linearGradient id="purple" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a38cff"/><stop offset="1" stop-color="#493abb"/></linearGradient>
+<filter id="shadow" x="-20%" y="-25%" width="140%" height="160%"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0e416d" flood-opacity=".15"/></filter>
+<filter id="softglow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="15"/></filter>
+</defs>
+<rect x="0" y="0" width="1440" height="990" rx="0" fill="url(#page)" stroke="none" stroke-width="1"/>
+<rect x="0" y="0" width="1440" height="226" rx="0" fill="url(#night)" stroke="none" stroke-width="1"/>
+<path d="M0 196Q245 132 430 188T870 165T1440 202V245H0Z" fill="#1768aa" opacity=".18"/>
+<path d="M800 184C1000 205 1055 95 1235 99S1390 128 1438 70" stroke="#1a9dea" stroke-width="14" fill="none" opacity=".27" filter="url(#softglow)"/>
+<path d="M790 186C990 209 1060 106 1230 105S1386 135 1430 80" stroke="#66e7ff" stroke-width="4" fill="none" opacity=".75"/>
+<text x="58" y="91" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="70" fill="#ffffff" font-weight="800" text-anchor="start">uTest</text>
+<text x="271" y="91" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="70" fill="#6ce6f4" font-weight="800" text-anchor="start">Machinery</text>
+<text x="62" y="143" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="32" fill="#dcefff" font-weight="400" text-anchor="start">From C code and SDDs to executable test evidence</text>
+<text x="62" y="186" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="19" fill="#a4d8ee" font-weight="400" text-anchor="start">Traceable, reproducible host-side verification for embedded software</text>
+<rect x="1037" y="66" width="60" height="82" rx="9" fill="#194b76" stroke="#65c8ec" stroke-width="1"/>
+<rect x="1050" y="81" width="34" height="5" rx="2" fill="#a7e6fd" stroke="none" stroke-width="1"/>
+<rect x="1050" y="95" width="23" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<rect x="1050" y="106" width="28" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<circle cx="1067" cy="129" r="9" fill="none" stroke="#49e4cd" stroke-width="3"/>
+<rect x="1118" y="58" width="60" height="82" rx="9" fill="#194b76" stroke="#65c8ec" stroke-width="1"/>
+<rect x="1131" y="73" width="34" height="5" rx="2" fill="#a7e6fd" stroke="none" stroke-width="1"/>
+<rect x="1131" y="87" width="23" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<rect x="1131" y="98" width="28" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<circle cx="1148" cy="121" r="9" fill="none" stroke="#49e4cd" stroke-width="3"/>
+<rect x="1199" y="50" width="60" height="82" rx="9" fill="#194b76" stroke="#65c8ec" stroke-width="1"/>
+<rect x="1212" y="65" width="34" height="5" rx="2" fill="#a7e6fd" stroke="none" stroke-width="1"/>
+<rect x="1212" y="79" width="23" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<rect x="1212" y="90" width="28" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<circle cx="1229" cy="113" r="9" fill="none" stroke="#49e4cd" stroke-width="3"/>
+<rect x="1280" y="42" width="60" height="82" rx="9" fill="#194b76" stroke="#65c8ec" stroke-width="1"/>
+<rect x="1293" y="57" width="34" height="5" rx="2" fill="#a7e6fd" stroke="none" stroke-width="1"/>
+<rect x="1293" y="71" width="23" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<rect x="1293" y="82" width="28" height="4" rx="2" fill="#4f9fcf" stroke="none" stroke-width="1"/>
+<circle cx="1310" cy="105" r="9" fill="none" stroke="#49e4cd" stroke-width="3"/>
+<rect x="21" y="218" width="1398" height="506" rx="28" fill="#ffffff" stroke="#cde4f5" stroke-width="2"/>
+<circle cx="75" cy="272" r="31" fill="url(#blue)" stroke="#ffffff" stroke-width="5"/>
+<text x="75" y="283" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="30" fill="#ffffff" font-weight="800" text-anchor="middle">1</text>
+<text x="119" y="269" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" fill="#0d2949" font-weight="750" text-anchor="start">Select inputs</text>
+<circle cx="426" cy="272" r="31" fill="url(#teal)" stroke="#ffffff" stroke-width="5"/>
+<text x="426" y="283" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="30" fill="#ffffff" font-weight="800" text-anchor="middle">2</text>
+<text x="470" y="269" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" fill="#0d2949" font-weight="750" text-anchor="start">Generate the</text>
+<text x="470" y="299" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" fill="#0d2949" font-weight="750" text-anchor="start">test bench</text>
+<circle cx="777" cy="272" r="31" fill="url(#blue)" stroke="#ffffff" stroke-width="5"/>
+<text x="777" y="283" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="30" fill="#ffffff" font-weight="800" text-anchor="middle">3</text>
+<text x="821" y="269" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" fill="#0d2949" font-weight="750" text-anchor="start">Verify offline</text>
+<circle cx="1128" cy="272" r="31" fill="url(#purple)" stroke="#ffffff" stroke-width="5"/>
+<text x="1128" y="283" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="30" fill="#ffffff" font-weight="800" text-anchor="middle">4</text>
+<text x="1172" y="269" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" fill="#0d2949" font-weight="750" text-anchor="start">Understand</text>
+<text x="1172" y="299" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" fill="#0d2949" font-weight="750" text-anchor="start">the results</text>
+<path d="M361 274h30m-10-10 10 10-10 10" fill="none" stroke="#52a8e6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M712 274h30m-10-10 10 10-10 10" fill="none" stroke="#52a8e6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M1063 274h30m-10-10 10 10-10 10" fill="none" stroke="#52a8e6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M382 327 L382 666" fill="none" stroke="#dcecf8" stroke-width="1" stroke-linecap="round"/>
+<path d="M733 327 L733 666" fill="none" stroke="#dcecf8" stroke-width="1" stroke-linecap="round"/>
+<path d="M1084 327 L1084 666" fill="none" stroke="#dcecf8" stroke-width="1" stroke-linecap="round"/>
+<rect x="60" y="356" width="133" height="172" rx="10" fill="#102e51" stroke="#6cb9fc" stroke-width="2"/>
+<rect x="72" y="343" width="133" height="172" rx="10" fill="#163b63" stroke="#469ad8" stroke-width="2"/>
+<rect x="88" y="333" width="151" height="188" rx="12" fill="url(#terminal)" stroke="#61bcef" stroke-width="2"/>
+<text x="106" y="371" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="30" fill="#eaf9ff" font-weight="800" text-anchor="start">.c</text>
+<text x="106" y="408" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="17" fill="#73d7ff" font-weight="500" text-anchor="start">#include &lt;...&gt;</text>
+<text x="106" y="441" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="17" fill="#d9faff" font-weight="500" text-anchor="start">int foo(...) {</text>
+<text x="122" y="464" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#78ddf9" font-weight="500" text-anchor="start">...</text>
+<text x="107" y="494" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e1f8ff" font-weight="500" text-anchor="start">}</text>
+<rect x="213" y="342" width="132" height="177" rx="12" fill="#effaff" stroke="#adceed" stroke-width="2"/>
+<rect x="224" y="334" width="131" height="181" rx="10" fill="#ffffff" stroke="#b5d9ee" stroke-width="2"/>
+<text x="290" y="380" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="28" fill="#135187" font-weight="800" text-anchor="middle">SDD</text>
+<rect x="239" y="394" width="97" height="5" rx="2" fill="#b8d6ec" stroke="none" stroke-width="1"/>
+<rect x="239" y="409" width="90" height="5" rx="2" fill="#b8d6ec" stroke="none" stroke-width="1"/>
+<rect x="239" y="424" width="83" height="5" rx="2" fill="#b8d6ec" stroke="none" stroke-width="1"/>
+<rect x="239" y="439" width="76" height="5" rx="2" fill="#b8d6ec" stroke="none" stroke-width="1"/>
+<rect x="276" y="471" width="25" height="16" rx="2" fill="#c5e4f5" stroke="#7ab1d5" stroke-width="1"/>
+<path d="M288 487 L288 496" fill="none" stroke="#7bb2da" stroke-width="2" stroke-linecap="round"/>
+<path d="M255 496 L321 496" fill="none" stroke="#7bb2da" stroke-width="2" stroke-linecap="round"/>
+<path d="M255 496 L255 505" fill="none" stroke="#7bb2da" stroke-width="2" stroke-linecap="round"/>
+<path d="M321 496 L321 505" fill="none" stroke="#7bb2da" stroke-width="2" stroke-linecap="round"/>
+<text x="74" y="570" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">Choose the C units and</text>
+<text x="74" y="598" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">requirement documents</text>
+<text x="74" y="626" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">to analyze.</text>
+<rect x="407" y="351" width="112" height="55" rx="9" fill="#f2faff" stroke="#b7def6" stroke-width="1.5"/>
+<text x="422" y="384" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#13517a" font-weight="700" text-anchor="start">Test plans</text>
+<rect x="407" y="429" width="112" height="55" rx="9" fill="#f2faff" stroke="#b7def6" stroke-width="1.5"/>
+<text x="422" y="461" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#13517a" font-weight="700" text-anchor="start">Scenarios</text>
+<rect x="612" y="351" width="109" height="55" rx="9" fill="#f2faff" stroke="#b7def6" stroke-width="1.5"/>
+<text x="639" y="384" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#13517a" font-weight="700" text-anchor="start">Mocks</text>
+<rect x="612" y="429" width="109" height="62" rx="9" fill="#f2faff" stroke="#b7def6" stroke-width="1.5"/>
+<text x="627" y="457" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="16" fill="#13517a" font-weight="700" text-anchor="start">Traceable</text>
+<text x="627" y="479" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="16" fill="#13517a" font-weight="700" text-anchor="start">oracles</text>
+<rect x="597" y="405" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="590.0333209967908" y="431" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="571" y="450.0333209967908" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="545" y="457" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="519" y="450.0333209967908" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="499.9666790032092" y="431" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="493" y="405" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="499.96667900320915" y="379" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="519" y="359.9666790032092" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="545" y="353" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="571" y="359.9666790032092" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<rect x="590.0333209967907" y="379" width="23" height="23" rx="4" fill="#30bbe3" stroke="none" stroke-width="1"/>
+<circle cx="556" cy="417" r="62" fill="url(#blue)" stroke="none" stroke-width="1"/>
+<circle cx="556" cy="417" r="34" fill="#dafbff" stroke="#aaf8ff" stroke-width="3"/>
+<circle cx="556" cy="417" r="19" fill="#2b9bc6" stroke="none" stroke-width="1"/>
+<path d="M518 380 L537 396" fill="none" stroke="#73c9ec" stroke-width="2" stroke-linecap="round"/>
+<path d="M596 396 L612 380" fill="none" stroke="#73c9ec" stroke-width="2" stroke-linecap="round"/>
+<path d="M516 455 L538 437" fill="none" stroke="#73c9ec" stroke-width="2" stroke-linecap="round"/>
+<path d="M598 438 L612 460" fill="none" stroke="#73c9ec" stroke-width="2" stroke-linecap="round"/>
+<path d="M472 517L556 478L643 517L556 550Z" fill="#b1f4fb" opacity=".5" stroke="#64cfe5" stroke-width="2"/>
+<text x="412" y="570" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">Build a grounded unit-test</text>
+<text x="412" y="598" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">bench with plans, scenarios,</text>
+<text x="412" y="626" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">mocks and traceable oracles.</text>
+<rect x="763" y="347" width="273" height="180" rx="14" fill="url(#terminal)" stroke="#58abe9" stroke-width="3"/>
+<rect x="763" y="347" width="273" height="31" rx="11" fill="#294f77" stroke="none" stroke-width="1"/>
+<circle cx="781" cy="363" r="5" fill="#6eb5ef" stroke="none" stroke-width="1"/>
+<circle cx="798" cy="363" r="5" fill="#5c8eb7" stroke="none" stroke-width="1"/>
+<circle cx="815" cy="363" r="5" fill="#83cad9" stroke="none" stroke-width="1"/>
+<text x="781" y="407" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#edf8ff" font-weight="500" text-anchor="start">&gt; run_tests.sh</text>
+<circle cx="791" cy="433" r="11" fill="#16ba94" stroke="none" stroke-width="1"/>
+<path d="M785 433l4 4 8-9" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="814" y="439" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#eefbff" font-weight="500" text-anchor="start">Functional checks</text>
+<circle cx="791" cy="467" r="11" fill="#16ba94" stroke="none" stroke-width="1"/>
+<path d="M785 467l4 4 8-9" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="814" y="473" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#eefbff" font-weight="500" text-anchor="start">Coverage</text>
+<circle cx="791" cy="501" r="11" fill="#16ba94" stroke="none" stroke-width="1"/>
+<path d="M785 501l4 4 8-9" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="814" y="507" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" fill="#eefbff" font-weight="500" text-anchor="start">Diagnostics</text>
+<rect x="984" y="506" width="5" height="10" rx="2" fill="#35d4c7" stroke="none" stroke-width="1"/>
+<rect x="991" y="488" width="5" height="28" rx="2" fill="#35d4c7" stroke="none" stroke-width="1"/>
+<rect x="998" y="452" width="5" height="64" rx="2" fill="#35d4c7" stroke="none" stroke-width="1"/>
+<rect x="1005" y="479" width="5" height="37" rx="2" fill="#35d4c7" stroke="none" stroke-width="1"/>
+<rect x="1012" y="434" width="5" height="82" rx="2" fill="#35d4c7" stroke="none" stroke-width="1"/>
+<rect x="1019" y="371" width="5" height="145" rx="2" fill="#35d4c7" stroke="none" stroke-width="1"/>
+<circle cx="1025" cy="391" r="37" fill="none" stroke="#9dbcd8" stroke-width="5"/>
+<path d="M1006 372Q1025 357 1043 374Q1053 387 1045 397M1003 405L1049 363" fill="none" stroke="#acc6da" stroke-width="6" stroke-linecap="round"/>
+<path d="M1041 460L1082 475V518Q1069 553 1041 561Q1013 551 1000 518V475Z" fill="url(#teal)" stroke="#75f0e4" stroke-width="4"/>
+<path d="M1021 509l15 16 27-34" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="756" y="570" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">Replay the frozen bench</text>
+<text x="756" y="598" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">without an LLM: functional</text>
+<text x="756" y="626" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">checks, coverage, diagnostics.</text>
+<rect x="1152" y="353" width="113" height="166" rx="9" fill="#eefaff" stroke="#c5e2f3" stroke-width="1.5"/>
+<rect x="1140" y="345" width="151" height="182" rx="10" fill="#ffffff" stroke="#bddef0" stroke-width="2"/>
+<rect x="1111" y="355" width="155" height="175" rx="9" fill="#ffffff" stroke="#c3deef" stroke-width="2"/>
+<text x="1125" y="385" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="19" fill="#144875" font-weight="800" text-anchor="start">Test Report</text>
+<rect x="1126" y="431" width="13" height="19" rx="2" fill="#86b9db" stroke="none" stroke-width="1"/>
+<rect x="1146" y="414" width="13" height="36" rx="2" fill="#64abd3" stroke="none" stroke-width="1"/>
+<rect x="1166" y="404" width="13" height="46" rx="2" fill="#4694ca" stroke="none" stroke-width="1"/>
+<rect x="1186" y="387" width="13" height="63" rx="2" fill="#277ebd" stroke="none" stroke-width="1"/>
+<rect x="1206" y="400" width="13" height="50" rx="2" fill="#71c5dd" stroke="none" stroke-width="1"/>
+<circle cx="1244" cy="423" r="27" fill="none" stroke="#d2e4f1" stroke-width="11"/>
+<path d="M1244 396A27 27 0 0 1 1270 430" fill="none" stroke="#28bbcb" stroke-width="11"/>
+<circle cx="1127" cy="472" r="7" fill="#1bbf90" stroke="none" stroke-width="1"/>
+<text x="1144" y="477" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#274864" font-weight="600" text-anchor="start">PASS</text>
+<circle cx="1127" cy="496" r="7" fill="#ec6a6b" stroke="none" stroke-width="1"/>
+<text x="1144" y="501" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#274864" font-weight="600" text-anchor="start">FAIL</text>
+<circle cx="1127" cy="521" r="7" fill="#889bad" stroke="none" stroke-width="1"/>
+<text x="1144" y="526" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#274864" font-weight="600" text-anchor="start">UNDETERMINED</text>
+<rect x="1284" y="365" width="107" height="75" rx="8" fill="#f5fbff" stroke="#bedcee" stroke-width="1.3"/>
+<text x="1295" y="391" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="16" fill="#194c76" font-weight="700" text-anchor="start">Evidence</text>
+<rect x="1296" y="403" width="66" height="4" rx="1" fill="#b8d3e7" stroke="none" stroke-width="1"/>
+<rect x="1296" y="413" width="56" height="4" rx="1" fill="#b8d3e7" stroke="none" stroke-width="1"/>
+<rect x="1296" y="423" width="46" height="4" rx="1" fill="#b8d3e7" stroke="none" stroke-width="1"/>
+<rect x="1284" y="457" width="107" height="74" rx="8" fill="#f5fbff" stroke="#bedcee" stroke-width="1.3"/>
+<text x="1295" y="483" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#194c76" font-weight="700" text-anchor="start">Next actions</text>
+<rect x="1296" y="496" width="66" height="4" rx="1" fill="#b8d3e7" stroke="none" stroke-width="1"/>
+<rect x="1296" y="506" width="56" height="4" rx="1" fill="#b8d3e7" stroke="none" stroke-width="1"/>
+<rect x="1296" y="516" width="46" height="4" rx="1" fill="#b8d3e7" stroke="none" stroke-width="1"/>
+<text x="1107" y="570" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">Review findings, evidence</text>
+<text x="1107" y="598" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">and recommended</text>
+<text x="1107" y="626" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#234061" font-weight="500" text-anchor="start">next actions.</text>
+<rect x="289" y="683" width="863" height="74" rx="24" fill="url(#accent)" stroke="#68e9ee" stroke-width="2"/>
+<text x="720" y="730" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="37" fill="#ffffff" font-weight="800" text-anchor="middle">Generate.  Verify.  Qualify.  Explain.</text>
+<rect x="24" y="778" width="1392" height="159" rx="18" fill="url(#night)" stroke="#5593c0" stroke-width="2"/>
+<text x="53" y="821" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="29" fill="#ffffff" font-weight="750" text-anchor="start">Why it matters</text>
+<path d="M56 832 L113 832" fill="none" stroke="#6fe6fb" stroke-width="4" stroke-linecap="round"/>
+<path d="M368 842 L368 915" fill="none" stroke="#4784ab" stroke-width="1" stroke-linecap="round"/>
+<path d="M711 842 L711 915" fill="none" stroke="#4784ab" stroke-width="1" stroke-linecap="round"/>
+<path d="M1053 842 L1053 915" fill="none" stroke="#4784ab" stroke-width="1" stroke-linecap="round"/>
+<circle cx="80" cy="868" r="19" fill="#1b6f91" stroke="#4dccde" stroke-width="2"/>
+<text x="80" y="873" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#e0feff" font-weight="700" text-anchor="middle">01</text>
+<text x="112" y="858" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">Traceable requirements</text>
+<text x="112" y="884" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">to tests</text>
+<text x="112" y="921" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#abd5ea" font-weight="450" text-anchor="start">SDD links remain auditable</text>
+<circle cx="418" cy="868" r="19" fill="#1b6f91" stroke="#4dccde" stroke-width="2"/>
+<text x="418" y="873" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#e0feff" font-weight="700" text-anchor="middle">02</text>
+<text x="450" y="858" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">No silent source</text>
+<text x="450" y="884" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">changes</text>
+<text x="450" y="921" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#abd5ea" font-weight="450" text-anchor="start">Original C and SDD stay read-only</text>
+<circle cx="760" cy="868" r="19" fill="#1b6f91" stroke="#4dccde" stroke-width="2"/>
+<text x="760" y="873" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#e0feff" font-weight="700" text-anchor="middle">03</text>
+<text x="792" y="858" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">Real evidence</text>
+<text x="792" y="884" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">not just green boxes</text>
+<text x="792" y="921" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#abd5ea" font-weight="450" text-anchor="start">Compile, execute, qualify</text>
+<circle cx="1102" cy="868" r="19" fill="#1b6f91" stroke="#4dccde" stroke-width="2"/>
+<text x="1102" y="873" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#e0feff" font-weight="700" text-anchor="middle">04</text>
+<text x="1134" y="858" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">Ambiguity stays</text>
+<text x="1134" y="884" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" fill="#e4faff" font-weight="720" text-anchor="start">UNDETERMINED</text>
+<text x="1134" y="921" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#abd5ea" font-weight="450" text-anchor="start">No fabricated conformity</text>
+<text x="720" y="974" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="19" fill="#316087" font-weight="500" text-anchor="middle">From C code and specifications to reproducible, reviewable test evidence.</text>
+</svg>
