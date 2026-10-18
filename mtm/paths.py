@@ -199,6 +199,25 @@ def read_last_operation(root: Path) -> dict[str, Any] | None:
         return None
 
 
+def write_json_atomic(target: Path, data: Any) -> Path:
+    """Atomically write *data* as pretty JSON to *target*, creating parents."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, target)
+    return target
+
+
+def read_json(path: Path) -> Any:
+    """Read a JSON file, returning ``None`` when absent or unparseable."""
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def new_bench_id(root: Path) -> str:
     """Derive a stable, unique bench identifier from the absolute path."""
     digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:12]

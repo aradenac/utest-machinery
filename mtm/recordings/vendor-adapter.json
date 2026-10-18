@@ -1,0 +1,54 @@
+{
+  "fixture": "vendor-adapter",
+  "note": "Recorded generation response used offline (no token). The proprietary header vendor_adc.h is absent; the plan supplies a PRIVATE shim and a mock with explicit type/ABI assumptions from the SDD, without modifying the source directory. The return type is taken from the SDD (sample.raw saturated at 4095), which the missing header does not provide.",
+  "match": {"functions": ["read_adc_or_zero"], "requirements": ["VND-002", "VND-003"]},
+  "identity": {"model": "recorded-deepseek-v4.1-flash", "prompt_version": "plan-v2"},
+  "response": {
+    "shim_headers": {
+      "vendor_adc.h": "/* Private generated shim for the absent proprietary header.\n * Declares only the interface documented in the SDD; the original source and\n * the vendor SDK are not modified. */\n#ifndef MTM_SHIM_VENDOR_ADC_H\n#define MTM_SHIM_VENDOR_ADC_H\n#include <stdint.h>\ntypedef struct { uint16_t raw; } vendor_adc_sample_t;\n#define VENDOR_ADC_OK 0\nint vendor_adc_read(uint8_t channel, vendor_adc_sample_t *sample);\n#endif\n"
+    },
+    "scenarios": [
+      {
+        "id": "S1",
+        "title": "vendor error returns zero and is called once",
+        "function": "read_adc_or_zero",
+        "requirement_ids": ["VND-001", "VND-002"],
+        "technique": "dependency error",
+        "mocks": ["vendor_adc_read"],
+        "mock_declarations": {"vendor_adc_read": "int vendor_adc_read(uint8_t channel, vendor_adc_sample_t *sample);"},
+        "cases": [
+          {"args": [3],
+           "expected": 0,
+           "mocks": {"vendor_adc_read": {"ret": 1, "sample": {"expr": "(vendor_adc_sample_t){0}"}}},
+           "expect_calls": {"vendor_adc_read": 1},
+           "note": "non-OK status -> zero"}
+        ],
+        "oracle": {"kind": "SPECIFIED",
+                   "statement": "If the vendor read does not return VENDOR_ADC_OK the function returns zero.",
+                   "rationale": "VND-002 states the zero return on any non-OK status.", "proposal": ""}
+      },
+      {
+        "id": "S2",
+        "title": "successful read returns the raw value",
+        "function": "read_adc_or_zero",
+        "requirement_ids": ["VND-001", "VND-003"],
+        "technique": "equivalence partition",
+        "mocks": ["vendor_adc_read"],
+        "mock_declarations": {"vendor_adc_read": "int vendor_adc_read(uint8_t channel, vendor_adc_sample_t *sample);"},
+        "cases": [
+          {"args": [0],
+           "expected": 2000,
+           "mocks": {"vendor_adc_read": {"ret": 0, "sample": {"expr": "(vendor_adc_sample_t){2000}"}}},
+           "expect_calls": {"vendor_adc_read": 1},
+           "note": "raw within range is returned"}
+        ],
+        "oracle": {"kind": "SPECIFIED",
+                   "statement": "On a successful read the function returns sample.raw.",
+                   "rationale": "VND-003 states the returned value on success.", "proposal": ""}
+      }
+    ],
+    "omitted": [
+      {"function": "read_adc_or_zero", "reason": "VND-003 saturation at 4095 (raw > 4095) exercises the comparator branch; it is asserted in the manual acceptance run rather than a generated case here."}
+    ]
+  }
+}
