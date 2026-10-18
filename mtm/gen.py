@@ -583,30 +583,46 @@ def _pointer_arg(param: CParam, var: str, value: Any) -> tuple[list[str], str, s
     ``int **`` must receive an ``int **``, never an ``int *`` (the F1 defect), and
     ``void *`` must not emit the invalid ``void x = …``. Returns
     ``(lines, argument_expression, target_variable)`` where *target_variable* is the
-    scalar local an ``expect_out`` assertion reads after the call.
+    expression an ``expect_out`` assertion reads after the call.
+
+    ``expect_out`` asserts the value the pointer points at **after** the call
+    (``plan.py``), i.e. the ultimate pointed-to scalar reachable through the
+    argument the callee received — not the pre-call backing local. A SUT may
+    *reassign* the pointer (``*pp = &replacement``), which leaves the original
+    ``_v0`` object untouched, so the observable must be read **through the passed
+    argument** (``*arg`` at depth 1, ``**arg`` at depth 2, …), never the stale
+    ``_v0``. Returning ``_v0`` would assert 42 against a correct SUT that set
+    ``*pp`` to 99, i.e. report a fabricated ``IMPLEMENTATION_DEFECT`` (the F1
+    residual finding).
 
     Depth 1 (the common case) is byte-identical to the original emission
-    ``{base} {var} = ({base})value;`` / ``&{var}``. Depth d ≥ 2 declares the scalar
-    and one pointer local per intermediate level, and passes the **address of the
-    last** one so the argument has exactly d stars::
+    ``{base} {var} = ({base})value;`` / ``&{var}`` / observable ``{var}``. Depth
+    d ≥ 2 declares the scalar and one pointer local per intermediate level, passes
+    the **address of the last** one so the argument has exactly d stars, and reads
+    the observable ``_p{d-1}`` through ``d-1`` dereferences::
 
         T  v0 = value;        // pointee scalar
         T *p1 = &v0;          // one level up
         foo(&p1);             // T ** argument  (d == 2)
+        … assert *p1 …        // ultimate scalar, read through the argument
 
     A ``void`` pointee has no nameable object, so it is backed by the ``int`` scalar
     default and the resulting address is cast to the declared ``void *``-level type.
-    """
+    Its observable is read the same way as a non-void pointee: at depth ≥ 2 the
+    backing chain is ``int``-typed, so ``*p{d-1}`` reads the reassigned ``int`` even
+    though the *parameter* is cast to ``void **``. A depth-1 ``void *`` has no
+    intermediate level to read, so its observable stays the ``_v0`` backing local
+    — the object the callee receives and can write. The ``void *`` int-backing
+    remains a documented convention, not a proof of soundness."""
     base = _base_type(param)
     void_pointee = _is_void_base(base)
     if param.depth == 1 and not void_pointee:
         return ([f"    {base} {var} = {_cast(param, value)};"], f"&{var}", var)
     storage = "int" if void_pointee else base
     lines = [f"    {storage} {var}_v0 = ({storage}){_expression(value)};"]
-    target = f"{var}_v0"
     if param.depth == 1:  # void *: address of the int-shaped backing, cast
-        return (lines, f"({base} *)&{target}", target)
-    prev = f"&{target}"
+        return (lines, f"({base} *)&{var}_v0", f"{var}_v0")
+    prev = f"&{var}_v0"
     for level in range(1, param.depth):
         ptr_type = storage + " " + " ".join(["*"] * level)
         lines.append(f"    {ptr_type} {var}_p{level} = {prev};")
@@ -620,7 +636,15 @@ def _pointer_arg(param: CParam, var: str, value: Any) -> tuple[list[str], str, s
         # not fire on *adding* a qualifier). Beyond the first level the backing
         # pointer (`int *`) is never read through, so this is a pure type fix-up.
         arg = f"({base} {' '.join(['*'] * param.depth)}){arg}"
-    return (lines, arg, target)
+    # The ultimate pointed-to scalar, read **through the argument**: `*p{d-1}` at
+    # depth 2, `**p{d-1}` at depth 3, … so a SUT that reassigns the pointer is
+    # observed correctly. This holds for a ``void`` pointee too at depth ≥ 2: the
+    # backing chain is ``int``-typed (``int *p1``), so ``*p1`` is an ``int`` even
+    # though the *parameter* is cast to ``void **`` — the observable reads the
+    # backing, not the cast expression. (Only a depth-1 ``void *`` keeps the
+    # ``_v0`` backing local: there is no intermediate pointer level to read.)
+    observable = "*" * (param.depth - 1) + f"{var}_p{param.depth - 1}"
+    return (lines, arg, observable)
 
 
 def mock_controls(decl: str, symbol: str,
@@ -768,13 +792,35 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
             return f"expect_out index {position} is not a pointer parameter of this function"
         # `expect_out` asserts the value the pointer points at after the call. For a
         # multi-level pointer (`int **pp`) the observable "value pointed at" is read
-        # as the ultimately pointed-to scalar (`**pp`), which is the backing object
-        # the emitter holds — the same reading as the depth-1 case. The parameter is
-        # never refused for this: `void *` and multi-level pointers must stay
-        # generatable (owner arbitration on the F1 finding).
-        if position in aggregate_params and not _is_c_expression(value):
-            return (f"expect_out index {position} points at an aggregate type; "
-                    "supply it as {\"expr\": \"<C expression>\"} instead of a scalar")
+        # as the ultimately pointed-to scalar, obtained by reading **through the
+        # argument the callee received** (`*pp`, `**pp`, …) — so a SUT that
+        # reassigns the pointer is observed correctly. See `_pointer_arg`. The
+        # parameter is never refused for this: `void *` and multi-level pointers
+        # must stay generatable (owner arbitration on the F1 finding).
+        if position in aggregate_params:
+            # `expect_out` is asserted with a single `TEST_ASSERT_EQUAL`, which
+            # Unity maps to `UNITY_TEST_ASSERT_EQUAL_INT` (default shorthand) and
+            # therefore casts the expected value to an integer — an aggregate
+            # cannot be compared that way (`aggregate value used where an integer
+            # was expected`: uncompilable, a real-run `TOOL_FAILURE`). The plan
+            # vocabulary documents the `{"expr": …}` hatch for `args`/`mocks`, not
+            # for `expect_out`, so there is no faithful rendering; refuse it with a
+            # named limitation rather than emit C that does not compile under
+            # `limitations == []`.
+            return (f"expect_out index {position} points at an aggregate type; the "
+                    "generated single-assertion emitter cannot compare an aggregate "
+                    "faithfully, so this outcome is not supported")
+        # Same fabricated-assertion class as the argument check above: a
+        # `expect_out` value that renders as a C string literal (free text) cannot
+        # be the pointed-to scalar — `_literal` quotes it and the assertion
+        # compares a `char *`/int mismatch that does not compile (or, for an enum
+        # identifier, silently asserts a symbol the plan never grounded). Refuse it
+        # with a named limitation rather than emit wrong/uncompilable C; numbers,
+        # grounded enum identifiers and the `{"expr": …}` escape hatch still work.
+        if not _is_c_expression(value) and _literal(value).startswith('"'):
+            return (f"expect_out index {position} is a string for a scalar pointee; "
+                    "supply a number, an enum identifier or "
+                    "{\"expr\": \"<C expression>\"}")
     return None
 
 
@@ -1259,8 +1305,10 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                     decl_lines, arg, target = _pointer_arg(param, var, value)
                     lines.extend(decl_lines)
                     args.append(arg)
-                    # `expect_out` asserts the ultimate pointed-to scalar, which is
-                    # the `_v0` local at every depth.
+                    # `expect_out` asserts the ultimate pointed-to scalar, read
+                    # *through the argument* the callee received (so a SUT that
+                    # reassigns `*pp` is observed correctly) — not the pre-call
+                    # `_v0` backing local. See `_pointer_arg`.
                     outs[index] = target
                 else:
                     args.append(_cast(param, value))
@@ -1282,7 +1330,12 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
             for index_str, expected in (case.expect_out or {}).items():
                 var = outs.get(int(index_str))
                 if var is not None:
-                    lines.append(f"    TEST_ASSERT_EQUAL({_literal(expected)}, {var});")
+                    # `_expression`, not `_literal`: an aggregate pointee's planned
+                    # outcome arrives as the `{"expr": …}` escape hatch (the same
+                    # form the mock path renders at `_emit_mock_setup`), and
+                    # `_literal` would stringify the dict to a Python repr — an
+                    # uncompilable assertion that drops the planned value.
+                    lines.append(f"    TEST_ASSERT_EQUAL({_expression(expected)}, {var});")
         lines.append("}")
         lines.append("")
 

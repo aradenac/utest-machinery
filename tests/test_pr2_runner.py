@@ -1957,3 +1957,236 @@ def test_a_mock_write_through_to_a_void_or_multi_level_pointer_is_refused(tmp_pa
     ctrl_int = mock_controls("int dep(int *p);", "dep")
     assert _case_problem(TestCase(mocks={"dep": {"ret": 0, "p": 5}}),
                          {"dep": ctrl_int}, []) is None
+
+
+# --- F1 residual (PR #14 sixth review): the post-call observable for `T **` ---
+
+
+def _out_bench(tmp_path, name, source, header, scenario):
+    """Build a one-unit bench whose SDD is grounded and generate its suite."""
+    return _ptr_bench(
+        tmp_path, name, source, header,
+        "# SDD\n- **FOO-001**: the SUT SHALL behave as documented.\n", [scenario])
+
+
+def test_a_reassigned_multi_level_pointer_is_observed_through_the_argument(tmp_path):
+    """F1 residual (owner-arbitrated HIGH, sixth review): ``expect_out`` asserts
+    the value the pointer points at **after** the call, but for ``int **pp`` the
+    emitter returned the pre-call backing local ``_v0`` as the observable. A SUT
+    that *reassigns* ``*pp`` (``*pp = &replacement``) leaves ``_v0`` untouched, so
+    the generated test asserted the stale 42 against a correct ``99`` and reported
+    a fabricated ``IMPLEMENTATION_DEFECT``. The observable must be read **through
+    the argument the callee received** (``*pp``). Fail-before: on the pre-fix
+    emitter this source emitted ``TEST_ASSERT_EQUAL(99, out0_0_v0)``."""
+    bench, out, source = _out_bench(
+        tmp_path, "repoint",
+        "static int replacement = 99;\n"
+        "int repoint(int **pp) { *pp = &replacement; return **pp; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint repoint(int **pp);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "repoint",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [42], "expected": 99, "expect_out": {"0": 99}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    # The observable is read through the argument, not the stale backing local.
+    assert "TEST_ASSERT_EQUAL(99, *out0_0_p1);" in source, source
+    assert "TEST_ASSERT_EQUAL(99, out0_0_v0);" not in source, source
+
+
+def test_a_write_through_multi_level_pointer_is_observed_through_the_argument(tmp_path):
+    """Contrast for the residual fix: a SUT that writes *through* the pointer
+    without reassigning it (``**pp = 99``) leaves ``*pp`` pointing at the same
+    object, so both the old backing local and the argument read the same value.
+    This guards a fix that reads the wrong object: the observable must still be
+    the ultimate pointed-to scalar (here 99), never a pointer value."""
+    bench, out, source = _out_bench(
+        tmp_path, "write-thru",
+        "int write_thru(int **pp) { **pp = 99; return **pp; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint write_thru(int **pp);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "write_thru",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [42], "expected": 99, "expect_out": {"0": 99}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    assert "TEST_ASSERT_EQUAL(99, *out0_0_p1);" in source, source
+
+
+def test_a_three_level_pointer_reassignment_is_observed_at_its_depth(tmp_path):
+    """Depth is not special-cased at 2: for ``int ***ppp`` the observable must be
+    ``**ppp`` (two dereferences of the passed argument). Read through the argument
+    so a reassignment at any level is still observed."""
+    from mtm.gen import func_params, _pointer_arg
+
+    ppp = func_params("int f(int ***ppp)")[0]
+    lines, arg, obs = _pointer_arg(ppp, "o0", 42)
+    assert arg == "&o0_p2" and obs == "**o0_p2", (arg, obs)
+
+    bench, out, source = _out_bench(
+        tmp_path, "three-level",
+        "static int replacement = 99;\n"
+        "int f(int ***ppp) { **ppp = &replacement; return ***ppp; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint f(int ***ppp);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [42], "expected": 99, "expect_out": {"0": 99}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    assert "TEST_ASSERT_EQUAL(99, **out0_0_p2);" in source, source
+
+
+def test_the_depth_one_void_pointer_observable_is_the_backing_local(tmp_path):
+    """A depth-1 ``void *`` has no intermediate pointer level to read, so its
+    observable stays the int-backed ``_v0`` local (the parameter receives
+    ``&_v0``, so ``_v0`` *is* the object the callee can write). The reassignment
+    fix must not emit ``*arg`` here — that would not compile. This is the only
+    void case that keeps the backing local; depth ≥ 2 is covered below."""
+    from mtm.gen import func_params, _pointer_arg
+
+    for sig in ("int f(void *p)", "int f(const void *p)"):
+        _, _, obs = _pointer_arg(func_params(sig)[0], "o0", 7)
+        assert obs == "o0_v0", (sig, obs)
+    bench, out, source = _out_bench(
+        tmp_path, "void-obs",
+        "int f(void *p) { return *(int *)p; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint f(void *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [7], "expected": 7, "expect_out": {"0": 7}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    assert "TEST_ASSERT_EQUAL(7, out0_0_v0);" in source, source
+    assert "*out0_0_v0" not in source, source
+
+
+def test_a_reassigned_multilevel_void_pointer_is_observed_through_the_argument(tmp_path):
+    """F1 residual, in-scope neighbour (reviewer + challenger): a ``void **``
+    pointee at depth ≥ 2 previously kept the *pre-call* ``_v0`` observable — the
+    same fabricated-defect class the depth-2 ``int **`` fix removes — because the
+    fix branched the void case to ``_v0``. But the backing chain is ``int``-typed
+    (``int *p1``), so ``*p1`` reads the reassigned int even though the parameter is
+    cast to ``void **``: the observable must follow the same rule. (Only depth-1
+    ``void *`` keeps ``_v0``.)"""
+    from mtm.gen import func_params, _pointer_arg
+
+    _, arg, obs = _pointer_arg(func_params("int f(void **pp)")[0], "o0", 7)
+    assert obs == "*o0_p1" and arg == "(void * *)&o0_p1", (arg, obs)
+
+    bench, out, source = _out_bench(
+        tmp_path, "void-pp-reassign",
+        "static int replacement = 99;\n"
+        "int f(void **pp) { *pp = &replacement; return *(int *)*pp; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint f(void **pp);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [42], "expected": 99, "expect_out": {"0": 99}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    assert "TEST_ASSERT_EQUAL(99, *out0_0_p1);" in source, source
+    assert "TEST_ASSERT_EQUAL(99, out0_0_v0);" not in source, source
+
+
+def test_a_string_expect_out_is_refused_like_a_string_argument(tmp_path):
+    """Same fabricated-assertion class as the F1 argument guard, on the
+    ``expect_out`` path: a free-text value renders as a C string literal, which
+    cannot be a scalar pointee — it emitted ``TEST_ASSERT_EQUAL("hi there",
+    out0_0);`` with ``limitations == []``. Refuse it with a named limitation;
+    numbers, grounded enum identifiers and the ``{"expr": …}`` hatch still work."""
+    _, out_bad, _ = _out_bench(
+        tmp_path, "str-expect",
+        "int f(int *p) { (void)p; return 1; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint f(int *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [5], "expected": 1, "expect_out": {"0": "hi there"}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out_bad.test_functions == [], out_bad.test_functions
+    assert any("string for a scalar pointee" in l for l in out_bad.limitations), \
+        out_bad.limitations
+    # An explicit expression for the same pointee is still accepted.
+    _, ok, _ = _out_bench(
+        tmp_path, "expr-expect",
+        "int f(int *p) { (void)p; return 1; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint f(int *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [5], "expected": 1, "expect_out": {"0": {"expr": "kSentinel"}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert ok.test_functions, ok.limitations
+
+
+def test_an_aggregate_expect_out_is_refused_not_emitted_uncompilable(tmp_path):
+    """Same-class defect on the aggregate ``expect_out`` path: `_case_problem`
+    *demands* the ``{"expr": …}`` escape hatch for an aggregate pointee, but the
+    emitter rendered it with ``_literal`` — stringifying the Python dict to
+    ``TEST_ASSERT_EQUAL("{'expr': '(S){7}'}", out0_0)``: an uncompilable assertion
+    that drops the planned outcome, with ``limitations == []``. Switching to
+    ``_expression`` alone only moves the failure: the single-assertion emitter
+    emits ``TEST_ASSERT_EQUAL((S){7}, out0_0)``, which Unity maps to
+    ``UNITY_TEST_ASSERT_EQUAL_INT`` and casts the aggregate to an integer —
+    ``error: aggregate value used where an integer was expected`` (verified with
+    the project's Unity). The plan documents the ``{"expr": …}`` hatch for
+    ``args``/``mocks``, not for ``expect_out``, so there is no faithful rendering:
+    refuse it with a named limitation instead of emitting uncompilable C that
+    claims ``limitations == []``."""
+    bench, out, _ = _out_bench(
+        tmp_path, "agg-expect",
+        "typedef struct { int v; } S;\nint f(S *p) { (void)p; return 1; }\n",
+        "#ifndef FOO_H\n#define FOO_H\ntypedef struct { int v; } S;\nint f(S *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [{"expr": "(S){1}"}], "expected": 1,
+                    "expect_out": {"0": {"expr": "(S){7}"}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions == [], out.test_functions
+    assert any("aggregate" in l and "expect_out" in l for l in out.limitations), \
+        out.limitations
+    # A scalar expect_out on the same aggregate-arg scenario is unaffected.
+    _, ok, _ = _out_bench(
+        tmp_path, "agg-arg-scalar-out",
+        "typedef struct { int v; } S;\nint f(S *p) { (void)p; return 1; }\n",
+        "#ifndef FOO_H\n#define FOO_H\ntypedef struct { int v; } S;\nint f(S *p);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "f",
+         "requirement_ids": ["FOO-001"], "mocks": [],
+         "cases": [{"args": [{"expr": "(S){1}"}], "expected": 1,
+                    "expect_out": {}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert ok.test_functions, ok.limitations
+
+
+@pytest.mark.docker
+def test_real_image_observes_a_reassigned_multi_level_pointer(tmp_path, product_image):
+    """AP-02 for the F1 residual: the generated ``int **`` and ``void **``
+    reassignment benches must compile **and execute** in the product image with a
+    meaningful oracle. Each SUT repoints ``*pp`` to a static object and returns the
+    new value; the pre-fix emitter asserted the stale ``_v0`` (42), so these tests
+    would have reported a fabricated defect instead of a pass. They assert the
+    observed value is really read through the argument, not merely that the bench
+    compiles."""
+    from mtm.ceedling import run_ceedling
+
+    cases = [
+        ("repoint-int-pp", "int foo_a(int **pp) { *pp = &replacement; return **pp; }\n",
+         "int foo_a(int **pp);\n"),
+        ("repoint-void-pp",
+         "int foo_a(void **pp) { *pp = &replacement; return *(int *)*pp; }\n",
+         "int foo_a(void **pp);\n"),
+    ]
+    for name, source, decl in cases:
+        bench, out, _ = _ptr_bench(
+            tmp_path, name,
+            "static int replacement = 99;\n" + source,
+            f"#ifndef FOO_H\n#define FOO_H\n{decl}\n#endif\n",
+            "# SDD\n- **FOO-001**: the SUT SHALL repoint pp and return the new value.\n",
+            [{"id": "S1", "title": "t", "function": "foo_a",
+              "requirement_ids": ["FOO-001"], "mocks": [],
+              "cases": [{"args": [42], "expected": 99, "expect_out": {"0": 99}}],
+              "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}])
+        assert out.test_functions, (name, out.limitations)
+        run = run_ceedling(bench, image_ref=product_image)
+        assert run.ran, (name, run.diagnostics[-2000:])
+        assert run.total == 1 and run.failed == 0, \
+            (name, run.total, run.failed, run.stdout[-1500:])
