@@ -49,6 +49,8 @@ flowchart LR
 - [Risks, amplified impacts and follow-up](docs/project/risks.md)
 - [Claude Code development instructions](CLAUDE.md)
 - [Developer credentials and Beads setup](docs/development/setup.md)
+- [Verified Claude Code development-agent workflow (roles, gates, PR recheck)](docs/development/agent-development-workflow.md)
+- [LLM development RETEX — PO to GitHub, coding and review (cross-project lessons)](docs/development/llm-development-retrospective.md)
 - [Workflow errors and recovery](docs/architecture/workflow-failures.md)
 
 **Status:** design/specification baseline, with development planned as six feature PRs, each requiring a separate review and explicit go-ahead before the next. The documented CLI and product runtime are **proposed interfaces**, not implemented commands. The repository contains reference demonstration inputs; generated verification results must not be presented as observed until the machinery executes them.
