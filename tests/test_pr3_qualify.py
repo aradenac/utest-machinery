@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from conftest import REPO
+from conftest import fake_resolve as _offline_resolve
 from mtm.qualify import (
     CONTRADICTED,
     DETECTED,
@@ -189,7 +190,8 @@ def test_the_r04_assessment_is_surfaced_through_plan_evidence(tmp_path):
             run_mtm_json("scope", "add", f.name, "--kind",
                          "source" if f.suffix != ".md" else "spec", cwd=bench)
     scopes = yaml.safe_load((bench / "project.yaml").read_text())["scopes"]
-    run_generate(bench, scopes, provider=MockProvider(), image="img:test")
+    run_generate(bench, scopes, provider=MockProvider(), image="img:test",
+                 resolve=_offline_resolve)
     plan_before = (bench / ".mtm" / "state" / "generate" / "plan.json").read_bytes()
 
     record, code = run_mtm_json("plan", cwd=bench,
@@ -226,7 +228,8 @@ def test_without_a_manifest_the_assessment_is_absent(tmp_path):
             run_mtm_json("scope", "add", f.name, "--kind",
                          "source" if f.suffix != ".md" else "spec", cwd=bench)
     scopes = yaml.safe_load((bench / "project.yaml").read_text())["scopes"]
-    run_generate(bench, scopes, provider=MockProvider(), image="img:test")
+    run_generate(bench, scopes, provider=MockProvider(), image="img:test",
+                 resolve=_offline_resolve)
     record, code = run_mtm_json("plan", cwd=bench)
     assert code == 0
     assert "oracle_assessment" not in record

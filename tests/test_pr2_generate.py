@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from conftest import REPO, run_mtm_json
+from conftest import fake_resolve as _offline_resolve
 
 EXAMPLES = REPO / "examples"
 
@@ -241,7 +242,8 @@ def _offline_generate(bench: Path):
                            ran=True, total=total, passed=total, failed=0, failures=[])
 
     scopes = yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
-    return run_generate(bench, scopes, provider=MockProvider(), image="img:test", runner=runner)
+    return run_generate(bench, scopes, provider=MockProvider(), image="img:test",
+                        runner=runner, resolve=_offline_resolve)
 
 
 def test_unknown_oracle_stays_undetermined(fixture_bench):

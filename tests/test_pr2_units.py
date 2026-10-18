@@ -219,28 +219,117 @@ def test_aggregate_aliases_detected_from_typedef():
     assert "uint8_t" not in aggregate_aliases(_SHIM)
 
 
-def test_array_function_pointer_and_function_typedefs_are_marked_opaque(tmp_path):
+def test_array_function_pointer_and_function_typedefs_are_marked_opaque():
     """F1-review (challenger): a `typedef` of an array, a function pointer or a
     function *type* has no honest indirection depth, so it must be recorded
-    ``opaque`` and refused as a parameter — the refusal the commit that introduced
-    the marker intended. The alias-name extraction used to return ``None`` for all
-    three (the declarator ends in ``]``/``)``), leaving the refusal dead and the
-    generator emitting an uncompilable ``(Arr)5`` cast."""
-    from mtm.cscan import scan_typedefs
+    ``opaque`` and refused as a parameter — never emitted as an uncompilable
+    ``(Arr)5`` cast.
 
-    src = tmp_path / "decls.h"
-    src.write_text(
-        "typedef int Arr[4];\n"
-        "typedef void (*CB)(int);\n"
-        "typedef int Func(int);\n"
-        "typedef int *P;\n"
-        "typedef int myint;\n")
-    td = scan_typedefs(src)
+    Re-expressed to the clang contract (owner decision 0017): the ``opaque`` marker
+    is now a libclang fact, charted into the generator's type map by
+    :func:`mtm.gen._chart_type_map`. The invariant asserted is unchanged.
+    """
+    from mtm import ctypes_clang
+    from mtm.gen import _chart_type_map
+
+    td = _chart_type_map(ctypes_clang.CTypeResolution(status="RESOLVED", aliases={
+        "Arr": ctypes_clang.AliasFact("Arr", "decls.h", 1, opaque=True),
+        "CB": ctypes_clang.AliasFact("CB", "decls.h", 2, opaque=True),
+        "Func": ctypes_clang.AliasFact("Func", "decls.h", 3, opaque=True),
+        "P": ctypes_clang.AliasFact("P", "decls.h", 4, base="int", depth=1),
+        "myint": ctypes_clang.AliasFact("myint", "decls.h", 5, base="int", depth=0),
+    }))
     for name in ("Arr", "CB", "Func"):
         assert td[name].opaque, name
     # A pointer alias (resolvable) and a scalar alias (a real base) are NOT opaque.
     assert not td["P"].opaque and td["P"].depth == 1
     assert not td["myint"].opaque and td["myint"].base == "int"
+
+
+def test_enum_alias_is_not_aggregate_but_struct_union_and_opaque_are():
+    """I5 regression (TC-1, coordinator-reproduced): clang reports
+    ``record = {"kind": "ENUM", …}`` for an enum alias, and lot B charted that into
+    ``aggregate``. An **enumeration is a scalar** C type (``e_t x = (e_t)7;`` and
+    ``TEST_ASSERT_EQUAL`` compile), so a scalar for an enum pointee is
+    materialisable and must **not** be refused — the old scanner chased only
+    ``struct``/``union``. Conflating ENUM with RECORD/UNION blanket-refused every
+    enum-typed parameter and ``enum *`` out-param, silently shrinking the verified
+    domain. The boundary is clang's ``record.kind`` identity.
+    """
+    from mtm import ctypes_clang
+    from mtm.gen import _chart_type_map
+
+    td = _chart_type_map(ctypes_clang.CTypeResolution(status="RESOLVED", aliases={
+        "status_t": ctypes_clang.AliasFact(
+            "status_t", "sensor.h", 1, base="status_t", depth=0,
+            record={"kind": "ENUM", "tag": "status_t"}, inline_body=True),
+        "sample_t": ctypes_clang.AliasFact(
+            "sample_t", "sensor.h", 2, base="sample_t", depth=0,
+            record={"kind": "RECORD", "tag": "sample_t"}, inline_body=True),
+        "uni_t": ctypes_clang.AliasFact(
+            "uni_t", "sensor.h", 3, base="uni_t", depth=0,
+            record={"kind": "UNION", "tag": "uni_t"}, inline_body=True),
+        "CB": ctypes_clang.AliasFact("CB", "sensor.h", 4, opaque=True),
+        "myint": ctypes_clang.AliasFact("myint", "sensor.h", 5, base="int", depth=0),
+    }))
+    # ENUM is scalar: not aggregate. RECORD/UNION/opaque are aggregate.
+    assert td["status_t"].aggregate is False
+    assert td["sample_t"].aggregate is True
+    assert td["uni_t"].aggregate is True
+    assert td["CB"].aggregate is True       # opaque (function/array shape)
+    assert td["myint"].aggregate is False   # plain scalar alias
+
+
+def test_enum_typed_parameters_are_not_refused_as_aggregates():
+    """The consumer half of the same I5 regression: both refusal paths that read
+    ``aggregate`` — ``Typedef.aggregate`` (``mock_controls``/``_unsupported_param_shape``
+    /``_case_problem``) and the ``aggregates`` name set (``is_aggregate_base``) —
+    must let an enum-typed parameter through, while a struct/union pointee is still
+    refused.
+
+    ``state_t transition(state_t s, event_t e)`` (by value) and
+    ``int poll(sensor_status_t *out)`` (an ``enum *`` out-param) are exactly the
+    shapes the regression refused; the ``{"expr": …}`` hatch is not needed for
+    them.
+    """
+    from mtm import ctypes_clang
+    from mtm.gen import _chart_type_map, _case_problem, func_params, _is_aggregate_record
+
+    facts = ctypes_clang.CTypeResolution(status="RESOLVED", aliases={
+        "state_t": ctypes_clang.AliasFact(
+            "state_t", "s.h", 1, base="state_t", depth=0,
+            record={"kind": "ENUM", "tag": "state_t"}, inline_body=True),
+        "event_t": ctypes_clang.AliasFact(
+            "event_t", "s.h", 2, base="event_t", depth=0,
+            record={"kind": "ENUM", "tag": "event_t"}, inline_body=True),
+        "status_t": ctypes_clang.AliasFact(
+            "status_t", "s.h", 3, base="status_t", depth=0,
+            record={"kind": "ENUM", "tag": "status_t"}, inline_body=True),
+        "sample_t": ctypes_clang.AliasFact(
+            "sample_t", "s.h", 4, base="sample_t", depth=0,
+            record={"kind": "RECORD", "tag": "sample_t"}, inline_body=True),
+    })
+    td = _chart_type_map(facts)
+    # The `aggregates` name set gen.py builds (a struct/union predicate) excludes
+    # the enum aliases — this is the second refusal path the regression broke.
+    aggregates = {name for name, fact in facts.aliases.items()
+                  if _is_aggregate_record(fact.record)}
+    assert aggregates == {"sample_t"}
+
+    # An enum by-value parameter: not refused.
+    byval = func_params("state_t transition(state_t s, event_t e)", td)
+    assert _case_problem(
+        PlannedCase(args=["ST_STOPPED", "EV_START"], expected="ST_STOPPED"),
+        {}, byval, aggregates, td) is None
+    # An `enum *` out-param: not refused (scalar pointee).
+    out = func_params("int poll(status_t *out)", td)
+    assert _case_problem(
+        PlannedCase(args=["SENSOR_OK"], expected=0, expect_out={0: "SENSOR_OK"}),
+        {}, out, aggregates, td) is None
+    # Contrast preserved: a struct pointer alias is still refused as aggregate.
+    struct_p = func_params("int fill(sample_t *out)", td)
+    problem = _case_problem(PlannedCase(args=[7]), {}, struct_p, aggregates, td)
+    assert problem and "aggregate" in problem, problem
 
 
 def test_scalar_pointee_is_not_an_aggregate():

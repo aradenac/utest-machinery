@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import REPO, run_mtm_json
+from conftest import REPO, fake_resolve as _fake_resolve, run_mtm_json
 
 EXAMPLES = REPO / "examples"
 
@@ -58,7 +58,7 @@ def _generate(bench: Path, runner):
 
     scopes = yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", [])
     return run_generate(bench, scopes, provider=MockProvider(), image="img:test",
-                        runner=runner)
+                        runner=runner, resolve=_fake_resolve)
 
 
 def _run(ok: bool, returncode: int, *, stdout="", stderr="", timed_out=False,
@@ -273,7 +273,8 @@ def test_no_materialisable_scenario_is_incomplete_not_a_vacuous_success(fixture_
         called["runner"] = True
         return _run(True, 0, stdout="", ran=False)
 
-    result = run_generate(bench, scopes, provider=_Stub(), image="img:test", runner=runner)
+    result = run_generate(bench, scopes, provider=_Stub(), image="img:test",
+                          runner=runner, resolve=_fake_resolve)
     assert result.status == "INCOMPLETE" and result.exit_code == 20
     assert result.suite["test_functions"] == []
     assert result.suite["limitations"]  # the refusals stay visible
@@ -870,7 +871,7 @@ def test_an_early_exit_clears_the_previous_plans_derived_artifacts(fixture_bench
 
     bench = fixture_bench("mocked-sensor")
     first = run_generate(bench, _scopes(bench), provider=MockProvider(),
-                         image="img:test", runner=lambda *a, **k: _run(
+                         image="img:test", resolve=_fake_resolve, runner=lambda *a, **k: _run(
                              True, 0, stdout="1 Tests 0 Failures 0 Ignored\nOK\n",
                              ran=True, total=1, passed=1, failed=0))
     assert first.plan is not None
@@ -879,7 +880,8 @@ def test_an_early_exit_clears_the_previous_plans_derived_artifacts(fixture_bench
 
     (bench / "sensor.c").write_text("int sample_sensor(void) { return ??? ; }\n")
     second = run_generate(bench, _scopes(bench), provider=MockProvider(),
-                          image="img:test", runner=lambda *a, **k: _run(True, 0))
+                          image="img:test", resolve=_fake_resolve,
+                          runner=lambda *a, **k: _run(True, 0))
     assert second.status == "BLOCKED"
     assert not (state / "plan.json").is_file()
 
@@ -1704,7 +1706,7 @@ def _ptr_bench(tmp_path, name, source, header, sdd, scenarios):
     inventory = build_inventory(bench, _scopes(bench))
     plan = parse_plan(json.dumps({"scenarios": scenarios}), inventory,
                       LLMIdentity(provider="test", model="t"))
-    out = generate_suite(bench, plan, inventory)
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     return bench, out, (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
 
 
@@ -2233,28 +2235,33 @@ def test_real_image_observes_a_reassigned_multi_level_pointer(tmp_path, product_
 
 def test_an_array_or_function_pointer_typedef_parameter_is_a_named_limitation(tmp_path):
     """F1-review (challenger, CONFIRMED MANDATORY): a parameter whose type is a
-    ``typedef`` alias of an **array** or **function-pointer** type was silently
-    accepted — the scanner's alias-name extraction returned ``None`` for
-    ``typedef int Arr[4]`` / ``typedef void (*CB)(int)``, so the ``opaque`` marker
-    was never recorded and the refusal was dead code. The generator then emitted
-    ``first((Arr)5);`` with ``limitations == []``; that C does not compile
-    (``error: cast specifies array type``, verified with gcc -Werror), so the whole
-    bench died as an opaque ``TOOL_FAILURE`` instead of a named limitation."""
-    from mtm.cscan import scan_typedefs
-    from mtm.gen import _unsupported_param_shape, func_params
+    ``typedef`` alias of an **array** or **function-pointer** type must be refused
+    with a named limitation, never emitted as ``first((Arr)5);`` with
+    ``limitations == []`` — C that does not compile (``error: cast specifies array
+    type``, verified with gcc -Werror), i.e. an opaque ``TOOL_FAILURE``.
 
-    header = ("#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
-              "typedef int Arr[4];\ntypedef void (*CB)(int);\n"
-              "int first(Arr a);\n#endif\n")
-    bench_dir = tmp_path / "decls"
-    bench_dir.mkdir()
-    (bench_dir / "h.h").write_text(header)
-    td = scan_typedefs(bench_dir / "h.h")
+    Re-expressed to the clang contract (owner decision 0017): the ``opaque`` marker
+    now comes from libclang facts, charted into the generator's type map by
+    :func:`mtm.gen._chart_type_map` — not from the retired ``scan_typedefs``. The
+    invariant asserted is unchanged: an unsupported alias shape is a named
+    limitation before any verdict, never broken C with an empty limitation list.
+    """
+    from mtm.ctypes_clang import AliasFact, CTypeResolution
+    from mtm.gen import _chart_type_map, _unsupported_param_shape, func_params
+
+    facts = CTypeResolution(status="RESOLVED", aliases={
+        "Arr": AliasFact("Arr", "h.h", 1, base="", depth=0, opaque=True),
+        "CB": AliasFact("CB", "h.h", 2, base="", depth=0, opaque=True),
+    })
+    td = _chart_type_map(facts)
     assert td["Arr"].opaque and td["CB"].opaque, td
     # Used as a parameter type, each is refused (a named limitation), never emitted.
     assert _unsupported_param_shape(func_params("int first(Arr a)", td), td)
     assert _unsupported_param_shape(func_params("int first(CB cb)", td), td)
 
+    header = ("#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+              "typedef int Arr[4];\ntypedef void (*CB)(int);\n"
+              "int first(Arr a);\n#endif\n")
     bench, out, _ = _ptr_bench(
         tmp_path, "arr-typedef",
         "int first(Arr a) { return a[0]; }\n", header,
@@ -2265,7 +2272,7 @@ def test_an_array_or_function_pointer_typedef_parameter_is_a_named_limitation(tm
         out.limitations
 
 
-def _mock_bench(tmp_path, name, source, header, scenario):
+def _mock_bench(tmp_path, name, source, header, scenario, *, resolve=None):
     """Build a one-unit bench with a mocked dependency, then generate it."""
     from mtm.gen import generate_suite
     from mtm.inventory import build_inventory
@@ -2283,7 +2290,8 @@ def _mock_bench(tmp_path, name, source, header, scenario):
     inventory = build_inventory(bench, _scopes(bench))
     plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
                       LLMIdentity(provider="test", model="t"))
-    return bench, generate_suite(bench, plan, inventory)
+    return bench, generate_suite(bench, plan, inventory,
+                                 resolve=resolve or _fake_resolve)
 
 
 def test_a_mocked_dependency_through_a_pointer_typedef_is_refused(tmp_path):
@@ -2293,10 +2301,12 @@ def test_a_mocked_dependency_through_a_pointer_typedef_is_refused(tmp_path):
     ``ReturnThruPtr`` at the wrong indirection — an unjustified pointer cast and
     uncompilable C. With the alias resolved the depth is 2, so the multi-level
     write-through is refused with the named limitation the SUT path already uses."""
-    from mtm.cscan import Typedef
-    from mtm.gen import mock_controls, split_declaration
+    from mtm import ctypes_clang
+    from mtm.gen import _chart_type_map, mock_controls, split_declaration
 
-    td = {"P": Typedef("int", 1)}
+    td = _chart_type_map(ctypes_clang.CTypeResolution(
+        status="RESOLVED",
+        aliases={"P": ctypes_clang.AliasFact("P", "foo.h", 4, base="int", depth=1)}))
     ctrl = mock_controls("void dep_write(P *pp);", "dep_write", None, td)
     assert ctrl["out_depth"] == {"pp": 2}, ctrl
     split = split_declaration("void dep_write(P *pp);", td)
@@ -2429,7 +2439,8 @@ def test_a_guardless_aggregate_alias_header_is_a_named_limitation(tmp_path):
                     "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert out.test_functions == [], out.test_functions
-    assert any("repeats an inline struct/union/enum" in lim for lim in out.limitations), out.limitations
+    assert any("cannot be included twice" in lim or "cannot be shared" in lim
+                for lim in out.limitations), out.limitations
     # No interface header was written for the refused mock, so nothing dangling.
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
     # A guard-less *scalar* alias is still admitted (duplicate scalar typedef is OK).
@@ -2462,7 +2473,8 @@ def test_a_guardless_enum_alias_header_is_a_named_limitation(tmp_path):
          "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert out.test_functions == [], out.test_functions
-    assert any("repeats an inline struct/union/enum" in lim for lim in out.limitations), out.limitations
+    assert any("cannot be included twice" in lim or "cannot be shared" in lim
+                for lim in out.limitations), out.limitations
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
     # A *guarded* enum alias is shared via `#include` and must compile (a real
     # gcc compile of the include order the generated test uses).
@@ -2515,7 +2527,8 @@ def test_a_guardless_header_with_an_inline_tag_body_is_a_named_limitation(tmp_pa
          "cases": [{"args": [1], "expected": 1, "mocks": {"dep_send": {}}}],
          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
     assert out.test_functions == [], out.test_functions
-    assert any("repeats an inline struct/union/enum" in lim for lim in out.limitations), out.limitations
+    assert any("cannot be included twice" in lim or "cannot be shared" in lim
+                for lim in out.limitations), out.limitations
     assert not (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_send.h").exists()
     # The guarded form shares and compiles.
     import shutil
@@ -2546,6 +2559,82 @@ def test_a_guardless_header_with_an_inline_tag_body_is_a_named_limitation(tmp_pa
         assert proc.returncode == 0, proc.stderr
 
 
+def test_an_enum_by_value_parameter_generates_with_empty_limitations(tmp_path):
+    """I5 regression (TC-1): an **enum-typed by-value parameter** is a scalar and
+    must generate — the regression (lot B charting clang's ``record.kind == ENUM``
+    into ``aggregate``) refused it with "argument N points at an aggregate type".
+    The generated call casts each argument to its declared enum type, which the
+    real compiler accepts below."""
+    bench, out, _ = _ptr_bench(
+        tmp_path, "enum-by-value",
+        '#include "foo.h"\n'
+        "state_t transition(state_t s, event_t e) { return (e == EV_START) ? s : ST_STOPPED; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n"
+        "typedef enum { ST_STOPPED, ST_RUNNING } state_t;\n"
+        "typedef enum { EV_START, EV_STOP } event_t;\n"
+        "state_t transition(state_t s, event_t e);\n#endif\n",
+        "# SDD\n- **FOO-001**: `transition` SHALL keep its state on EV_START.\n",
+        [_one_scenario("transition", ["ST_STOPPED", "EV_START"], "ST_STOPPED")])
+    assert out.limitations == [], out.limitations
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert "(state_t)ST_STOPPED" in body and "(event_t)EV_START" in body, body
+    if shutil.which("gcc"):
+        _compile_enum_call_shapes(
+            bench, tmp_path / "enum-by-value-tu",
+            "state_t call_shape(void) { return transition((state_t)ST_STOPPED,"
+            " (event_t)EV_START); }")
+
+
+def test_an_enum_pointer_out_parameter_generates_with_empty_limitations(tmp_path):
+    """The ``enum *`` out-param half of TC-1: a pointer to a scalar enum must be
+    materialised as ``status_t out0_0 = (status_t)…;`` and observed, never refused
+    as an aggregate. The old scanner chased only ``struct``/``union``; an enum
+    pointee is a scalar and was generatable at base ``755d27e``."""
+    bench, out, _ = _ptr_bench(
+        tmp_path, "enum-out-param",
+        '#include "foo.h"\n'
+        "int poll(sensor_status_t *out) { *out = SENSOR_OK; return 0; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n"
+        "typedef enum { SENSOR_OK, SENSOR_ERR } sensor_status_t;\n"
+        "int poll(sensor_status_t *out);\n#endif\n",
+        "# SDD\n- **FOO-001**: `poll` SHALL report SENSOR_OK.\n",
+        [{"id": "S1", "title": "t", "function": "poll", "requirement_ids": ["FOO-001"],
+          "mocks": [],
+          "cases": [{"args": ["SENSOR_OK"], "expected": 0,
+                     "expect_out": {0: "SENSOR_OK"}}],
+          "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}])
+    assert out.limitations == [], out.limitations
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert "sensor_status_t out0_0 = (sensor_status_t)SENSOR_OK;" in body, body
+    assert "TEST_ASSERT_EQUAL(SENSOR_OK, out0_0);" in body, body
+    if shutil.which("gcc"):
+        _compile_enum_call_shapes(
+            bench, tmp_path / "enum-out-param-tu",
+            "int call_shape(void) { sensor_status_t out0_0 ="
+            " (sensor_status_t)SENSOR_OK; return poll(&out0_0); }")
+
+
+def _compile_enum_call_shapes(bench: Path, comp: Path, call_shape: str) -> None:
+    """Compile *call_shape* — the exact cast/call shapes the generated test emits —
+    against the generated header with the real gcc. ``unity.h`` is not available
+    offline, so this compiles the C the generator produced (proving the cast to a
+    scalar enum and the ``enum *`` pointer are valid C) rather than the test file
+    verbatim; the full compile-and-run is the Docker-gated test below."""
+    import subprocess
+
+    comp.mkdir()
+    tu = comp / "tu.c"
+    tu.write_text(f'#include "foo.h"\n{call_shape}\n')
+    proc = subprocess.run(
+        ["gcc", "-std=c99", "-Wall", "-Werror",
+         "-I", str(bench / ".mtm" / "gen" / "src"),
+         "-c", str(tu), "-o", str(comp / "tu.o")],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_a_guard_like_block_not_enclosing_the_definition_is_still_unsafe(tmp_path):
     """F-A4-review (independent PRE_PR, CONFIRMED MANDATORY): the share-safety check
     must prove the inline body is *inside* an include guard, not merely that the
@@ -2573,7 +2662,7 @@ def test_a_guard_like_block_not_enclosing_the_definition_is_still_unsafe(tmp_pat
                         "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
              "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
         assert out.test_functions == [], (name, out.test_functions)
-        assert any("repeats an inline struct/union/enum" in lim
+        assert any("cannot be included twice" in lim or "cannot be shared" in lim
                    for lim in out.limitations), (name, out.limitations)
         assert not (bench / ".mtm" / "gen" / "interface"
                     / "mtm_dep_dep_send.h").exists(), name
@@ -2647,7 +2736,7 @@ def test_a_conditional_branch_of_the_guard_is_not_protection(tmp_path):
                         "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
              "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
         assert out.test_functions == [], (name, out.test_functions)
-        assert any("repeats an inline struct/union/enum" in lim
+        assert any("cannot be included twice" in lim or "cannot be shared" in lim
                    for lim in out.limitations), (name, out.limitations)
         assert not (bench / ".mtm" / "gen" / "interface"
                     / "mtm_dep_dep_send.h").exists(), name
@@ -2714,7 +2803,7 @@ def test_a_guard_macro_undefined_in_the_header_is_not_protection(tmp_path):
                         "mocks": {"dep_send": {"s": {"expr": "(S){7}"}}}}],
              "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
         assert out.test_functions == [], (name, out.test_functions)
-        assert any("repeats an inline struct/union/enum" in lim
+        assert any("cannot be included twice" in lim or "cannot be shared" in lim
                    for lim in out.limitations), (name, out.limitations)
         assert not (bench / ".mtm" / "gen" / "interface"
                     / "mtm_dep_dep_send.h").exists(), name
@@ -2786,7 +2875,7 @@ def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
     plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
                       LLMIdentity(provider="test", model="t"))
-    out = generate_suite(bench, plan, inventory)  # must not raise
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)  # must not raise
     assert out.test_functions, out.limitations
     body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
     assert "typedef unsigned short Q;" in body, body
@@ -2794,32 +2883,25 @@ def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
 
 def test_a_typedef_after_a_declaration_on_the_same_line_is_still_resolved(tmp_path):
     """A ``typedef`` that does not start its line (``int g(void); typedef
-    unsigned short vendor_t;``) was missed by the line-anchored typedef scanner. A
-    mocked declaration through such an alias then lost its defining header, so the
-    private interface header carried ``void dep_write(vendor_t p);`` with
-    ``vendor_t`` unknown — uncompilable C with ``limitations == []``, the shape §C
-    forbids. The scanner must recognise a statement-level ``typedef`` that follows a
-    previous declaration on the same line. This is a statement-level scanner, not a
-    full C parser: a ``typedef`` written on its own line inside a function body is
-    still matched (unchanged pre-existing behaviour), which this test does not
-    rely on either way."""
+    unsigned short vendor_t;``) must still be attributed to a defining *header*, so
+    a mocked declaration through it is typed and its interface header can
+    ``#include`` the defining header. If it were lost, the interface header would
+    carry ``void dep_write(vendor_t p);`` with ``vendor_t`` unknown — uncompilable
+    C with ``limitations == []``, the shape §C forbids. Under the clang contract
+    the defining location comes from libclang (not the line-anchored regex); the
+    lexical :func:`mtm.cscan.typedef_statement_map` remains only as the verbatim
+    fallback text for an alias with no includable header. This asserts the
+    generated header compiles with the real gcc."""
     import shutil
     import subprocess
 
-    from mtm.cscan import scan_typedefs, typedef_statement_map
+    from mtm.cscan import typedef_statement_map
 
     text = "int g(void); typedef unsigned short vendor_t;\n"
-    src = tmp_path / "combined.h"
-    src.write_text(text)
-    aliases = {a: t.base for a, t in scan_typedefs(src).items()}
-    assert aliases == {"vendor_t": "unsigned short"}, aliases
     assert "vendor_t" in typedef_statement_map(text), typedef_statement_map(text)
     # A second alias after the first on the same line must not be swallowed by the
     # first match (the ``;`` separating them is not consumed).
     pair = "typedef int a; typedef int b;\n"
-    pair_src = tmp_path / "pair.h"
-    pair_src.write_text(pair)
-    assert set(scan_typedefs(pair_src)) == {"a", "b"}, set(scan_typedefs(pair_src))
     assert set(typedef_statement_map(pair)) == {"a", "b"}, typedef_statement_map(pair)
 
     bench, out = _mock_bench(
@@ -2872,3 +2954,206 @@ def test_real_image_executes_a_mock_through_a_combined_line_typedef(
     assert run.ran, run.diagnostics[-2000:]
     assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1500:])
 
+
+
+@pytest.mark.docker
+def test_real_image_runs_a_mock_through_a_pointer_typedef_and_a_guarded_aggregate(
+        tmp_path, product_image):
+    """AP-02 / I2 / I5 for the clang contract: the whole mocked bench (private
+    interface header + CMock mock + Unity test) must compile, link and **execute**
+    in the real product image for (a) a mock through a **pointer typedef** declared
+    at the clang depth and (b) a **guarded inline-aggregate alias**, and the same
+    suite must discriminate a correct from a faulty SUT.
+
+    The image resolver (libclang 18) drives the type map; the includes are shared
+    by the compiler, not a guard regex. This is the real-compiler evidence the
+    plan requires (a text assertion is not proof of C semantics).
+    """
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "clang-pointer-and-aggregate"
+    bench.mkdir()
+    # A guarded inline-aggregate alias (record identity via clang) and a pointer
+    # typedef at depth 1 (`P`), used as a scalar parameter (depth 1, renderable).
+    (bench / "foo.c").write_text(
+        '#include "foo.h"\n'
+        "unsigned short use(int a) { P p = &a; return dep_read(p); }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+        "typedef int *P;\n"
+        "typedef struct { unsigned short v; } sample_t;\n"
+        "typedef enum { E_A, E_B } e_t;\n"
+        "sample_t dep_make(e_t e);\n"
+        "unsigned short dep_read(P p);\n"
+        "unsigned short use(int a);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **FOO-001**: `use` SHALL return the read value.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(
+        bench, _scopes(bench))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_read"],
+        "cases": [{"args": [3], "expected": 3, "mocks": {"dep_read": {"ret": 3}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, image=product_image)
+    assert out.types["status"], out.types
+    assert out.types["status"] == "RESOLVED", out.types
+    assert out.test_functions, out.limitations
+    # The pointer typedef's depth came from clang (F3): the mock's parameter is a
+    # depth-1 `P` and the interface header shares the defining header.
+    body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_read.h").read_text()
+    assert '#include "foo.h"' in body, body
+
+    # Correct SUT: the mapped return discriminates.
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran, run.diagnostics[-2000:]
+    assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1500:])
+
+    # Faulty SUT (contrast): the implementation contradicts the SDD-return, so the
+    # same generated assertion must FAIL — a finding, never a silent pass.
+    (bench / "foo.c").write_text(
+        '#include "foo.h"\n'
+        "unsigned short use(int a) { P p = &a; "
+        "return (unsigned short)(dep_read(p) + 1); }\n")
+    out2 = generate_suite(bench, plan, inventory, image=product_image)
+    assert out2.test_functions, out2.limitations
+    faulty = run_ceedling(bench, image_ref=product_image)
+    assert faulty.ran, faulty.diagnostics[-2000:]
+    assert faulty.total == 1 and faulty.failed == 1, \
+        (faulty.total, faulty.failed, faulty.stdout[-1500:])
+
+
+@pytest.mark.docker
+def test_real_image_runs_an_enum_typed_argument(tmp_path, product_image):
+    """AP-02 / I1 / I5 for the enum regression (TC-1): a mock and SUT path with an
+    **enum-typed argument** must compile, link and **execute** in the real product
+    image (libclang 18 drives the type map). At the regressed candidate the enum
+    parameter was refused as an aggregate (empty suite); the fix must generate a
+    real, runnable bench — correct SUT PASS, faulty SUT FAIL.
+
+    The mocked ``dep_state`` takes an enum *by value* and another returns one; the
+    SUT passes and returns enum-typed values, so the whole chain exercises the
+    scalar-enum boundary the defect broke."""
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "clang-enum-argument"
+    bench.mkdir()
+    (bench / "foo.c").write_text(
+        '#include "foo.h"\n'
+        "state_t use(state_t s) { return dep_next(s); }\n")
+    (bench / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+        "typedef enum { ST_STOPPED, ST_RUNNING } state_t;\n"
+        "state_t dep_next(state_t s);\n"
+        "state_t use(state_t s);\n#endif\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **FOO-001**: `use` SHALL return the next state.\n")
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    scenario = {
+        "id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+        "mocks": ["dep_next"],
+        "cases": [{"args": ["ST_STOPPED"], "expected": "ST_RUNNING",
+                   "mocks": {"dep_next": {"ret": "ST_RUNNING"}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory, image=product_image)
+    assert out.types["status"] == "RESOLVED", out.types
+    # The enum parameter was NOT refused as an aggregate (the regression).
+    assert out.limitations == [], out.limitations
+    assert out.test_functions, out.limitations
+    body = (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+    assert "(state_t)ST_STOPPED" in body, body
+
+    # Correct SUT: the mock's enum return is observed and the case passes.
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran, run.diagnostics[-2000:]
+    assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1500:])
+
+    # Faulty SUT (contrast): returns the *wrong* enum, so the same generated
+    # assertion must FAIL — a finding, never a silent pass.
+    (bench / "foo.c").write_text(
+        '#include "foo.h"\n'
+        "state_t use(state_t s) { (void)s; return ST_STOPPED; }\n")
+    out2 = generate_suite(bench, plan, inventory, image=product_image)
+    assert out2.test_functions, out2.limitations
+    faulty = run_ceedling(bench, image_ref=product_image)
+    assert faulty.ran, faulty.diagnostics[-2000:]
+    assert faulty.total == 1 and faulty.failed == 1, \
+        (faulty.total, faulty.failed, faulty.stdout[-1500:])
+
+
+# --- I4: clang resolution failure is typed, never a guessed type -------------
+
+
+def _mock_scenario():
+    return {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+            "mocks": ["dep_write"],
+            "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {"ret": 0}}}],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+
+
+def test_a_blocked_resolution_refuses_each_mock_with_its_diagnostic(tmp_path):
+    """I4: an adapter ``BLOCKED`` (incomplete build context — a missing header or
+    define) means no declaration can be typed faithfully. Each affected mock gets a
+    *named per-symbol limitation* carrying the diagnostic and its scenarios are
+    skipped — never a guessed type, never broken C with ``limitations == []``."""
+    from mtm import ctypes_clang
+
+    def blocked(paths, **kwargs):
+        return ctypes_clang.CTypeResolution(
+            status=ctypes_clang.BLOCKED, clang_version="18.1.8",
+            message="'vendor.h' file not found",
+            diagnostics=["/bench/foo.c:2:10: Fatal: 'vendor.h' file not found"],
+            issues=[{"kind": "MISSING_CONTEXT", "message": "'vendor.h' file not found"}])
+
+    bench, out = _mock_bench(
+        tmp_path, "blocked-resolution",
+        "int use(int a) { return dep_write(a); }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint dep_write(int a);\nint use(int a);\n#endif\n",
+        _mock_scenario(), resolve=blocked)
+    assert out.types["status"] == "BLOCKED"
+    assert out.test_functions == [], out.test_functions
+    assert any("dep_write" in lim and "could not be resolved" in lim
+               for lim in out.limitations), out.limitations
+
+
+def test_a_tool_failed_resolution_is_a_run_level_tool_fault_not_a_sut_defect(
+        fixture_bench):
+    """I4: a broken resolver (docker/binding) is a **run-level tool fault** —
+    ``TOOL_FAILURE``/exit 30 — never reported as a SUT defect or a functional
+    result, and never a guessed pass."""
+    from mtm import ctypes_clang
+    from mtm.generate import run_generate
+    from mtm.llm import MockProvider
+
+    def broken(paths, **kwargs):
+        return ctypes_clang.CTypeResolution(
+            status=ctypes_clang.TOOL_FAILED,
+            message="libclang could not be used: ModuleNotFoundError: clang")
+
+    bench = fixture_bench("mocked-sensor")
+
+    def runner(*a, **k):
+        raise AssertionError("the suite must not be executed on a resolver fault")
+
+    result = run_generate(bench, _scopes(bench), provider=MockProvider(),
+                          image="img:test", runner=runner, resolve=broken)
+    assert result.status == "TOOL_FAILURE" and result.exit_code == 30
+    assert result.smoke["ran"] is False
+    assert result.findings == []  # never a SUT defect
