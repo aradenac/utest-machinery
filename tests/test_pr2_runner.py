@@ -2584,3 +2584,61 @@ def test_an_alias_defined_only_in_a_c_is_carried_verbatim(tmp_path):
     assert out.test_functions, out.limitations
     body = (bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h").read_text()
     assert "typedef unsigned short Q;" in body, body
+
+
+def test_a_typedef_after_a_declaration_on_the_same_line_is_still_resolved(tmp_path):
+    """A ``typedef`` that does not start its line (``int g(void); typedef
+    unsigned short vendor_t;``) was missed by the line-anchored typedef scanner. A
+    mocked declaration through such an alias then lost its defining header, so the
+    private interface header carried ``void dep_write(vendor_t p);`` with
+    ``vendor_t`` unknown — uncompilable C with ``limitations == []``, the shape §C
+    forbids. The scanner must recognise a statement-level ``typedef`` that follows a
+    previous declaration on the same line. This is a statement-level scanner, not a
+    full C parser: a ``typedef`` written on its own line inside a function body is
+    still matched (unchanged pre-existing behaviour), which this test does not
+    rely on either way."""
+    import shutil
+    import subprocess
+
+    from mtm.cscan import scan_typedefs, typedef_statement_map
+
+    text = "int g(void); typedef unsigned short vendor_t;\n"
+    src = tmp_path / "combined.h"
+    src.write_text(text)
+    aliases = {a: t.base for a, t in scan_typedefs(src).items()}
+    assert aliases == {"vendor_t": "unsigned short"}, aliases
+    assert "vendor_t" in typedef_statement_map(text), typedef_statement_map(text)
+    # A second alias after the first on the same line must not be swallowed by the
+    # first match (the ``;`` separating them is not consumed).
+    pair = "typedef int a; typedef int b;\n"
+    pair_src = tmp_path / "pair.h"
+    pair_src.write_text(pair)
+    assert set(scan_typedefs(pair_src)) == {"a", "b"}, set(scan_typedefs(pair_src))
+    assert set(typedef_statement_map(pair)) == {"a", "b"}, typedef_statement_map(pair)
+
+    bench, out = _mock_bench(
+        tmp_path, "combined-line-typedef",
+        "int use(int a) { dep_write(0); return a; }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+        "int g(void); typedef unsigned short vendor_t;\n"
+        "void dep_write(vendor_t p);\nint use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_write"],
+         "cases": [{"args": [1], "expected": 1, "mocks": {"dep_write": {"ret": 0}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    header_path = bench / ".mtm" / "gen" / "interface" / "mtm_dep_dep_write.h"
+    body = header_path.read_text()
+    # The alias is visible through the defining copied header, as for F3.
+    assert '#include "foo.h"' in body, body
+    if shutil.which("gcc"):
+        comp = tmp_path / "compile-combined"
+        comp.mkdir()
+        copy = comp / "hdr.c"
+        copy.write_text(body)
+        proc = subprocess.run(
+            ["gcc", "-std=c99", "-Wall", "-Werror",
+             "-I", str(bench / ".mtm" / "gen" / "src"),
+             "-c", str(copy), "-o", str(comp / "hdr.o")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+

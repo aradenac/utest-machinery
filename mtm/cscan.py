@@ -182,8 +182,12 @@ def scan_prototypes(path: Path) -> list[tuple[str, str]]:
 
 #: A ``typedef`` whose declarator has no brace (so the aggregation typedefs in
 #: :mod:`mtm.gen` handle the struct/union/array forms) and ends at the line's
-#: ``;``. Group ``decl`` is ``<type specifiers + stars> <name>``.
-_TYPEDEF_RE = re.compile(r"(?m)^[ \t]*typedef\s+(?P<decl>[^;{}\n]+?)\s*;")
+#: ``;``. Group ``decl`` is ``<type specifiers + stars> <name>``. The statement may
+#: start a line *or* follow a previous declaration on the same line
+#: (``struct S { … }; typedef struct S T;``) — an anchor of ``^[ \t]*`` alone would
+#: miss the latter and leave the alias unresolved, which downstream would emit as
+#: uncompilable C.
+_TYPEDEF_RE = re.compile(r"(?m)(?:^[ \t]*|(?<=[;}])[ \t]*)typedef\s+(?P<decl>[^;{}\n]+?)\s*;")
 
 #: An aggregate *definition* alias: ``typedef struct { ... } S;`` (or ``union``),
 #: including the pointer form ``typedef struct { ... } *SP;``. Its ``{...}`` body
@@ -194,9 +198,11 @@ _TYPEDEF_RE = re.compile(r"(?m)^[ \t]*typedef\s+(?P<decl>[^;{}\n]+?)\s*;")
 _AGGREGATE_DEF_RE = re.compile(
     r"\btypedef\s+(?:struct|union)\b[^;{}]*\{[^}]*\}\s*\*?\s*(?P<name>[A-Za-z_]\w*)\s*;",
     re.DOTALL)
-#: An alias of a struct/union *tag*: ``typedef struct Tag S;`` (or ``*S``).
+#: An alias of a struct/union *tag*: ``typedef struct Tag S;`` (or ``*S``). Like
+#: :data:`_TYPEDEF_RE` it may follow an earlier declaration on the same line
+#: (``struct Tag { … }; typedef struct Tag S;``).
 _AGGREGATE_REF_RE = re.compile(
-    r"(?m)^[ \t]*typedef\s+(?:struct|union)\s+[A-Za-z_]\w*\s*\*?\s*"
+    r"(?m)(?:^[ \t]*|(?<=[;}])[ \t]*)typedef\s+(?:struct|union)\s+[A-Za-z_]\w*\s*\*?\s*"
     r"(?P<name>[A-Za-z_]\w*)\s*;")
 
 #: Alias-name patterns for an **opaque** declarator, where the trailing-identifier
@@ -331,9 +337,10 @@ def _mark_aggregate_aliases(found: dict[str, Typedef], clean: str) -> None:
 
 
 #: Every `typedef ...;` statement (including an inline struct/union body), so a
-#: declaration that *uses* an alias can carry that alias's own definition.
+#: declaration that *uses* an alias can carry that alias's own definition. As with
+#: :data:`_TYPEDEF_RE` the statement may follow a previous one on the same line.
 _TYPEDEF_STMT_RE = re.compile(
-    r"(?m)^[ \t]*typedef\b[^;{}]*(?:\{[^}]*\}[^;{}]*)?;")
+    r"(?m)(?:^[ \t]*|(?<=[;}])[ \t]*)typedef\b[^;{}]*(?:\{[^}]*\}[^;{}]*)?;")
 
 
 def typedef_statement_map(text: str) -> dict[str, str]:
