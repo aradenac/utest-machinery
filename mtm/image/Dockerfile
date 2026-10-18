@@ -43,9 +43,12 @@ RUN apt-get update \
       ruby ruby-dev gcc libc6-dev make \
  && rm -rf /var/lib/apt/lists/*
 
-# Clang + LLVM (coverage/MC-DC and ASan/UBSan profiles) and Valgrind (Memcheck
-# profile). apt.llvm.org is the upstream project's own repository; the key is
-# fetched and dearmored at build time so no key material is committed here.
+# Clang + LLVM (coverage/MC-DC and ASan/UBSan profiles), the libclang C API and
+# the matching Python bindings — the semantic authority for C declarations/types
+# (owner decision 0017) — and Valgrind (Memcheck profile). apt.llvm.org is the
+# upstream project's own repository; the key is fetched and dearmored at build
+# time so no key material is committed here. `libclang-18-dev` ships the `clang-c`
+# headers; `python3-clang-18` ships `/usr/lib/python3/dist-packages/clang/`.
 RUN set -eux; \
     curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg; \
     echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" \
@@ -53,11 +56,18 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       "clang-${LLVM_VERSION}" "llvm-${LLVM_VERSION}" "llvm-${LLVM_VERSION}-tools" \
-      "libclang-rt-${LLVM_VERSION}-dev" "libclang-common-${LLVM_VERSION}-dev" valgrind; \
+      "libclang-rt-${LLVM_VERSION}-dev" "libclang-common-${LLVM_VERSION}-dev" \
+      "libclang-${LLVM_VERSION}-dev" "python3-clang-${LLVM_VERSION}" valgrind; \
     rm -rf /var/lib/apt/lists/*; \
     "clang-${LLVM_VERSION}" --version | head -1; \
     "llvm-profdata-${LLVM_VERSION}" --version | head -1; \
-    valgrind --version
+    valgrind --version; \
+    python3 -c "import ctypes, clang.cindex as ci; \
+lib = ctypes.CDLL(ci.conf.lib._name); \
+lib.clang_getClangVersion.restype = ctypes.c_void_p; \
+lib.clang_getCString.restype = ctypes.c_char_p; \
+print('python3-clang binding:', ci.__file__); \
+print('libclang:', lib.clang_getCString(lib.clang_getClangVersion()).decode())"
 
 # Ceedling + CMock drive the generated functional unit suite. Ruby and the C
 # toolchain live in the image so a user needs neither on the host. Ceedling

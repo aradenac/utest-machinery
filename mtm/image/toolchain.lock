@@ -47,6 +47,10 @@ tools:
     version: "18.1.8 (clang-18, llvm-18, llvm-18-tools, libclang-rt-18-dev)"
     license: Apache-2.0 WITH LLVM-exception
     note: "Compiler for the PR 3 coverage/MC-DC, ASan/UBSan and -O2 profiles. From apt.llvm.org's bookworm-18 suite; installed under -18-suffixed names (clang-18, llvm-profdata-18, llvm-cov-18)."
+  libclang:
+    version: "18.1.8 (libclang-18-dev, python3-clang-18)"
+    license: Apache-2.0 WITH LLVM-exception
+    note: "Sole semantic authority for C declarations/types (owner decision 0017): the mtm/ctypes_clang.py adapter drives libclang-18 via the matching python3-clang-18 bindings, resolved inside the product image from the selected build context. From the same apt.llvm.org bookworm-18 suite."
   valgrind:
     version: "3.19.0"
     license: GPL-2.0-or-later
