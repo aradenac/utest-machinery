@@ -24,3 +24,6 @@ credentials.env
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Ephemeral agent checkpoints (not a second versioned evidence tracker).
+.claude/.runtime-reports/
