@@ -63,6 +63,8 @@ flowchart TD
 
 **Independent operations:** `generate` uses a model and may alter proposed bench artifacts, `verify` uses no model and may only append run records, `interpret` uses a model but cannot change frozen evidence or approved test oracles. All allow targeted rerun and bounded, explicit retries.
 
+**Milestone-3 R04 qualification over this workflow:** after the existing generation/freeze boundary, assess the **semantic support** of selected planned oracles against independently prepared SDD/reference expectations. It is a quality assessment of the **unchanged** plan and test bench, complementary to the offline `verify` results; it does not insert an LLM into `verify`, rewrite the plan, or introduce a new public workflow stage/command. Keep a distinction between a scenario's `SPECIFIED` provenance claim and the independent assessment of whether its *actual expected value* follows from the referenced clause. A valid requirement ID alone never proves the latter. The assessment is visible through existing plan/qualification evidence; an unsupported oracle cannot substantiate a conformity verdict or a C-defect finding. This enhancement belongs to **milestone 3**, not the in-progress milestone 2.
+
 ## Executability assessment
 
 ```mermaid
@@ -126,7 +128,7 @@ Requirements below express **observable behavior**; schemas are specified in [da
 ## Technical boundaries
 
 - Native execution uses original C translation units when feasible; if isolated extraction is unavoidable, retain hashes, transformations and fidelity assumptions. Hardware-dependent units may remain BLOCKED, never omitted from selected-scope statistics.
-- Generated oracles carry exact SDD anchors and review state; the LLM may propose a correction to code or specification but may not silently modify either.
+- Generated oracles carry exact SDD anchors and review state; the LLM may propose a correction to code or specification but may not silently modify either. From milestone 3, an independent semantic assessment of **concrete** expected observations is kept separately from their generated provenance and from raw PASS/FAIL. Semantic uncertainty or contradiction cannot be hidden by a passing test or repaired by adapting the oracle to observed C behavior.
 - Only the generic engine and tool installations live in Docker. Every project configuration, source mapping, tests, journal, campaign and report belongs to the single host bench. Git-version essential configurations, generated tests, stable states and accepted reports; budget large fuzz/raw artifacts explicitly with Git LFS or content-addressed archives, without silent deletion.
 - Distinguish historical **record replay** (read preserved evidence), **re-execution** (requires original selected input content and locked toolchain) and **reinterpretation** (new LLM explanation from immutable evidence).
 
