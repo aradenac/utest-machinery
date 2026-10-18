@@ -510,6 +510,25 @@ _STORAGE_CLASS = {"extern", "static", "inline", "register", "auto", "typedef",
                   "_Noreturn"}
 _QUALIFIERS = {"const", "volatile", "restrict"}
 
+#: C type-specifier vocabulary a declaration can name without any definition. The
+#: `struct`/`union`/`enum` keywords are included: their *tag* identity comes from
+#: clang's record facts, not from a name, so a tag is not treated as an undefined
+#: named type here (see `_undefined_type_in_decl`).
+_C_TYPE_WORDS = frozenset(
+    set(_CTYPE_WORDS) | set(_STORAGE_CLASS) | set(_QUALIFIERS)
+    | {"void", "struct", "union", "enum", "_Complex", "_Imaginary"})
+
+#: `<stdint.h>` fixed/convenience integer types, matched by name so the whole
+#: family (`int32_t`, `uint_fast16_t`, `intptr_t`, `intmax_t`, …) is covered
+#: without enumeration. The private interface header always `#include`s
+#: `<stdint.h>`, so a declaration naming one of these is self-sufficient. The
+#: `_least`/`_fast` variants carry a leading underscore (`uint_fast16_t`).
+#: Deliberately **not** extended to `<stddef.h>` names (`size_t`, `ptrdiff_t`,
+#: `wchar_t`): `<stdint.h>` does not provide those, so admitting them would be the
+#: very uncompilable-C false success this guard exists to prevent.
+_STDINT_TYPE_RE = re.compile(
+    r"^u?int(?:8|16|32|64|ptr|max|_least\d+|_fast\d+)_t$")
+
 
 def _type_key(raw: str, name: str = "", *, drop_top: bool = True) -> str:
     """A comparison key for a raw C type/declarator, one ``|``-joined segment per
@@ -1230,6 +1249,10 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     #: Which authority supplied each mocked symbol's declaration (provenance for
     #: the manifest — ``clang`` / ``selected-header`` / ``llm`` / ``none``).
     declaration_sources: dict[str, str] = {}
+    #: ``typedef`` statements the plan's own ``mock_declarations`` text carries,
+    #: per mocked symbol (see `_llm_field_aliases`). Threaded into the interface
+    #: header so an alias only that text defines is not left undefined (I1/AP-06).
+    llm_field_aliases_by_symbol: dict[str, dict[str, str]] = {}
     for scenario in plan.scenarios:
         if scenario.unit_id in excluded:
             continue
@@ -1250,11 +1273,18 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             # build context wins unconditionally; the plan's model-supplied text is
             # a fallback used only when no real declaration exists. See
             # `_authoritative_declaration`.
-            declared, source = _authoritative_declaration(
+            declared, source, field_aliases = _authoritative_declaration(
                 facts, symbol, scenario.mock_declarations.get(symbol) or "",
                 bench_root, inventory)
             declarations[symbol] = declared
             declaration_sources[symbol] = source
+            # A `typedef` the plan's own `mock_declarations` text carries (e.g.
+            # `typedef unsigned short Q; int dep_write(Q q);`) must travel with the
+            # prototype it defines, exactly as the pre-IMP-18 generator's verbatim
+            # field did; keeping it lets `_alias_source_for_decl` carry it into the
+            # interface header. Empty for the real clang/header authorities, whose
+            # aliases come from the selected build context.
+            llm_field_aliases_by_symbol[symbol] = field_aliases
     for symbol, decl in sorted(declarations.items()):
         if not decl.strip():
             # No real declaration resolved and no unambiguous usable prototype in
@@ -1274,6 +1304,25 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
                 f"mocked symbol {symbol!r} has no usable declaration; {detail}, so "
                 "its scenarios are not executed")
             continue
+        # I1/AP-06: a declaration extracted from the plan's text may name a type
+        # nothing defines — an alias the LLM restated with no companion `typedef`
+        # and no definition in the selected build context (`int dep_write(Q q);`).
+        # Carrying no defining statement would leave `Q` undefined while every
+        # scenario still ran: a false success behind empty limitations. The alias
+        # machinery below cannot see such a name (it only carries what the field or
+        # clang provides), so it is refused here with a precise per-symbol
+        # limitation. Only the LLM branch is guarded: the clang/selected-header
+        # authorities are real declarations and must not be second-guessed.
+        if declaration_sources.get(symbol) == DECL_FROM_LLM:
+            undefined = _undefined_type_in_decl(
+                decl, alias_facts, llm_field_aliases_by_symbol.get(symbol))
+            if undefined:
+                refused_mocks[symbol] = (
+                    f"the plan's declaration for {symbol!r} names undefined type "
+                    f"{undefined!r} (no selected header defines it and the plan "
+                    "supplied no `typedef` for it); it cannot be emitted as "
+                    "compilable C")
+                continue
         # A declaration may name a `typedef` alias (`typedef int *P; void dep(P p);`).
         # The private header is compiled on its own (CMock generates the mock from
         # it, and the test includes it before the unit header), so every alias its
@@ -1287,7 +1336,8 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         # defining statement has such a body *and* no includable header cannot be
         # duplicated and is refused with a named limitation instead.
         alias_includes, alias_defs, unduplicable = _alias_source_for_decl(
-            decl, alias_source, alias_facts, alias_statements, unsafe_headers)
+            decl, alias_source, alias_facts, alias_statements, unsafe_headers,
+            llm_field_aliases_by_symbol.get(symbol))
         if unduplicable:
             refused_mocks[symbol] = (
                 f"mocked symbol {symbol!r} declares a parameter through the "
@@ -1529,11 +1579,112 @@ def _prototype_from_llm_text(raw: str, symbol: str) -> str:
     return candidates[0] if len(candidates) == 1 else ""
 
 
+def _llm_field_aliases(raw: str) -> dict[str, str]:
+    """The ``typedef`` statements a ``mock_declarations`` field itself carries.
+
+    A plan field like ``typedef unsigned short Q;\\nint dep_write(Q q);`` pairs an
+    alias with the prototype that uses it. `_prototype_from_llm_text` keeps only
+    the prototype, so the alias's defining statement must travel with it or the
+    emitted declaration names an undefined type (I1/AP-06). This harvests those
+    statements with the **same** lexical helper the `.c`-carried fallback uses
+    (``cscan.typedef_statement_map``) — no parallel typedef parser (R20/AP-08) —
+    keyed by alias name. Lexical text only; it makes no type claim.
+    """
+    if not raw:
+        return {}
+    return cscan.typedef_statement_map(raw)
+
+
+def _undefined_type_token(spelling: str, known: set[str]) -> str:
+    """The first token in a **type** *spelling* that nothing defines, or ``""``.
+
+    The acceptance rule shared by :func:`_undefined_type_in_decl` for both the
+    prototype's own type spellings and the base of a field-carried ``typedef``: a
+    C type word/qualifier/keyword, a ``<stdint.h>`` scalar, or a *known* alias
+    (clang-resolved or field-carried). A ``struct``/``union``/``enum`` tag is
+    skipped: it names an aggregate by identity, not an alias needing a definition.
+    """
+    skip_tag = False
+    for token in re.findall(r"[A-Za-z_]\w*", spelling or ""):
+        if skip_tag:
+            skip_tag = False  # the token after struct/union/enum is a tag
+            continue
+        if token in ("struct", "union", "enum"):
+            skip_tag = True
+            continue
+        if token in _C_TYPE_WORDS or _STDINT_TYPE_RE.match(token):
+            continue
+        if token in known:
+            continue
+        return token
+    return ""
+
+
+def _field_statement_base_undefined(statement: str, known: set[str]) -> str:
+    """The undefined base type a brace/paren-free ``typedef`` statement names.
+
+    A field-carried statement can itself rest on an undefined type
+    (``typedef P *Q;`` with ``P`` defined nowhere), so carrying it verbatim would
+    emit uncompilable C just like a bare undefined prototype. Only the simplest,
+    unambiguous shape is checked — identifiers and ``*`` — so a struct body,
+    array or function declarator (which this lexical helper must not second-guess)
+    is left alone; conservatism means a missed residual is a lesser fault than a
+    false refusal.
+    """
+    text = statement.strip()
+    if not text.startswith("typedef") or any(c in text for c in "{}()[]"):
+        return ""
+    tokens = re.findall(r"[A-Za-z_]\w*", text[len("typedef"):])
+    if len(tokens) < 2:
+        return ""
+    # The trailing identifier is the alias being defined; only the base precedes it.
+    return _undefined_type_token(" ".join(tokens[:-1]), known)
+
+
+def _undefined_type_in_decl(decl: str, alias_facts: dict[str, Any],
+                            field_aliases: dict[str, str] | None = None) -> str:
+    """The first token in *decl* (or its carried aliases) with no definition, or ``""``.
+
+    A lexical, **conservative** guard for the LLM-fallback branch (I1/AP-06). The
+    plan's model-supplied declaration may name a type the emitted interface header
+    never defines — an alias with neither a companion ``typedef`` in the same field
+    nor a definition in the selected build context (``int dep_write(Q q);``). The
+    header would then be uncompilable while every scenario still ran — a false
+    success behind empty limitations. This names that type so the caller records a
+    precise per-symbol limitation instead of emitting the body-less declaration.
+
+    It walks only the **type** spellings — the return type and each parameter's
+    base, with parameter *names* already stripped by :func:`split_declaration` — so
+    a parameter called ``channel`` is never mistaken for a type. It also checks the
+    base of each field-carried ``typedef`` (``typedef P *Q;`` with ``P`` undefined
+    is the same defect one level down). A token is accepted when it is a C type
+    word/qualifier/keyword, a ``<stdint.h>`` scalar (the interface header always
+    ``#include``s ``<stdint.h>``), a clang-resolved alias, or a ``typedef`` the
+    plan's own field carries. Only the residue is reported; anything the generator
+    cannot parse is left to the existing "no usable declaration" refusal, so this
+    never invents a refusal. Lexical text only; it makes no type claim.
+    """
+    split = split_declaration(decl)
+    if split is None:
+        return ""
+    ret, params = split
+    known = set(alias_facts or {}) | set(field_aliases or {})
+    for spelling in [ret, *[p.type for p in params]]:
+        undefined = _undefined_type_token(spelling, known)
+        if undefined:
+            return undefined
+    for statement in (field_aliases or {}).values():
+        undefined = _field_statement_base_undefined(statement, known)
+        if undefined:
+            return undefined
+    return ""
+
+
 def _authoritative_declaration(
     facts: Any, symbol: str, llm_text: str,
     bench_root: Path, inventory: Inventory,
-) -> tuple[str, str]:
-    """The mocked symbol's declaration and its provenance, in authority order.
+) -> tuple[str, str, dict[str, str]]:
+    """The mocked symbol's declaration, its provenance, and any carried aliases.
 
     Owner contract (AP-08, IMP-18): **a real declaration resolved from the
     selected build context is authoritative and is never overridden by an LLM
@@ -1554,6 +1705,13 @@ def _authoritative_declaration(
        unambiguous prototype is present.
     4. :data:`DECL_NONE` — nothing usable; the caller records a precise per-symbol
        limitation and never invents a signature.
+
+    The third element is the ``typedef`` statements the **LLM field itself**
+    carries (empty for the clang/header authorities, whose aliases come from the
+    selected build context). A fallback prototype may name an alias the field also
+    defines — ``typedef unsigned short Q; int dep_write(Q q);`` — so the caller
+    must carry those statements into the interface header exactly as the base did;
+    discarding them left the alias undefined (I1/AP-06).
     """
     if getattr(facts, "status", "") == ctypes_clang.RESOLVED:
         fact = facts.by_name(symbol)
@@ -1564,14 +1722,14 @@ def _authoritative_declaration(
             # names (a partial fact set) is not usable for a CMock mock, so fall
             # through to the real selected header rather than emit it.
             if decl and split_declaration(decl) is not None:
-                return decl, DECL_FROM_CLANG
+                return decl, DECL_FROM_CLANG, {}
     real = _prototype_for_symbol(bench_root, inventory, symbol)
     if real:
-        return real, DECL_FROM_HEADER
+        return real, DECL_FROM_HEADER, {}
     llm = _prototype_from_llm_text(llm_text, symbol)
     if llm:
-        return llm, DECL_FROM_LLM
-    return "", DECL_NONE
+        return llm, DECL_FROM_LLM, _llm_field_aliases(llm_text)
+    return "", DECL_NONE, {}
 
 
 def _decl_alias_tokens(decl: str, known: dict[str, Any]) -> list[str]:
@@ -1601,10 +1759,27 @@ def _decl_alias_tokens(decl: str, known: dict[str, Any]) -> list[str]:
     return ordered
 
 
+@dataclass(frozen=True)
+class _FieldAliasFact:
+    """Tombstone for a ``typedef`` **only** the plan's ``mock_declarations`` text
+    defines.
+
+    Nothing in the selected build context defines it, so it is not clang-resolved:
+    it has no includable defining header and no clang type identity. It exists so
+    :func:`_decl_alias_tokens` recognises the name as an alias the declaration uses
+    (selecting it for the verbatim carry below); the statement itself is carried,
+    not this placeholder. ``base`` is empty because a chained alias inside the same
+    field is carried as a group, needing no per-alias base walk.
+    """
+
+    base: str = ""
+
+
 def _alias_source_for_decl(decl: str, alias_source: dict[str, str],
                            alias_facts: dict[str, Any],
                            alias_statements: dict[str, str] | None = None,
-                           unsafe_headers: set[str] | None = None
+                           unsafe_headers: set[str] | None = None,
+                           field_aliases: dict[str, str] | None = None
                            ) -> tuple[str, str, str]:
     """The ``#include`` / verbatim ``typedef`` lines a declaration needs.
 
@@ -1622,16 +1797,41 @@ def _alias_source_for_decl(decl: str, alias_source: dict[str, str],
     inline ``{…}`` body); when its defining statement *does* have an inline body
     (``inline_body`` from clang) it cannot be duplicated, so the alias name is
     returned as ``unduplicable`` for a named limitation.
+
+    *field_aliases* are the ``typedef`` statements the plan's own
+    ``mock_declarations`` text carries (`_llm_field_aliases`). An alias one of
+    those defines is not clang-resolved (nothing selected defines it), so its
+    verbatim statement is carried — the pre-IMP-18 behavior that kept a fallback
+    prototype and its companion ``typedef`` together (I1/AP-06). An alias clang
+    *did* resolve is left to the clang-driven decision above, so a real defining
+    header is included rather than duplicated.
     """
     unsafe_headers = unsafe_headers or set()
+    field_aliases = field_aliases or {}
+    known: dict[str, Any] = dict(alias_facts)
+    # An alias the plan's own field text defines but nothing in the selected build
+    # context does: not clang-resolved, so it is carried verbatim (below) instead
+    # of being included from a defining header.
+    field_only = {name: statement for name, statement in field_aliases.items()
+                  if name not in alias_facts}
+    for name in field_only:
+        known[name] = _FieldAliasFact()
     include_names: list[str] = []
     wanted: list[str] = []
-    for token in _decl_alias_tokens(decl, alias_facts):
+    tokens = _decl_alias_tokens(decl, known)
+    for token in tokens:
         header = alias_source.get(token)
         fact = alias_facts.get(token)
         if header is not None and header not in unsafe_headers:
             if header not in include_names:
                 include_names.append(header)
+            continue
+        # A field-only alias is not clang-resolved: no other file in the build
+        # defines it, so its verbatim statement cannot collide — carried below as
+        # a group (a chained alias inside one field is not reachable through
+        # clang's `base` walk, and the whole field was emitted verbatim before
+        # IMP-18).
+        if token in field_only:
             continue
         # The alias is defined in a header clang proved double-include-unsafe, or
         # has no includable header at all. Carrying its defining statement verbatim
@@ -1644,6 +1844,12 @@ def _alias_source_for_decl(decl: str, alias_source: dict[str, str],
         statement = (alias_statements or {}).get(token)
         if statement:
             wanted.append(statement)
+    # Carry the field's own statements (source order) when the prototype uses any
+    # of them, so an alias only that text defines is never left undefined.
+    if any(token in field_only for token in tokens):
+        for statement in field_only.values():
+            if statement not in wanted:
+                wanted.append(statement)
     includes = "".join(f'#include "{name}"\n' for name in include_names)
     statements = "".join(f"{statement}\n" for statement in wanted)
     if statements:
