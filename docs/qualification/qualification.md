@@ -53,6 +53,17 @@ flowchart LR
 | QD-011 | The assessment SHALL report missed detections, false positives, inaccurate requirements links and omitted scope, not just green outcomes. |
 | QD-012 | Independent fixture ground truth SHALL be separated from generation prompts to reduce answer leakage. |
 
+## R04 — Independent semantic qualification of SDD oracles (milestone 3)
+
+**Goal:** verify that the **meaning** of a generated expected observation is supported by the applicable SDD requirement, not simply that its cited requirement ID exists. This is **not** an added milestone-2 gate. Reuse the existing frozen test plan, Q-01/Q-07/Q-08/Q-09 fixtures and independently maintained expected-observation manifests; do not add a separate CLI command, a second plan or a paid/LLM-dependent `verify` step.
+
+1. **Isolated reference:** select representative requirements and concrete input/boundary cases. Keep the reference outcome/defect variants **withheld from the generating LLM** and identify the SDD clause, applicable input conditions and expected return/output/mock observation. Different expected observations in one case are assessed individually.
+2. **Positive and adversarial contrasts:** compare an assertion correctly derived from the SDD with a deliberately **incorrect expectation that cites a real, correctly spelled requirement ID** (for example, SDD: `x > 10` yields 1, otherwise 0; boundary `x = 10` must expect 0, not the faulty C result 1). Also check an absent/conflicting SDD expected value: it must not become an independently validated `SPECIFIED` oracle. A wrong requirement-to-condition mapping is likewise not rescued by a matching identifier.
+3. **Frozen and auditable:** assess the existing plan and emitted assertions; preserve unchanged oracle/test hashes and raw execution results. Record scenario/case/observable, the SDD anchor, observed expected value, independent reference, assessment result and explanation. A mismatch must be reported as an **oracle-quality discrepancy** and must not be converted into a proven production-code defect or a conformity PASS; a correct grounded assertion may legitimately fail on defective C.
+4. **Limits:** deterministic link/schema checks cannot establish natural-language entailment. Where no independent ground truth exists, report `NOT_CHECKED`/semantic uncertainty or require an explicit human review; never certify all user-project oracles from a finite fixture sample. `verify` itself remains offline and free of LLM calls.
+
+**Milestone-3 R04 acceptance:** demonstrate both **correct SDD oracle accepted** and **semantically false oracle with valid requirement ID detected**, with absent/ambiguous cases honestly labeled and no silent oracle revision or false code-defect attribution. Preserve exact command/fixture hashes and expected-versus-observed qualification evidence in the existing milestone-3 acceptance record. Milestone-2 generation/qualification gates are unchanged.
+
 ## R22 — Independent sensitivity qualification of generated suites (milestone 3)
 
 **Purpose:** demonstrate that a generated suite can distinguish a correct C implementation from selected **independently seeded functional defects**, beyond merely compiling and passing. This extends the **single intentional-defect demonstration already required in milestone 2**; it does not move that gate or create a new CLI command. Reuse the existing fixtures, ground-truth manifest and offline `verify` execution; Mull mutation campaigns remain milestone 4 and health checks after suite changes remain milestone 6.
