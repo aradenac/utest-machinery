@@ -12,6 +12,33 @@ Embedded C unit verification is often labor-intensive: engineers reconstruct tar
 2. **Verify** — replay the frozen test bench, without any LLM, using free deterministic tools inside a version-pinned Docker image on WSL.
 3. **Interpret** — correlate immutable evidence with the SDD; identify implementation mismatches, specification ambiguities, verification gaps and environment limitations; deliver evidence-linked, actionable recommendations. Reinterpret the same evidence without rerunning tests.
 
+## What can uTest Machinery test?
+
+From specification-driven checks to structural coverage and defect-detection strength, uTest Machinery brings complementary C verification methods together on the development host.
+
+<table>
+<tr>
+<td width="33%" align="center"><img src="docs/assets/verification/functional-robustness.svg" width="250" alt="Functional and robustness test scenarios" /><br/><strong>Functional &amp; robustness</strong><br/>SDD scenarios, boundaries, state transitions, dependency failures and recovery.<br/><sub>Ceedling · Unity · CMock</sub></td>
+<td width="33%" align="center"><img src="docs/assets/verification/coverage-mcdc.svg" width="250" alt="Structural coverage and decision tree" /><br/><strong>Structural coverage &amp; MC/DC</strong><br/>Lines, branches, decisions and supported independent-condition coverage.<br/><sub>Clang · llvm-cov</sub></td>
+<td width="33%" align="center"><img src="docs/assets/verification/runtime-safety.svg" width="250" alt="Memory and runtime safety analysis" /><br/><strong>Memory &amp; runtime safety</strong><br/>Memory violations, undefined behavior and applicable leak diagnostics.<br/><sub>ASan · UBSan · LSan · Valgrind</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/assets/verification/mutation-testing.svg" width="250" alt="Variants of C code introduced by mutation testing" /><br/><strong>Mutation testing</strong><br/>Evaluate whether the tests detect deliberately introduced code defects.<br/><sub>Mull</sub></td>
+<td align="center"><img src="docs/assets/verification/fuzz-property.svg" width="250" alt="Generated fuzz inputs exploring software paths" /><br/><strong>Fuzzing &amp; properties</strong><br/>Explore generated inputs, detect crashes and reproduce problematic cases.<br/><sub>libFuzzer · Sanitizers</sub></td>
+<td align="center"><img src="docs/assets/verification/compiler-host.svg" width="250" alt="Compilers and host diagnostic tools" /><br/><strong>Compilers &amp; host diagnostics</strong><br/>Compiler/optimization variants and applicable host resource diagnostics.<br/><sub>GCC · Clang · Valgrind</sub></td>
+</tr>
+</table>
+
+*Delivery roadmap: the functional Ceedling/Unity/CMock bench is the current foundation; offline coverage, sanitizers and host diagnostics belong to milestone 3; mutation and fuzzing belong to milestone 4. Profiles apply only when supported by the selected code and tools. See the [verification strategy](docs/architecture/verification-strategy.md).*
+
+## How can embedded C run without the target hardware?
+
+![Host-based testing: production C logic isolated by mocked hardware and external interfaces, compiled and executed on the host, with traceable evidence](docs/assets/verification/host-isolation.svg)
+
+**Test real C logic, isolate hardware-facing dependencies.** The selected production functions and SDD requirements drive a native test bench. Hardware drivers, peripherals and external services are replaced **at their interfaces** with CMock mocks or controlled host shims/adapters where needed—not by claiming the entire target is emulated. The frozen bench runs in a pinned Docker environment, **offline and without an LLM**, and keeps test results linked to requirements and evidence.
+
+Mocks and host execution cannot prove target-specific timing, MCU behavior, or hardware equivalence. Unsupported units and ambiguous SDD expectations remain explicitly limited or `UNDETERMINED`, not silently marked passing.
+
 ## Expected benefits
 
 | Today | With uTest Machinery (product target) |
