@@ -49,6 +49,9 @@ class WorkflowHookSmoke(unittest.TestCase):
         self.assertEqual(invoke(event).returncode, 2)
         event["background_tasks"] = []
         self.assertEqual(invoke(event).returncode, 0)
+        event["background_tasks"] = [{"id": "done", "status": "completed"},
+                                     {"id": "bad", "status": "failed"}]
+        self.assertEqual(invoke(event).returncode, 0)
         event["background_tasks"] = [{"id": "t2", "status": "running"}]
         event["last_assistant_message"] = "PUBLISH_DRAFT"
         self.assertEqual(invoke(event).returncode, 0)

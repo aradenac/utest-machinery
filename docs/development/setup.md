@@ -53,9 +53,19 @@ The `/develop-verified` skill installs **session-scoped**, repository-versioned 
 
 - `SubagentStop`, scoped to the named reviewers, checks for a **nonempty, substantial final response**. On an empty/non-substantive response it may request ONE short summary; `stop_hook_active` prevents retry loops. The hook is *not* a substitute for the lead joining delivered evidence. `SubagentHandback` uses its tool message rather than `last_assistant_message`; reviewers should still return a short final summary. Background Agent Teams messages do not guarantee a `SubagentStop` event for the named one-shot reviewer.
 - `TaskCompleted` only checks a path if the optional line `Proof-file: relative/path` was explicitly placed in a native Task's description. If the referenced file is absent, task completion is refused. Otherwise it is a no-op. Tasks remain optional; Beads holds the durable milestone.
-- `Stop` only intervenes when a final response explicitly claims `PUBLISH_READY` while Claude Code still reports active background tasks. It permits ordinary pauses, `HOLD`, `PUBLISH_DRAFT` and an explicit user request to stop. No automatic tests or approval inference.
+- `Stop` only intervenes when a final response explicitly claims `PUBLISH_READY` while Claude Code still reports active (not completed/failed/cancelled) background tasks. It permits ordinary pauses, `HOLD`, `PUBLISH_DRAFT` and an explicit user request to stop. No automatic tests or approval inference.
 
-The lead defines/splits/merges coherent implementation slices freely, with their affected interface surface and focused checks. Scoped critiques may run alongside disjoint implementation or in isolated worktrees; join substantive feedback before the consolidated full suite and final one-shot review. Record a candidate fingerprint (including effective uncommitted inputs), and reuse unaffected evidence. Check actual feature/candidate validity manually when the command hooks or native Task API are unavailable in CCR/DeepSeek. The hooks control *mechanical delivery*, not technical judgments. For smoke validation of the hook contracts, run `python3 -m unittest discover -s tests -p test_dev_workflow_hooks.py` locally; this is a developer-only check.
+The lead defines/splits/merges coherent implementation slices freely, with their affected interface surface and focused checks. Scoped critiques may run alongside disjoint implementation or in isolated worktrees; join substantive feedback before the consolidated full suite and final one-shot review. Record a candidate fingerprint (including effective uncommitted inputs), and reuse unaffected evidence. For full campaigns, ensure that source/test/config inputs remain unchanged until completion (prefer an isolated snapshot/worktree, or suspend overlapping edits); compare effective-input fingerprints before and after, including relevant untracked files. A green campaign on modified inputs is stale, not final qualification. The lead can keep unrelated work in parallel. For a filtered console summary that preserves the **test** exit status, adapt this generic Bash pattern, with `LOG` pointing to a local ignored file:
+
+```bash
+set -o pipefail
+python3 -m pytest -q > "$LOG" 2>&1
+rc=$?
+tail -n 30 "$LOG"
+exit "$rc"
+```
+
+Do not use bare `pytest | tail` or `grep` to claim success. Record the tested input identity and the underlying test exit, even when console output is abbreviated. Reviewers: report a reproduced mandatory defect immediately via the live team channel when available; one-shot agents should return the decisive finding early, without repeated polling. Check actual feature/candidate validity manually when the command hooks or native Task API are unavailable in CCR/DeepSeek. The hooks control *mechanical delivery*, not technical judgments. For smoke validation of the hook contracts, run `python3 -m unittest discover -s tests -p test_dev_workflow_hooks.py` locally; this is a developer-only check.
 
 ### Asynchronous commands and independent delegated work
 
