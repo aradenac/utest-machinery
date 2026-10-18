@@ -6,6 +6,8 @@ agent: contract-reviewer
 background: false
 ---
 
+Review a consolidated candidate after the lead has consumed the relevant early scoped critiques; **do not** act as a mandatory sequential reviewer for every implementation slice. Parallel targeted critics may review other unchanged snapshots while the lead builds disjoint slices, but this FINAL review must use the completed effective-candidate fingerprint. If the fingerprint is already stale, return NOT_VERIFIED promptly rather than auditing a moving target.
+
 Deliver a structured verdict promptly within the single fresh invocation; a report is more valuable than exhausting the turn budget. Review the **current implementation or correction** (including docs-only changes when invoked from `/develop-verified`) against its approved scope and, if applicable, **review feedback on an already open PR**. Work independently in a fresh **one-shot, non-Team** subagent context; the live teammate reviewer and green automated tests do not replace this independent critique. **Your verdict informs but never supersedes the main lead's evidence-based release decision.**
 
 **Choose the mode from the request and branch state:**
