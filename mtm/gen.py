@@ -45,9 +45,23 @@ TEST_DIRNAME = "test"
 
 @dataclass
 class CParam:
+    """A parsed C parameter.
+
+    ``type`` is the parameter's **base (pointee) type** with qualifiers preserved
+    (``const char``, ``void``, ``unsigned long``); ``depth`` is its number of ``*``
+    indirection levels (0 = passed by value). The full declarator is
+    ``type`` + ``depth`` stars. Keeping the depth — rather than a single
+    ``pointer`` boolean — is what lets the emitter pass an ``int **`` where an
+    ``int **`` is declared, instead of an ``int *``.
+    """
+
     type: str
     name: str
-    pointer: bool
+    depth: int = 0
+
+    @property
+    def pointer(self) -> bool:
+        return self.depth > 0
 
 
 @dataclass
@@ -96,19 +110,35 @@ def split_params(params: str) -> list[CParam]:
 
 
 def parse_param(text: str) -> CParam:
+    """Parse one C parameter declarator into a :class:`CParam`.
+
+    The pointer *depth* is preserved (``int **pp`` → depth 2) and the **pointee**
+    qualifiers are kept (``const char *s`` → type ``const char``), so the emitter
+    can reconstruct a type-correct declarator. Only qualifiers in the base segment
+    are kept: a qualifier on a pointer *level* (``int * const p``, ``char * const
+    *p``) is ignored by C for compatibility and does **not** belong to the pointee,
+    so keeping it in the base would change the type (``char * const *`` would
+    become the incompatible ``const char **``).
+    """
     text = text.strip()
-    pointer = "*" in text
-    core = text.replace("*", " ").strip()
-    tokens = core.split()
-    if not tokens:
-        return CParam(type="", name="", pointer=pointer)
-    if len(tokens) >= 2 and tokens[-1] not in _CTYPE_WORDS and not _looks_like_type(tokens[-1]):
-        name, type_ = tokens[-1], " ".join(tokens[:-1])
-    elif len(tokens) == 1:
-        name, type_ = "", tokens[0]
-    else:
-        name, type_ = "", core
-    return CParam(type=type_.strip(), name=name, pointer=pointer)
+    segments = text.split("*")
+    depth = len(segments) - 1
+    if depth == 0:
+        tokens = text.split()
+        if not tokens:
+            return CParam(type="", name="", depth=0)
+        if len(tokens) >= 2 and tokens[-1] not in _CTYPE_WORDS \
+                and not _looks_like_type(tokens[-1]):
+            return CParam(type=" ".join(tokens[:-1]).strip(), name=tokens[-1], depth=0)
+        if len(tokens) == 1:
+            return CParam(type=tokens[0], name="", depth=0)
+        return CParam(type=text, name="", depth=0)
+    # depth >= 1: the pointee type is the first segment (qualifiers kept, storage
+    # class dropped); the declared name is the trailing token of the last segment.
+    base_tokens = [t for t in segments[0].split() if t not in _STORAGE_CLASS]
+    tail = segments[-1].split()
+    name = tail[-1] if tail else ""
+    return CParam(type=" ".join(base_tokens).strip(), name=name, depth=depth)
 
 
 def _looks_like_type(token: str) -> bool:
@@ -508,23 +538,77 @@ def _base_type(param: CParam) -> str:
     return param.type.strip().rstrip("*").strip()
 
 
+def _cast(param: CParam, value: Any) -> str:
+    return f"({_base_type(param)}){_expression(value)}"
+
+
+def _pointer_arg(param: CParam, var: str, value: Any) -> tuple[list[str], str, str]:
+    """Backing storage, call argument and post-call target for a pointer parameter.
+
+    A plan supplies the **pointed-to scalar value** (``args``/``expect_out``
+    semantics), so the emitter must build a correctly typed object and pass a
+    pointer to it at the parameter's **exact declared indirection depth** —
+    ``int **`` must receive an ``int **``, never an ``int *`` (the F1 defect), and
+    ``void *`` must not emit the invalid ``void x = …``. Returns
+    ``(lines, argument_expression, target_variable)`` where *target_variable* is the
+    scalar local an ``expect_out`` assertion reads after the call.
+
+    Depth 1 (the common case) is byte-identical to the original emission
+    ``{base} {var} = ({base})value;`` / ``&{var}``. Depth d ≥ 2 declares the scalar
+    and one pointer local per intermediate level, and passes the **address of the
+    last** one so the argument has exactly d stars::
+
+        T  v0 = value;        // pointee scalar
+        T *p1 = &v0;          // one level up
+        foo(&p1);             // T ** argument  (d == 2)
+
+    A ``void`` pointee has no nameable object, so it is backed by the ``int`` scalar
+    default and the resulting address is cast to the declared ``void *``-level type.
+    """
+    base = _base_type(param)
+    if param.depth == 1 and base != "void":
+        return ([f"    {base} {var} = {_cast(param, value)};"], f"&{var}", var)
+    storage = "int" if base == "void" else base
+    lines = [f"    {storage} {var}_v0 = ({storage}){_expression(value)};"]
+    target = f"{var}_v0"
+    if param.depth == 1:  # void *: address of the int-shaped backing, cast
+        return (lines, f"(void *)&{target}", target)
+    prev = f"&{target}"
+    for level in range(1, param.depth):
+        ptr_type = storage + " " + " ".join(["*"] * level)
+        lines.append(f"    {ptr_type} {var}_p{level} = {prev};")
+        prev = f"&{var}_p{level}"
+    arg = prev  # &{var}_p{depth-1}: exactly `depth` stars
+    if base == "void":
+        arg = f"(void {' '.join(['*'] * param.depth)}){arg}"
+    return (lines, arg, target)
+
+
 def mock_controls(decl: str, symbol: str,
                   aggregates: set[str] | None = None) -> dict[str, Any] | None:
     """The control surface CMock will expose for *symbol*.
 
-    ``{"return": bool, "out": [pointer names], "out_aggregate": {pointer names}}``.
-    ``None`` when the declaration has a shape this generator refuses, so the
-    caller records a limitation instead of emitting wrong code.
+    ``{"return": bool, "out": [names], "out_aggregate": set, "out_depth": {name:
+    depth}, "out_void": set}``. ``None`` when the declaration has a shape this
+    generator refuses, so the caller records a limitation instead of emitting
+    wrong code. ``out_depth``/``out_void`` let the caller refuse a mock
+    write-through it cannot materialise faithfully (a scalar cannot supply the
+    pointer value a ``T **`` out-parameter receives, and CMock has no working
+    ``ReturnThruPtr`` for a ``void *`` pointee) — the same refusal contract the
+    SUT parameter path follows.
     """
     split = split_declaration(decl)
     if split is None:
         return None
     ret, params = split
+    pointers = [p for p in params if p.pointer]
     return {
         "return": ret not in _VOID,
-        "out": [p.name for p in params if p.pointer],
-        "out_aggregate": {p.name for p in params
-                          if p.pointer and _base_type(p) in (aggregates or set())},
+        "out": [p.name for p in pointers],
+        "out_aggregate": {p.name for p in pointers
+                          if _base_type(p) in (aggregates or set())},
+        "out_depth": {p.name: p.depth for p in pointers},
+        "out_void": {p.name for p in pointers if _base_type(p) == "void"},
     }
 
 
@@ -594,6 +678,21 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
             if key not in allowed:
                 return (f"mock {symbol!r} sets unsupported control {key!r} "
                         f"(supported: {', '.join(sorted(allowed))})")
+            # A mock out-parameter is written through by CMock's `ReturnThruPtr`,
+            # which passes the *address* of a local of the pointee type. That is
+            # faithful only for a single-indirection, non-void pointee: a `T **`
+            # out-parameter would receive a `T *`, and a `void *` pointee has no
+            # object to declare (`void var` is invalid C). Refuse this control with
+            # a named limitation rather than emit wrong or uncompilable C — the
+            # same contract the SUT parameter path follows. (The mock's declaration
+            # alone is not refused: a case that configures no write-through still
+            # works.)
+            if key in control.get("out_void", set()):
+                return (f"mock {symbol!r} writes through {key!r}, whose pointee is "
+                        "`void`; a `void *` out-parameter cannot be supplied faithfully")
+            if control.get("out_depth", {}).get(key, 1) >= 2:
+                return (f"mock {symbol!r} writes through {key!r}, a multi-level "
+                        "pointer; CMock's `ReturnThruPtr` cannot supply its value faithfully")
             if key in control["out_aggregate"] and not _is_c_expression(value):
                 return (f"mock {symbol!r} sets {key!r}, whose pointee is an aggregate "
                         "type; supply it as {\"expr\": \"<C initializer>\"} instead of a scalar")
@@ -611,6 +710,12 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
             return f"expect_out key {index!r} is not a parameter index"
         if position not in pointer_indices:
             return f"expect_out index {position} is not a pointer parameter of this function"
+        # `expect_out` asserts the value the pointer points at after the call. For a
+        # multi-level pointer (`int **pp`) the observable "value pointed at" is read
+        # as the ultimately pointed-to scalar (`**pp`), which is the backing object
+        # the emitter holds — the same reading as the depth-1 case. The parameter is
+        # never refused for this: `void *` and multi-level pointers must stay
+        # generatable (owner arbitration on the F1 finding).
         if position in aggregate_params and not _is_c_expression(value):
             return (f"expect_out index {position} points at an aggregate type; "
                     "supply it as {\"expr\": \"<C expression>\"} instead of a scalar")
@@ -645,10 +750,6 @@ def _literal(value: Any) -> str:
 def _expression(value: Any) -> str:
     """Render a planned value that may use the ``{"expr": "..."}`` escape hatch."""
     return value["expr"] if _is_c_expression(value) else _literal(value)
-
-
-def _cast(param: CParam, value: Any) -> str:
-    return f"({param.type}){_expression(value)}"
 
 
 # --- entry point ------------------------------------------------------------
@@ -1089,16 +1190,22 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
             # Declare the unit's own pointer arguments (one per case: they share a
             # function scope). A planned `args` entry for a pointer parameter is
             # its INITIAL pointed-to value, so a case can assert that a path
-            # preserves the previously accepted value.
+            # preserves the previously accepted value. The argument is passed at
+            # the **declared indirection depth** (`int **` gets an `int **`, not an
+            # `int *`), built from correctly-typed backing storage — never a scalar
+            # where a pointer is declared.
             args: list[str] = []
             outs: dict[int, str] = {}
             for index, value in enumerate(case.args):
-                param = params[index] if index < len(params) else CParam("", "", False)
+                param = params[index] if index < len(params) else CParam("", "", 0)
                 if param.pointer:
                     var = f"out{case_index}_{index}"
-                    lines.append(f"    {param.type} {var} = {_cast(param, value)};")
-                    args.append(f"&{var}")
-                    outs[index] = var
+                    decl_lines, arg, target = _pointer_arg(param, var, value)
+                    lines.extend(decl_lines)
+                    args.append(arg)
+                    # `expect_out` asserts the ultimate pointed-to scalar, which is
+                    # the `_v0` local at every depth.
+                    outs[index] = target
                 else:
                     args.append(_cast(param, value))
             # Mock expectations are set before the call they govern.

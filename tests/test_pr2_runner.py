@@ -1681,3 +1681,197 @@ def test_a_matching_pointee_qualified_declaration_generates(tmp_path):
         inventory, LLMIdentity(provider="test", model="t"))
     out = generate_suite(bench, plan, inventory)
     assert out.test_functions, out.limitations
+
+
+# --- F1 (PR #14 fifth review, owner-arbitrated): multi-level and `void *` ------
+
+
+def _ptr_bench(tmp_path, name, source, header, sdd, scenarios):
+    """Build a one-unit bench from in-test C/header/SDD text and generate."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / name
+    bench.mkdir()
+    (bench / "foo.c").write_text(source)
+    (bench / "foo.h").write_text(header)
+    (bench / "sdd.md").write_text(sdd)
+    run_mtm_json("init", str(bench))
+    for n, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", n, "--kind", kind, cwd=bench)
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": scenarios}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    return bench, out, (bench / ".mtm" / "gen" / "test" / "test_foo.c").read_text()
+
+
+def _one_scenario(fn, args, expected, req="FOO-001"):
+    return {"id": "S1", "title": "t", "function": fn, "requirement_ids": [req],
+            "mocks": [], "cases": [{"args": args, "expected": expected}],
+            "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+
+
+def test_a_multi_level_pointer_argument_is_passed_at_its_declared_depth(tmp_path):
+    """F1 (owner-arbitrated, HIGH): an ``int **`` parameter must receive an
+    ``int **`` whose target holds the plan's value — not the ``int *`` the
+    previous emitter produced by collapsing the declarator to a boolean and
+    passing ``&scalar``. The generated C is asserted directly (the discriminating
+    check); a Docker-gated test below executes the same shape for real."""
+    from mtm.gen import func_params
+
+    # The parser keeps the pointer depth (the root cause of the defect).
+    params = func_params("int foo_a(int **pp)")
+    assert [p.depth for p in params] == [2] and params[0].type == "int"
+
+    bench, out, source = _ptr_bench(
+        tmp_path, "int-pp",
+        "int foo_a(int **pp) { return **pp; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int **pp);\n#endif\n",
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return the doubly-pointed value.\n",
+        [_one_scenario("foo_a", [42], 42)])
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    # The pointee scalar is backed, one pointer level is built, and the call
+    # passes that pointer's *address* — an `int **`, matching the declaration.
+    assert "int out0_0_v0 = (int)42;" in source
+    assert "int * out0_0_p1 = &out0_0_v0;" in source
+    assert "foo_a(&out0_0_p1)" in source
+
+
+def test_a_void_pointer_argument_is_backed_and_cast_not_an_invalid_void_local(tmp_path):
+    """F1 (owner-arbitrated, HIGH): a ``void *`` parameter previously emitted the
+    invalid ``void out0_0 = (void)7;`` (a ``void`` object cannot exist), which died
+    as an opaque ``TOOL_FAILURE``. It must instead be backed by a real object and
+    passed as a correctly cast ``void *``."""
+    from mtm.gen import func_params, _unsupported_param_shape
+
+    params = func_params("int foo_a(void *p)")
+    assert [p.depth for p in params] == [1] and params[0].type == "void"
+    assert _unsupported_param_shape(params) is None  # supported, never refused
+
+    bench, out, source = _ptr_bench(
+        tmp_path, "void-star",
+        "int foo_a(void *p) { return *(int *)p; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(void *p);\n#endif\n",
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return the pointed-to int.\n",
+        [_one_scenario("foo_a", [7], 7)])
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    assert "int out0_0_v0 = (int)7;" in source
+    assert "foo_a((void *)&out0_0_v0)" in source
+    assert "void out0_0" not in source  # the invalid declaration is gone
+
+
+def test_a_plain_pointer_argument_is_unchanged_by_the_depth_fix(tmp_path):
+    """Contrast for F1: the depth-1 emission (the common case) is byte-identical
+    to the contract the earlier findings exercised — ``T v0 = (T)value;`` and
+    ``&v0`` — so the fix does not regress a supported single-indirection form."""
+    bench, out, source = _ptr_bench(
+        tmp_path, "int-star",
+        "int foo_a(int *p) { return *p; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int *p);\n#endif\n",
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return the pointed-to int.\n",
+        [_one_scenario("foo_a", [5], 5)])
+    assert out.test_functions, out.limitations
+    assert "int out0_0 = (int)5;" in source
+    assert "foo_a(&out0_0)" in source
+
+
+def test_unsupported_parameter_shapes_stay_refused_after_the_depth_fix(tmp_path):
+    """F1 negative contrast (unchanged scope): variadic, array and
+    function-pointer parameters remain refused with a named limitation — the F1
+    fix widens support to multi-level/``void`` pointers only."""
+    from mtm.gen import func_params, _unsupported_param_shape
+
+    for sig in ("int foo_a(int xs[4])", "int foo_a(int (*cb)(int))",
+                "int foo_a(int x, ...)"):
+        assert _unsupported_param_shape(func_params(sig)), sig
+
+    bench, out, _ = _ptr_bench(
+        tmp_path, "still-refused",
+        "int foo_a(int xs[4]) { return xs[0]; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(int xs[4]);\n#endif\n",
+        "# SDD\n- **FOO-001**: a\n",
+        [_one_scenario("foo_a", [1], 1)])
+    assert out.test_functions == [], out.test_functions
+    assert any("function-pointer or array" in lim for lim in out.limitations), \
+        out.limitations
+
+
+@pytest.mark.docker
+def test_real_image_executes_multi_level_and_void_pointer_suts(tmp_path, product_image):
+    """AP-02 for F1: the generated ``int **`` and ``void *`` benches actually
+    compile **and execute** in the product image, with a meaningful oracle — the
+    owner arbitration requires real generation *and* execution, not merely a
+    compile. The SUT dereferences through the exact pointer depth, so a
+    misrendered argument would crash or return the wrong value rather than pass."""
+    from mtm.ceedling import run_ceedling
+
+    cases = [
+        ("int-pp-real", "int foo_a(int **pp) { return **pp; }\n",
+         "int foo_a(int **pp);\n", [_one_scenario("foo_a", [42], 42)]),
+        ("void-star-real", "int foo_a(void *p) { return *(int *)p; }\n",
+         "int foo_a(void *p);\n", [_one_scenario("foo_a", [7], 7)]),
+    ]
+    for name, source, decl, scenarios in cases:
+        bench, out, _ = _ptr_bench(
+            tmp_path, name, source,
+            f"#ifndef FOO_H\n#define FOO_H\n{decl}\n#endif\n",
+            "# SDD\n- **FOO-001**: the SUT SHALL return the pointed-to value.\n",
+            scenarios)
+        assert out.test_functions, (name, out.limitations)
+        run = run_ceedling(bench, image_ref=product_image)
+        assert run.ran, (name, run.diagnostics[-2000:])
+        assert run.total == 1 and run.failed == 0, \
+            (name, run.total, run.failed, run.stdout[-1000:])
+
+
+def test_a_pointer_level_qualifier_is_not_hoisted_onto_the_pointee(tmp_path):
+    """F1 neighbour (reviewer counterexample): `int * const *pp` and
+    `const int **pp` are *different* C types. A top-level pointer qualifier is
+    ignored by C for compatibility and must be dropped, not moved onto the
+    pointee — hoisting it (`const int **`) would emit C that does not compile
+    against an `int * const *` declaration, i.e. the same opaque-failure class F1
+    removes. The parser keeps the *base* segment's qualifiers and drops the
+    pointer-level ones, so each shape is emitted for the type it declares."""
+    from mtm.gen import func_params, _pointer_arg
+
+    p_const_star = func_params("int foo_a(int * const *pp)")[0]
+    assert (p_const_star.type, p_const_star.depth) == ("int", 2)
+    p_pointee_const = func_params("int foo_a(const int **pp)")[0]
+    assert (p_pointee_const.type, p_pointee_const.depth) == ("const int", 2)
+
+    # `int * const *` → a plain `int *` backing (no `const`), so it compiles.
+    _, arg, _ = _pointer_arg(p_const_star, "o0", 5)
+    assert arg == "&o0_p1"
+    lines, _, _ = _pointer_arg(p_const_star, "o0", 5)
+    assert any("int * o0_p1" in l for l in lines) and \
+        not any("const" in l for l in lines)
+    # `const int **` keeps the pointee `const`.
+    lines2, _, _ = _pointer_arg(p_pointee_const, "o0", 5)
+    assert any("const int * o0_p1" in l for l in lines2)
+
+
+def test_a_mock_write_through_to_a_void_or_multi_level_pointer_is_refused(tmp_path):
+    """F1 neighbour on the *mock* path (reviewer finding): CMock's `ReturnThruPtr`
+    passes the address of a local of the pointee type, which is faithful only for a
+    single-indirection, non-void pointee. A `void *` out-parameter would declare an
+    invalid `void var`, and an `int **` out-parameter would receive an `int *`. That
+    control must be refused with a named limitation rather than emit wrong C; the
+    mock's ordinary scalar out-parameter is unaffected."""
+    from mtm.gen import mock_controls, _case_problem
+    from mtm.plan import TestCase
+
+    ctrl_void = mock_controls("int dep(void *p);", "dep")
+    assert _case_problem(TestCase(mocks={"dep": {"ret": 0, "p": 5}}),
+                         {"dep": ctrl_void}, [])
+    ctrl_pp = mock_controls("int dep(int **pp);", "dep")
+    assert _case_problem(TestCase(mocks={"dep": {"ret": 0, "pp": 5}}),
+                         {"dep": ctrl_pp}, [])
+    # Contrast: a scalar out-parameter is still perfectly supported.
+    ctrl_int = mock_controls("int dep(int *p);", "dep")
+    assert _case_problem(TestCase(mocks={"dep": {"ret": 0, "p": 5}}),
+                         {"dep": ctrl_int}, []) is None

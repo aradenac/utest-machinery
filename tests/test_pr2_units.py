@@ -259,7 +259,7 @@ def test_expect_out_index_must_be_a_pointer_parameter():
     ctrl = mock_controls("int platform_read_sensor(uint16_t *reading);",
                          "platform_read_sensor")
     from mtm.gen import CParam
-    params = [CParam(type="uint16_t", name="reading", pointer=True)]
+    params = [CParam(type="uint16_t", name="reading", depth=1)]
     # Arity must match the signature for the expect_out check to be reached.
     assert _case_problem(PlannedCase(args=[0], expect_out={"0": 5}), {"x": ctrl}, params) is None
     assert _case_problem(PlannedCase(args=[0], expect_out={"7": 5}), {"x": ctrl}, params)
