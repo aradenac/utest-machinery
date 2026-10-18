@@ -1336,3 +1336,80 @@ def test_a_host_launch_error_is_reported_as_such_not_as_an_in_container_127(
     run = run_ceedling(bench, image_ref="img:test")
     assert run.launch_error and not run.ran
     assert run.returncode == 127
+
+
+def test_a_pointer_returning_stem_header_with_an_incompatible_arity_is_refused(tmp_path):
+    """E2 residual (found by the fresh final verifier): ``split_declaration`` refuses
+    pointer-returning signatures for *generator* reasons, so a pointer-returning
+    prototype must still be comparable for the conflict check — otherwise the
+    incompatible call is emitted with no limitation and dies as an opaque
+    build failure (the exact class E2 removes)."""
+    from mtm.gen import _signature_key, generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    # The key must exist (not None) for pointer returns.
+    assert _signature_key("int *foo_a(int x)") == ("int*", ("int",))
+    assert _signature_key("int *foo_a(void)") == ("int*", ())
+
+    bench = tmp_path / "ptr-return-incompatible"
+    bench.mkdir()
+    (bench / "foo.c").write_text("int *foo_a(int x) { return 0; }\n")
+    (bench / "foo.h").write_text("#ifndef FOO_H\n#define FOO_H\nint *foo_a(void);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **A**: a\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("foo.c", "source"), ("foo.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "foo_a", "requirement_ids": ["A"],
+         "mocks": [], "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("incompatible" in lim for lim in out.limitations), out.limitations
+
+
+def test_a_non_stem_declaring_header_with_an_incompatible_signature_is_refused(tmp_path):
+    """E2 residual adjacent: the same conflict check must also cover a *non-stem*
+    declaring header (`sensor.c` includes `api.h`), whose incompatible prototype
+    would clash with the synthesised stem header."""
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "non-stem-incompatible"
+    bench.mkdir()
+    (bench / "sensor.c").write_text(
+        '#include "api.h"\nint sensor_read(int x) { return x; }\n')
+    (bench / "api.h").write_text(
+        "#ifndef API_H\n#define API_H\nint sensor_read(void);\n#endif\n")
+    (bench / "sdd.md").write_text("# SDD\n- **S**: s\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("sensor.c", "source"), ("api.h", "source"), ("sdd.md", "spec")):
+        run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+
+    inventory = build_inventory(bench, _scopes(bench))
+    plan = parse_plan(json.dumps({"scenarios": [
+        {"id": "S1", "title": "t", "function": "sensor_read",
+         "requirement_ids": ["S"], "mocks": [],
+         "cases": [{"args": [1], "expected": 2}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}]}),
+        inventory, LLMIdentity(provider="test", model="t"))
+    out = generate_suite(bench, plan, inventory)
+    assert out.test_functions == []
+    assert any("incompatible" in lim for lim in out.limitations), out.limitations
+
+
+def test_compatible_signature_spellings_are_never_falsely_refused(tmp_path):
+    """E2 contrast: pointer returns with a differing parameter *name* / pointer
+    spacing, and `(void)` vs `()` are compatible and must still generate."""
+    from mtm.gen import _signature_key
+
+    assert _signature_key("int *foo_a(int x)") == _signature_key("int *foo_a(int y)")
+    assert _signature_key("int *foo_a(int x)") == _signature_key("int * foo_a(int x)")
+    assert _signature_key("int foo_a(void)") == _signature_key("int foo_a()")

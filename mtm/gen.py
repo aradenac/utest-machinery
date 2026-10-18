@@ -211,6 +211,17 @@ def _unit_includes(unit, scenarios: list[Scenario] | None, copied: set[str] | No
         return None
     include_names: list[str] = []
     if declaring:
+        # The real declaring header (a non-stem one here) is included for fidelity;
+        # if it declares a function under test incompatibly, the synthesised stem
+        # header would clash with it. Refuse rather than emit a conflicting bench.
+        conflicts = _conflicting_declarations(unit, scenarios, copied, src_dir,
+                                              declaring)
+        if conflicts:
+            out.limitations.append(
+                f"unit {unit.id} ({unit.path}) cannot be linked: the selected "
+                f"{declaring!r} declares {sorted(conflicts)!r} with a signature "
+                "incompatible with the source; the test could not call it")
+            return None
         include_names.append(declaring)
     synth = _synthesise_unit_header(unit, scenarios, iface_dir, out)
     if not synth:
@@ -245,18 +256,23 @@ def _signature_key(signature: str) -> tuple | None:
 
     Parameter *names* are dropped and types normalised, so a header that repeats
     the same declaration with different parameter names is not a conflict; arity,
-    parameter types and the return type are compared.
+    parameter types and the return type are compared. Parsed independently of
+    ``split_declaration`` (which deliberately refuses *pointer returns* and other
+    shapes the **generator** cannot emit): a pointer-returning prototype is a
+    perfectly comparable declaration, and treating it as unparseable would silently
+    skip the conflict check exactly where it is needed.
     """
-    parsed = split_declaration(signature)
-    if parsed is None:
+    decl = _strip_c_comments(signature or "").strip().rstrip(";")
+    if not decl:
         return None
-    ret, params = parsed
-    if return_is_void(signature):
-        ret_key = "void"
-    elif "*" in ret:
-        ret_key = f"{ret.replace(' ', '')}*"
-    else:
-        ret_key = ret
+    m = re.match(r"^(?P<ret>.+?)\b(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*$", decl)
+    if not m or "..." in m.group("params"):
+        return None
+    ret = re.sub(r"\s+", " ", m.group("ret")).strip()
+    ret_key = ret.replace(" ", "") if "*" in ret else ret
+    params = split_params(m.group("params"))
+    if any("(" in p.type for p in params):
+        return None  # function-pointer/array parameter: not comparable here
     return (ret_key, tuple(
         f"{'*' if p.pointer else ''}{p.type.replace(' ', '')}" for p in params))
 
