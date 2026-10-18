@@ -1227,28 +1227,52 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     interfaces: dict[str, str] = {}
     declarations: dict[str, str] = {}
     refused_mocks: dict[str, str] = {}
+    #: Which authority supplied each mocked symbol's declaration (provenance for
+    #: the manifest — ``clang`` / ``selected-header`` / ``llm`` / ``none``).
+    declaration_sources: dict[str, str] = {}
     for scenario in plan.scenarios:
         if scenario.unit_id in excluded:
             continue
         for symbol in scenario.mocks:
-            declared = scenario.mock_declarations.get(symbol) or ""
-            if not declared:
-                declared = _prototype_for_symbol(bench_root, inventory, symbol)
-            declarations.setdefault(symbol, declared)
+            if symbol in declarations:
+                continue
+            # I4 first: an adapter BLOCKED status (incomplete build context) means
+            # we cannot trust any type in this declaration. Refuse every mock with
+            # a named per-symbol limitation carrying the diagnostic — never guess a
+            # type, and never let the model's text stand in for the real one.
+            if facts.status == ctypes_clang.BLOCKED:
+                refused_mocks[symbol] = (
+                    f"mocked symbol {symbol!r}: the selected C build context could "
+                    f"not be resolved by libclang, so its declaration cannot be "
+                    f"typed faithfully ({facts.message})")
+                continue
+            # AP-08 / IMP-18: a **real** declaration resolved from the selected
+            # build context wins unconditionally; the plan's model-supplied text is
+            # a fallback used only when no real declaration exists. See
+            # `_authoritative_declaration`.
+            declared, source = _authoritative_declaration(
+                facts, symbol, scenario.mock_declarations.get(symbol) or "",
+                bench_root, inventory)
+            declarations[symbol] = declared
+            declaration_sources[symbol] = source
     for symbol, decl in sorted(declarations.items()):
         if not decl.strip():
+            # No real declaration resolved and no unambiguous usable prototype in
+            # the plan's text: record a precise limitation (never an invented
+            # signature). Distinguish the ambiguous model field for the reader.
+            llm_entry = next(
+                (sc.mock_declarations.get(symbol) for sc in plan.scenarios
+                 if symbol in sc.mock_declarations), "")
+            if llm_entry:
+                detail = ("the plan's `mock_declarations` entry for it is not one "
+                          "unambiguous prototype and no real declaration was "
+                          "resolved from the selected build context")
+            else:
+                detail = ("no declaration exists in the selected build context and "
+                          "the plan supplied none")
             out.limitations.append(
-                f"mocked symbol {symbol!r} has no declared interface; its "
-                "scenarios are not executed")
-            continue
-        # I4: an adapter BLOCKED status (incomplete build context) means we cannot
-        # trust any type in this declaration. Refuse every mock with a named
-        # per-symbol limitation carrying the diagnostic — never guess a type.
-        if facts.status == ctypes_clang.BLOCKED:
-            refused_mocks[symbol] = (
-                f"mocked symbol {symbol!r}: the selected C build context could not "
-                f"be resolved by libclang, so its declaration cannot be typed "
-                f"faithfully ({facts.message})")
+                f"mocked symbol {symbol!r} has no usable declaration; {detail}, so "
+                "its scenarios are not executed")
             continue
         # A declaration may name a `typedef` alias (`typedef int *P; void dep(P p);`).
         # The private header is compiled on its own (CMock generates the mock from
@@ -1340,6 +1364,11 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     (revision / "project.yml").write_text(_project_yml(), encoding="utf-8")
     out.files["project.yml"] = "project"
 
+    # Provenance of each mock declaration (AP-08): which authority supplied it, so
+    # a reviewer can see that the real selected context won over any LLM text.
+    out.types["declaration_sources"] = {
+        symbol: source for symbol, source in sorted(declaration_sources.items())
+    }
     out.test_functions = test_names
     return out
 
@@ -1404,7 +1433,10 @@ def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -
     """Deterministically derive a dependency's prototype from the selected headers.
 
     Directory scopes are expanded first, so a header selected through a directory
-    contributes its prototypes just as a directly-selected header does.
+    contributes its prototypes just as a directly-selected header does. This is a
+    **text** fallback below clang (see :func:`_authoritative_declaration`): it only
+    supplies a declaration when the clang resolution of the effective compilation
+    context did not yield the symbol.
     """
     from .cscan import scan_prototypes
 
@@ -1414,6 +1446,132 @@ def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -
                 if name == symbol:
                     return decl
     return ""
+
+
+#: Provenance of a mocked symbol's authoritative declaration, in priority order.
+DECL_FROM_CLANG = "clang"
+DECL_FROM_HEADER = "selected-header"
+DECL_FROM_LLM = "llm"
+DECL_NONE = "none"
+
+#: One ordinary function declarator, matched against a single ``;``-terminated
+#: statement of model-supplied text: a return type, the name, a flat parameter
+#: list. Used only to *locate* the prototype a ``mock_declarations`` field states
+#: (never a type claim — the type semantics come from clang).
+_PROTO_STMT_RE = re.compile(
+    r"^(?P<ret>[A-Za-z_][\w \t\*]*?)\b(?P<name>[A-Za-z_]\w*)"
+    r"[ \t]*\((?P<params>[^;{}()]*)\)$"
+)
+
+
+def _declaration_from_fact(fact: Any) -> str:
+    """Reconstruct a function's declaration **text** from clang facts (I1/AP-08).
+
+    The declaration is rebuilt from the authoritative source-level type spellings
+    (``return_type.spelling``, each parameter's ``spelling`` and own ``name``), so
+    a ``typedef`` alias or a qualifier is preserved exactly as the selected build
+    context spells it — the mock interface header then matches what the SUT's own
+    translation unit compiles against. Returns ``""`` when the fact cannot be
+    rendered (a missing spelling), so the caller falls to a lower authority rather
+    than emit a guessed declaration.
+    """
+    ret = str(getattr(fact.return_type, "spelling", "") or "").strip()
+    if not ret:
+        return ""
+    params: list[str] = []
+    for param in fact.params:
+        spelling = str(getattr(param, "spelling", "") or "").strip()
+        if not spelling:
+            return ""
+        name = str(getattr(param, "name", "") or "").strip()
+        # A pointer/array spelling already carries its `*`/`[]`; attach the name
+        # directly (`uint16_t *reading`, not `uint16_t * reading`) so the
+        # reconstructed declarator matches the source-level prototype.
+        if name and spelling.endswith("*"):
+            params.append(f"{spelling}{name}")
+        else:
+            params.append(f"{spelling} {name}" if name else spelling)
+    if getattr(fact, "variadic", False):
+        params.append("...")
+    param_text = ", ".join(params) if params else "void"
+    return f"{ret} {fact.name}({param_text});"
+
+
+def _prototype_from_llm_text(raw: str, symbol: str) -> str:
+    """A single usable prototype for *symbol* in model-supplied C text, or ``""``.
+
+    The plan's ``mock_declarations`` field is **not** guaranteed to be one clean
+    prototype: IMP-18 recorded a field carrying a ``typedef`` *and* a prototype.
+    This strips comments and walks the ``;``-terminated statements, ignoring
+    ``typedef``/``struct``/``enum`` statements and any unrelated declaration, and
+    returns the one statement that is an ordinary declaration of *symbol*. Two
+    candidate declarations for the symbol are ambiguous and yield ``""`` so the
+    caller records a precise limitation instead of inventing a signature. Lexical
+    only (no type claim) and used **only** when no real declaration was resolved
+    from the selected build context.
+    """
+    if not raw:
+        return ""
+    clean = _strip_c_comments(raw)
+    candidates: list[str] = []
+    for statement in clean.split(";"):
+        text = " ".join(statement.split())
+        if not text or text.startswith("typedef"):
+            continue
+        m = _PROTO_STMT_RE.match(text)
+        if not m or m.group("name") != symbol:
+            continue
+        ret = m.group("ret").strip()
+        if not ret:
+            continue
+        params = " ".join(m.group("params").split()) or "void"
+        candidates.append(f"{ret} {symbol}({params});")
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _authoritative_declaration(
+    facts: Any, symbol: str, llm_text: str,
+    bench_root: Path, inventory: Inventory,
+) -> tuple[str, str]:
+    """The mocked symbol's declaration and its provenance, in authority order.
+
+    Owner contract (AP-08, IMP-18): **a real declaration resolved from the
+    selected build context is authoritative and is never overridden by an LLM
+    proposal.** The order is therefore:
+
+    1. :data:`DECL_FROM_CLANG` — the declaration libclang resolved for *symbol* in
+       the effective compilation context (the selected inputs, plus any private
+       shim on the include path). This is independent of what the LLM prompt
+       contained, and of whether the model restated the interface at all.
+    2. :data:`DECL_FROM_HEADER` — a prototype textually present in a selected
+       header (still a real declaration, subordinate to clang's typed facts but
+       superior to the model). Reached when clang did not attribute the symbol
+       (e.g. it is declared only in a ``.c``), when the resolver is the offline
+       test double, or when clang's facts cannot be rendered into a usable
+       declarator (an unnamed parameter the mock surface cannot key on).
+    3. :data:`DECL_FROM_LLM` — extracted from the plan's ``mock_declarations``
+       **only when no real declaration exists** (verifiably), and only when one
+       unambiguous prototype is present.
+    4. :data:`DECL_NONE` — nothing usable; the caller records a precise per-symbol
+       limitation and never invents a signature.
+    """
+    if getattr(facts, "status", "") == ctypes_clang.RESOLVED:
+        fact = facts.by_name(symbol)
+        if fact is not None:
+            decl = _declaration_from_fact(fact)
+            # Only a declaration this generator can actually materialise counts as
+            # the authoritative one: a reconstruction whose parameters have no
+            # names (a partial fact set) is not usable for a CMock mock, so fall
+            # through to the real selected header rather than emit it.
+            if decl and split_declaration(decl) is not None:
+                return decl, DECL_FROM_CLANG
+    real = _prototype_for_symbol(bench_root, inventory, symbol)
+    if real:
+        return real, DECL_FROM_HEADER
+    llm = _prototype_from_llm_text(llm_text, symbol)
+    if llm:
+        return llm, DECL_FROM_LLM
+    return "", DECL_NONE
 
 
 def _decl_alias_tokens(decl: str, known: dict[str, Any]) -> list[str]:
