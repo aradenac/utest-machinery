@@ -50,6 +50,19 @@ type alias exactly once.**
   include guard yields one shared definition per TU. Verbatim text is the fallback
   only for an alias with no includable header (one written in a `.c`).
 
+**F-A1 correction — the neighbouring `enum` shape (independent PRE_PR review).**
+The one bounded independent PRE_PR `contract-reviewer` returned CHANGES_REQUIRED
+with one mandatory finding the lead reproduced and accepted: the guard-less-header
+check keyed on `scan_typedefs`'s `aggregate` flag, whose classifier
+(`cscan._AGGREGATE_DEF_RE`) matched only `struct|union`. An anonymous **`enum`**
+alias (`typedef enum { … } e_t;`) was therefore not recognised, the guard-less
+refusal was bypassed, and an unguarded header's enum was `#include`d twice →
+`redeclaration of enumerator`. The refined invariant — *an alias whose defining
+statement has an inline `{…}` body cannot be duplicated and must be guarded* — is
+derived from `typedef_statement_map` (already recorded) as `alias_inline_body`
+(statement contains `{`), which covers `struct`, `union` and `enum` uniformly and
+correctly excludes tag references and plain/pointer typedefs.
+
 ## Options considered
 
 1. **Refuse every parameter/return that names any typedef alias.** Simplest, but it
@@ -81,12 +94,13 @@ type alias exactly once.**
     from every copied source/header; `_typedef_aliases_for_decl` **includes** the
     defining header (falling back to verbatim text for a `.c`-defined alias) for the
     aliases a mock declaration references (transitively, to a fixpoint).
-  * A guard-less defining header that carries an **anonymous-aggregate** alias is
-    the one shape the include-sharing cannot collapse; its mock scenarios are
-    refused with a precise limitation (`refused_mocks`) and the affected scenarios
-    are skipped, rather than emitting an uncompilable test whose `limitations == []`
-    (plan §C). A guard-less *scalar* alias stays admitted (duplicate scalar typedef
-    is legal C) — verified end-to-end in the image.
+  * A guard-less defining header that carries an alias with an **inline body**
+    (anonymous `struct`/`union`/`enum`) is the one shape the include-sharing cannot
+    collapse; its mock scenarios are refused with a precise limitation
+    (`refused_mocks`) and the affected scenarios are skipped, rather than emitting
+    an uncompilable test whose `limitations == []` (plan §C). A guard-less *scalar*
+    alias stays admitted (duplicate scalar typedef is legal C) — verified
+    end-to-end in the image.
 
 ## Consequences
 
@@ -102,8 +116,8 @@ type alias exactly once.**
   the declarator text (the scanner is not a full C parser); it is exercised by unit
   tests for the forms this generator supports and re-marked for the plain
   `([A-Za-z_]\w*)$` name only when the declarator is opaque. A guard-less header
-  that defines an *anonymous-aggregate* alias and is also the unit header is
-  refused (named limitation), not silently broken.
+  that defines an alias with an inline body (anonymous `struct`/`union`/`enum`) and
+  is also the unit header is refused (named limitation), not silently broken.
 * The changers are code, so the earlier "all green" fingerprint is invalidated; the
   applicable tests and the independent final review are re-run on the new candidate
   before publication.
@@ -113,8 +127,9 @@ type alias exactly once.**
 * `mtm/cscan.py` (`scan_typedefs`, `typedef_statement_map`), `mtm/gen.py`
   (`split_declaration`, `mock_controls`, `_typedef_aliases_for_decl`,
   `_decl_alias_tokens`, `_header_has_guard`, `generate_suite`).
-* `tests/test_pr2_runner.py` (four regression tests: opaque alias, pointer-typedef
-  depth, interface-header alias, guard-less aggregate limitation),
-  `tests/test_pr2_units.py` (opaque-alias scanner test).
+* `tests/test_pr2_runner.py` (six regression tests: opaque alias, pointer-typedef
+  depth, interface-header alias, anonymous-aggregate sharing, guard-less aggregate
+  limitation, guard-less enum limitation + guarded-enum compile), `tests/test_pr2_units.py`
+  (opaque-alias scanner test).
 * PR 3 §A/§B/§C and DoD 3 in `docs/plan/implementation.md`;
-  `worklog/log/2026-10-18-pr3.md` (sessions 4–5).
+  `worklog/log/2026-10-18-pr3.md` (sessions 4–6).
