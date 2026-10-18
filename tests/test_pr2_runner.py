@@ -147,6 +147,19 @@ def test_clean_pass_is_succeeded(fixture_bench):
     assert result.status == "SUCCEEDED" and result.exit_code == 0
 
 
+def test_counted_failure_with_unparseable_detail_is_still_a_finding(fixture_bench):
+    """If the summary counts failures but no `:FAIL` line parses (an unexpected
+    Unity format), the run must not fall through to SUCCEEDED — a counted failure
+    is a defect, recorded even without a per-test detail line."""
+    bench = fixture_bench("saturation")
+    summary = "Something odd happened\n1 Tests 1 Failures 0 Ignored\nFAIL\n"
+    result = _generate(bench, lambda *a, **k: _run(
+        False, 1, stdout=summary, ran=True, total=1, passed=0, failed=1,
+        failures=[]))
+    assert result.status == "FINDINGS" and result.exit_code == 10
+    assert result.findings and "no failing test could be parsed" in result.findings[0]["observed"]
+
+
 def test_no_materialisable_scenario_is_incomplete_not_a_vacuous_success(fixture_bench):
     """When every planned scenario is refused (unfaithful), there is nothing to
     execute. Running an empty project would be a vacuous success: report INCOMPLETE

@@ -219,6 +219,18 @@ def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
         return smoke
 
     smoke["findings"] = _findings(run, plan)
+    if run.failed and not smoke["findings"]:
+        # The summary counted failures but no ``:FAIL`` line could be parsed (an
+        # unexpected Unity format). A counted failure is still a real defect, not
+        # a pass: record it rather than let it fall through to SUCCEEDED.
+        smoke["findings"].append({
+            "test": "<unparsed>",
+            "category": "IMPLEMENTATION_DEFECT",
+            "scenario_id": "",
+            "expected_behavior": "",
+            "observed": (f"Unity reported {run.failed} failure(s) but no failing "
+                         "test could be parsed from the output"),
+        })
     return smoke
 
 
