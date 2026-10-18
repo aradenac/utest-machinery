@@ -28,6 +28,21 @@ from .inventory import Inventory, resolve_scope_paths
 from .plan import Plan, Scenario
 
 _VOID = {"void", ""}
+
+
+def _is_void_base(base: str) -> bool:
+    """True when *base* names ``void`` ignoring qualifiers.
+
+    A pointee base type is the *pointee* token run, so a qualified void pointee
+    arrives as ``"const void"`` / ``"volatile void"`` (or a mix). ``void`` — with
+    or without qualifiers — still names no object, so every place that must treat
+    a void pointee specially (backing storage, the ``void *`` cast, the mock
+    write-through refusal) has to look past the qualifiers. Comparing to ``"void"``
+    literally would let ``const void *`` fall through to the scalar path and emit
+    the very ``const void x = …`` the F1 fix removed.
+    """
+    tokens = [t for t in base.split() if t not in ("const", "volatile", "restrict")]
+    return not tokens or tokens == ["void"]
 _CTYPE_WORDS = (
     "unsigned", "signed", "long", "short", "int", "char", "float", "double",
     "bool", "_Bool",
@@ -534,6 +549,23 @@ def aggregate_aliases(text: str) -> set[str]:
     return aliases
 
 
+def is_aggregate_base(base: str, aggregates: set[str] | None = None) -> bool:
+    """True when *base* names an aggregate type a scalar cannot initialise.
+
+    Either a ``typedef`` alias recorded in *aggregates*, or the *tag* form
+    ``struct S`` / ``union S`` — a tag always names an aggregate, so it must be
+    refused by the same rule even when the alias scan did not see the definition
+    (e.g. the struct is defined in an unscanned header). Missing the tag form let
+    ``struct S *p`` be admitted and emit ``struct S out0_0 = (struct S)9;``, which
+    does not compile — the opaque-``TOOL_FAILURE`` class this refusal exists to
+    prevent.
+    """
+    tokens = [t for t in base.split() if t not in ("const", "volatile", "restrict")]
+    if base in (aggregates or set()):
+        return True
+    return bool(tokens) and tokens[0] in ("struct", "union")
+
+
 def _base_type(param: CParam) -> str:
     return param.type.strip().rstrip("*").strip()
 
@@ -566,21 +598,28 @@ def _pointer_arg(param: CParam, var: str, value: Any) -> tuple[list[str], str, s
     default and the resulting address is cast to the declared ``void *``-level type.
     """
     base = _base_type(param)
-    if param.depth == 1 and base != "void":
+    void_pointee = _is_void_base(base)
+    if param.depth == 1 and not void_pointee:
         return ([f"    {base} {var} = {_cast(param, value)};"], f"&{var}", var)
-    storage = "int" if base == "void" else base
+    storage = "int" if void_pointee else base
     lines = [f"    {storage} {var}_v0 = ({storage}){_expression(value)};"]
     target = f"{var}_v0"
     if param.depth == 1:  # void *: address of the int-shaped backing, cast
-        return (lines, f"(void *)&{target}", target)
+        return (lines, f"({base} *)&{target}", target)
     prev = f"&{target}"
     for level in range(1, param.depth):
         ptr_type = storage + " " + " ".join(["*"] * level)
         lines.append(f"    {ptr_type} {var}_p{level} = {prev};")
         prev = f"&{var}_p{level}"
     arg = prev  # &{var}_p{depth-1}: exactly `depth` stars
-    if base == "void":
-        arg = f"(void {' '.join(['*'] * param.depth)}){arg}"
+    if void_pointee:
+        # Cast to the *declared* pointee — qualifiers included — not to a bare
+        # `void`: a `const void **` parameter is not implicitly compatible with a
+        # `void **` argument (`void` only converts at the first level), whereas an
+        # explicit cast from the `int **` backing is accepted (`-Wcast-qual` does
+        # not fire on *adding* a qualifier). Beyond the first level the backing
+        # pointer (`int *`) is never read through, so this is a pure type fix-up.
+        arg = f"({base} {' '.join(['*'] * param.depth)}){arg}"
     return (lines, arg, target)
 
 
@@ -606,9 +645,9 @@ def mock_controls(decl: str, symbol: str,
         "return": ret not in _VOID,
         "out": [p.name for p in pointers],
         "out_aggregate": {p.name for p in pointers
-                          if _base_type(p) in (aggregates or set())},
+                          if is_aggregate_base(_base_type(p), aggregates)},
         "out_depth": {p.name: p.depth for p in pointers},
-        "out_void": {p.name for p in pointers if _base_type(p) == "void"},
+        "out_void": {p.name for p in pointers if _is_void_base(_base_type(p))},
     }
 
 
@@ -698,7 +737,7 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
                         "type; supply it as {\"expr\": \"<C initializer>\"} instead of a scalar")
     pointer_indices = {i for i, p in enumerate(params) if p.pointer}
     aggregate_params = {i for i, p in enumerate(params)
-                        if p.pointer and _base_type(p) in (aggregates or set())}
+                        if p.pointer and is_aggregate_base(_base_type(p), aggregates)}
     for index in range(min(len(case.args), len(params))):
         if index in aggregate_params and not _is_c_expression(case.args[index]):
             return (f"argument {index} points at an aggregate type; supply its initial "

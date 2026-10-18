@@ -1780,6 +1780,49 @@ def test_a_plain_pointer_argument_is_unchanged_by_the_depth_fix(tmp_path):
     assert "foo_a(&out0_0)" in source
 
 
+def test_a_qualified_void_pointer_is_backed_like_plain_void(tmp_path):
+    """F1 neighbour of the same defect class: a *qualified* void pointee
+    (``const void *``, ``volatile void *`` — very common in C APIs) is the same
+    "void names no object" case as ``void *``, but the base type arrives as
+    ``"const void"``/``"volatile void"``. Detecting void by string equality let
+    these fall through to the scalar path and re-emit the invalid
+    ``const void out0_0 = (const void)7;`` the F1 fix removed, while still being
+    reported as supported. The void test must look past the qualifiers, and the
+    cast must carry the declared pointee so a ``const void **`` parameter accepts
+    it."""
+    from mtm.gen import func_params, _pointer_arg, _unsupported_param_shape
+
+    for decl, base in (("const void *p", "const void"),
+                       ("volatile void *p", "volatile void"),
+                       ("const void * const p", "const void")):
+        params = func_params(f"int foo_a({decl})")
+        assert _unsupported_param_shape(params) is None, decl  # still supported
+        lines, arg, _ = _pointer_arg(params[0], "o0", 7)
+        assert lines == ["    int o0_v0 = (int)7;"], (decl, lines)
+        assert arg == f"({base} *)&o0_v0", (decl, arg)
+
+    # A qualified *multi-level* void pointer casts to its own declared base, not a
+    # bare `void **` (a `const void **` parameter does not accept a `void **`).
+    p2 = func_params("int foo_a(const void **p)")[0]
+    lines2, arg2, _ = _pointer_arg(p2, "o0", 7)
+    assert lines2 == ["    int o0_v0 = (int)7;", "    int * o0_p1 = &o0_v0;"], lines2
+    assert arg2 == "(const void * *)&o0_p1", arg2
+
+    # End to end: the generated test is not only valid C but asserts the SUT result.
+    bench, out, source = _ptr_bench(
+        tmp_path, "const-void-star",
+        "int foo_a(const void *p) { return *(const int *)p; }\n",
+        "#ifndef FOO_H\n#define FOO_H\nint foo_a(const void *p);\n#endif\n",
+        "# SDD\n- **FOO-001**: `foo_a` SHALL return the pointed-to int.\n",
+        [_one_scenario("foo_a", [7], 7)])
+    assert out.test_functions, out.limitations
+    assert not out.limitations, out.limitations
+    assert "const void out0_0" not in source  # the invalid declaration is gone
+    assert "int out0_0_v0 = (int)7;" in source
+    assert "foo_a((const void *)&out0_0_v0)" in source
+    assert "TEST_ASSERT_EQUAL(7, foo_a((const void *)&out0_0_v0))" in source
+
+
 def test_unsupported_parameter_shapes_stay_refused_after_the_depth_fix(tmp_path):
     """F1 negative contrast (unchanged scope): variadic, array and
     function-pointer parameters remain refused with a named limitation — the F1

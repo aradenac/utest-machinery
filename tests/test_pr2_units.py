@@ -205,7 +205,7 @@ def test_make_provider_unknown_name():
 
 # --- generator: plans that cannot be materialised faithfully ----------------
 
-from mtm.gen import _case_problem, _strip_c_comments, aggregate_aliases, mock_controls  # noqa: E402
+from mtm.gen import _case_problem, _strip_c_comments, aggregate_aliases, func_params, mock_controls  # noqa: E402
 from mtm.plan import TestCase as PlannedCase  # noqa: E402
 
 _SHIM = """
@@ -235,6 +235,30 @@ def test_aggregate_pointee_is_flagged_so_a_scalar_is_refused():
     scalar = PlannedCase(mocks={"vendor_adc_read": {"ret": 0, "sample": 1234}})
     problem = _case_problem(scalar, {"vendor_adc_read": ctrl}, [], aggregates)
     assert problem and "aggregate" in problem
+
+
+def test_tag_form_struct_pointee_is_flagged_like_a_typedef_alias():
+    """The *tag* spelling `struct S` names an aggregate too.
+
+    The alias scan only sees `typedef` definitions, so a `struct S *` parameter
+    (the struct defined in an unscanned header, or defined with its tag) used to
+    bypass the aggregate refusal and emit `struct S out0_0 = (struct S)9;` — C
+    that does not compile, reported as an opaque TOOL_FAILURE rather than the
+    named limitation the typedef form gets. The same class as F1.
+    """
+    from mtm.gen import is_aggregate_base
+    aggregates = aggregate_aliases("typedef struct { int x; } T;\n")
+    assert is_aggregate_base("T", aggregates)                       # alias
+    assert is_aggregate_base("struct S", aggregates)                # tag
+    assert is_aggregate_base("union U", aggregates)                 # tag
+    assert is_aggregate_base("const struct S", aggregates)          # qualified tag
+    assert not is_aggregate_base("uint8_t", aggregates)             # scalar unaffected
+    p = func_params("int f(struct S *p)")[0]
+    problem = _case_problem(PlannedCase(args=[9], expected=9), {}, [p], aggregates)
+    assert problem and "aggregate" in problem
+    # An explicit initializer is still accepted, as for the typedef form.
+    assert _case_problem(
+        PlannedCase(args=[{"expr": "(struct S){7}"}], expected=9), {}, [p], aggregates) is None
 
 
 def test_aggregate_pointee_accepts_an_explicit_c_initializer():
