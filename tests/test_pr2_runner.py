@@ -2642,3 +2642,27 @@ def test_a_typedef_after_a_declaration_on_the_same_line_is_still_resolved(tmp_pa
             capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
 
+
+def test_real_image_executes_a_mock_through_a_combined_line_typedef(
+        tmp_path, product_image):
+    """AP-02 for the combined-line alias: the whole mocked bench (private interface
+    header + CMock mock + Unity test) must compile, link and **execute** in the
+    product image, not merely generate plausible text. The SUT calls the mocked
+    dependency with a value and returns it, so the run is 1 test / 0 failed."""
+    from mtm.ceedling import run_ceedling
+
+    bench, out = _mock_bench(
+        tmp_path, "combined-line-image",
+        "unsigned short use(int a) { return dep_read(a); }\n",
+        "#ifndef FOO_H\n#define FOO_H\n#include <stdint.h>\n"
+        "int g(void); typedef unsigned short vendor_t;\n"
+        "vendor_t dep_read(int a);\nunsigned short use(int a);\n#endif\n",
+        {"id": "S1", "title": "t", "function": "use", "requirement_ids": ["FOO-001"],
+         "mocks": ["dep_read"],
+         "cases": [{"args": [3], "expected": 3, "mocks": {"dep_read": {"ret": 3}}}],
+         "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}})
+    assert out.test_functions, out.limitations
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran, run.diagnostics[-2000:]
+    assert run.total == 1 and run.failed == 0, (run.total, run.failed, run.stdout[-1500:])
+
