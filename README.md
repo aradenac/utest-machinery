@@ -82,8 +82,32 @@ flowchart LR
 - [LLM development RETEX — PO to GitHub, coding and review (cross-project lessons)](docs/development/llm-development-retrospective.md)
 - [Workflow errors and recovery](docs/architecture/workflow-failures.md)
 
-**Status:** design/specification baseline, with development planned as six feature PRs, each requiring a separate review and explicit go-ahead before the next. The documented CLI and product runtime are **proposed interfaces**, not implemented commands. The repository contains reference demonstration inputs; generated verification results must not be presented as observed until the machinery executes them.
+**Delivery status:** milestones 1–2 are merged: CLI/Docker/Dagu control and functional C bench generation with Ceedling/Unity/CMock are implemented and exercised on selected fixtures. `mtm verify`, `mtm interpret` and `mtm report` remain future milestones. Reference fixtures and green CI are not proof of universal C/SDD support or product conformance.
 
 **Working boundary:** native C execution on Linux under WSL via Docker. QEMU/Renode and on-target testing are a future, separate stage.
 
 **Key guarantees:** original inputs read-only; exactly one project-specific test-bench root; all persistent project state outside Docker; traceability of every verdict; no silent modification of specification-derived oracles.
+
+## Delivery roadmap
+
+**2 of 6 milestones delivered.** The infographic and methods above describe the **product direction**, not six already operational verification families. The next milestone is **3 — offline verification and qualification**; work on it is **not shown as started** here.
+
+```mermaid
+flowchart LR
+  M1["1 · Bootstrap<br/>CLI · Docker · Dagu"] --> M2["2 · Generate<br/>SDD → Ceedling / Unity / CMock"]
+  M2 --> M3["3 · Verify offline<br/>Coverage · MC/DC · Sanitizers · C fidelity"]
+  M3 --> M4["4 · Strengthen<br/>Mutation · Fuzzing"]
+  M4 --> M5["5 · Explain<br/>Traceability · HTML report"]
+  M5 --> M6["6 · Maintain & qualify<br/>Incremental updates · Full qualification"]
+
+  classDef delivered fill:#e2f6ed,stroke:#169b74,color:#104936,stroke-width:2px
+  classDef next fill:#eaf2ff,stroke:#387edb,color:#1b457b,stroke-width:2px
+  classDef planned fill:#f5f7fa,stroke:#9aa9bd,color:#46576b,stroke-width:1px
+  class M1,M2 delivered
+  class M3 next
+  class M4,M5,M6 planned
+```
+
+**Delivered:** steps 1–2 · **Next:** step 3 · **Planned:** steps 4–6. See the [six-milestone implementation plan](docs/plan/implementation.md) for scope, qualification evidence and acceptance criteria. Each step is authorized and reviewed separately; merging a PR does not by itself qualify every possible C program or SDD.
+
+
