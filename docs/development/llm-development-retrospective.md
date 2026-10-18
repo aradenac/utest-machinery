@@ -1,89 +1,80 @@
-# RETEX — Comment développer efficacement un logiciel avec des LLM ?
+# RETEX — Développer un produit logiciel avec des LLM
 
-**Question :** si je démarre demain un autre projet, avec un langage, un métier et des objectifs différents, comment organiser les LLM pour obtenir le **bon produit le plus vite possible** ?
+**Question de départ :** si je crée demain un autre produit, dans n'importe quel langage ou domaine, comment exploiter les LLM pour arriver **le plus vite possible au produit réellement voulu** ?
 
-Ce document retient les leçons **de méthode** issues d'une pratique de développement assisté par LLM. Ce n'est ni un journal d'incidents, ni une recommandation de modèle particulier, ni une spécification de projet. Les bénéfices sont des constats qualitatifs et des hypothèses à éprouver ; aucun gain chiffré de productivité n'est établi.
+Ce retour d'expérience concerne **l'organisation du travail**, pas un modèle ni un projet particulier. L'objectif est de réduire le temps entre une intention approuvée et un incrément **utilisable, vérifié et accepté** — pas de maximiser le code, les agents ou les tokens. Les avantages décrits sont qualitatifs, pas des gains de performance mesurés.
 
-## 1. Le verdict : une chaîne d'outils complémentaire, pas un « super-agent »
+## 1. L'organisation recommandée
 
-**Oui, l'organisation « ChatGPT web + agent de développement local + dépôt Git partagé + gestion des tâches + tests locaux + CI » est pertinente.** Elle sépare la **définition du bon produit** de son **implémentation**, tout en laissant des artefacts vérifiables entre les deux. Le dépôt partagé est la mémoire commune durable ; la conversation ne doit pas être la seule source de vérité.
+**Oui : ChatGPT web + agent local + dépôt Git partagé + Beads (ou issues) + tests locaux + CI est une combinaison efficace en principe.** Sa force vient de la **séparation des responsabilités** et de la mémoire partagée, pas d'une magie multi-agent.
 
 ```mermaid
 flowchart LR
-  P["Humain / PO\nobjectif et arbitrages"] <--> C["ChatGPT web\ncadrage, conception,\narchitecture, PR et revue"]
-  C <--> G["Dépôt Git partagé\nspecs, code, décisions, PR"]
-  G <--> A["Agent local\nplan, code, tests et preuves"]
-  A --> T["Tests locaux\nvraies interfaces"]
+  P["Humain / PO\nobjectif, arbitrages"] <--> C["ChatGPT web\ncadrage, specs, architecture, revue"]
+  C <--> G["Dépôt Git partagé\ndocs, code, décisions, PR"]
+  G <--> A["Agent local\nimplémentation + tests"]
+  A --> T["Tests locaux\nfonctionnels et réels"]
   T --> G
-  G --> I["CI rapide\nreproductibilité"]
-  I --> R["Revue + décision humaine"]
-  R --> P
+  G --> I["CI rapide\nvérification reproductible"]
+  I --> P
 ```
 
-| Acteur / outil | Sa valeur principale | À ne pas lui demander |
-| --- | --- | --- |
-| **Humain / PO** | Exprimer le besoin, corriger la trajectoire, choisir les compromis et accepter les résultats | Décrire chaque détail d'implémentation ou rejouer les tests de l'agent |
-| **ChatGPT web** | Transformer des échanges en objectifs, options, exigences, architecture, plan et contenu GitHub ; aider à relire les PR | Déduire des exigences non exprimées, confondre proposition et décision, certifier un test local qu'il n'a pas exécuté |
-| **Agent local** | Lire le vrai code, implémenter, exécuter les outils et tests, corriger les erreurs, produire une PR avec preuves | Changer silencieusement le besoin ou l'architecture, s'auto-déclarer accepté |
-| **Git + PR** | Point de passage partagé, versionné et révisable entre conversation, conception et exécution | Servir uniquement de stockage de code : les décisions importantes et critères doivent aussi y être retrouvables |
-| **Beads (ou autre issue tracker)** | Suivre tâche active, dépendances, état des findings, décisions utiles et preuves de réception | Devenir un deuxième cahier des charges ou un copier-coller de chaque log |
-| **Tests locaux + CI** | Tests locaux complets et rapides à itérer ; CI courte pour reproduire indépendamment les contrôles essentiels | Faire croire qu'une CI verte prouve tous les parcours et contraintes du produit |
+| Élément | Rôle souhaitable |
+| --- | --- |
+| **Humain / PO** | Dire **quoi** obtenir et **pourquoi**, clarifier les priorités, arbitrer les options, accepter ou refuser les écarts. |
+| **ChatGPT web** | Partenaire de réflexion : transformer l'intention en exigences, architecture, critères de succès, plan de livraison et modifications documentaires GitHub ; aider à relire les PR. Il ne présume pas les décisions du PO. |
+| **Agent de développement local** | Lire le vrai dépôt, planifier brièvement, coder, exécuter les tests, corriger et préparer une PR. Il a de l'autonomie sur **comment** réaliser le scope approuvé. |
+| **Git et PR** | Interface et **source de vérité versionnée** entre les deux LLM et l'humain. Une décision importante doit être retrouvable ici, pas seulement dans un chat. |
+| **Beads / issue tracker** | Mémoire **d'exécution** : tâche active, état, dépendances, findings, arbitrages et preuves de réception. Les spécifications restent dans les docs ; les logs détaillés éventuels restent ailleurs. |
+| **Tests locaux / CI / revue** | L'agent vérifie localement les cas et parcours réels avant la PR ; la CI reproduit rapidement les contrôles essentiels ; la revue indépendante puis humaine juge les contrats et les limites. |
 
-Cette répartition est efficace **si le transfert entre acteurs est explicite**. Deux conversations LLM ne partagent ni automatiquement les mêmes hypothèses ni les mêmes preuves. Git, issues et PR réduisent cette rupture ; ils ne la suppriment pas.
+**Limite structurante :** ChatGPT web voit les décisions et GitHub ; l'agent local voit le code, ses outils et ses résultats d'exécution. Ils n'ont pas automatiquement le même contexte. **Le dépôt, les tickets et les PR servent de contrat de transfert.** Ne pas se fier à la mémoire conversationnelle pour synchroniser les deux.
 
-## 2. Ce qui fonctionne : à conserver
+## 2. Ce qui a bien fonctionné : à conserver
 
-- **Discuter librement du produit avec un assistant de conception.** Le PO peut décrire un résultat, réagir à une proposition, demander des alternatives, changer d'avis. Cette souplesse est plus productive qu'exiger un cahier des charges parfait dès le premier message.
-- **Écrire les décisions dans le dépôt.** Une spécification concise, une architecture et des critères d'acceptation versionnés permettent au développeur de repartir d'un contrat vérifiable, sans dépendre de la longueur ou de la mémoire du chat web.
-- **Faire intervenir l'agent local sur un périmètre approuvé.** Il connaît l'état réel du dépôt, peut construire, tester, inspecter le diff et corriger immédiatement. Un prompt de mission clair peut déclencher plan, implémentation, vérification et préparation de PR.
-- **Découper par incréments utilisables.** Une capacité visible et ses cas d'erreur, livrée dans une PR cohérente, est plus facile à accepter qu'un empilement de couches techniques ou dix PR artificiellement minuscules.
-- **Employer Beads pour la continuité de travail.** Un ticket garde le *quoi*, l'état courant, les décisions pertinentes, les écarts ouverts et les preuves associées aux critères. C'est particulièrement utile quand l'agent change de session, perd son contexte ou reprend une PR après plusieurs revues.
-- **Séparer tests locaux et CI.** L'agent développeur doit faire tourner *avant publication* les vérifications pertinentes, y compris un vrai parcours d'utilisation lorsque nécessaire. La CI refait rapidement des checks déterministes et sans secrets ; elle ne sert pas de premier environnement de débogage.
-- **Réviser les contrats indépendamment de l'auteur du correctif.** Un reviewer à contexte neuf peut trouver un cas oublié ; les commentaires de PR donnent une boucle de correction traçable. L'acceptation finale reste humaine.
-- **Versionner les consignes de l'agent.** Une instruction courte sur son autonomie, les contraintes, la preuve attendue et les règles Git vaut mieux que répéter le protocole complet à chaque mission.
+- **Dialogue PO ↔ assistant souple et progressif.** Explorer des variantes, corriger une proposition et changer d'avis avant de coder est rapide ; l'assistant doit distinguer *décidé*, *proposé* et *à clarifier*.
+- **Architecture et specs versionnées, mais concises.** Écrire le comportement observable, les interfaces, les erreurs importantes et les critères d'acceptation. Les choix retenus sont ensuite lisibles par tous les agents et reviewers.
+- **Un incrément utile à la fois et une PR cohérente.** Implémenter une capacité complète, corriger **la même PR** après revue, attendre un accord avant le prochain jalon.
+- **Agent local autonome, orienté preuves.** Un seul prompt peut lui faire préparer le plan, implémenter, tester et documenter les résultats. Les tests doivent concerner la vraie utilisation, pas seulement les fonctions internes.
+- **Beads pour la reprise sans perte de contexte.** Associer l'issue au jalon, aux décisions et aux critères réellement démontrés. Cela facilite changements de session, corrections longues et synchronisation avec GitHub.
+- **Revue critique indépendante.** Un autre contexte peut révéler des cas manquants avant la PR et recontrôler les correctifs ; la revue humaine reste nécessaire pour accepter le produit et son périmètre.
+- **Tests locaux approfondis, CI courte.** Déboguer près du code ; garder la CI rapide, déterministe et sans secrets. Une CI verte ne remplace pas un test d'installation, d'intégration ou de service réel quand celui-ci est pertinent.
 
-## 3. Les principaux ralentissements et leurs remèdes
+## 3. Ce qui a ralenti la convergence
 
-| Écueil | Pourquoi il ralentit | Réponse pratique |
-| --- | --- | --- |
-| **Le PO et l'assistant pensent être d'accord, mais la décision reste dans le chat.** | L'agent et la revue travaillent sur des contrats différents ; le même sujet est rediscuté. | À chaque arbitrage réel, mettre à jour la **source normative** dans Git ; distinguer clairement *décidé*, *proposé* et *à clarifier*. |
-| **L'assistant invente des besoins « raisonnables ».** | Un périmètre trop large fait perdre du temps et augmente la maintenance. | Formuler objectif, entrées/sorties, contraintes **demandées** et critères de succès ; présenter le reste comme des options, pas des obligations. |
-| **Trop de conception ou de documentation avant un premier usage.** | Le travail s'étend sans retour concret ; plusieurs documents redisent les mêmes choses. | Spécifier juste assez pour développer et vérifier le prochain incrément ; documenter les contrats durables, pas chaque discussion. |
-| **Une PR passe les tests mais échoue à l'usage.** | Les tests de fonctions ignorent installation, configuration, permissions, vrais services et transitions d'état. | Exiger au moins un **parcours représentatif de bout en bout** pour chaque frontière nouvelle ; distinguer mode mock et système réel. |
-| **Les correctifs répondent au symptôme de la revue.** | Les variantes voisines réapparaissent, provoquant plusieurs cycles de relecture. | Pour chaque finding : identifier l'**invariant violé**, corriger la cause et tester quelques cas contrastés/mixtes pertinents. |
-| **Le reviewer ajoute des exigences qu'aucun utilisateur n'a demandées.** | Surqualité, abstractions et cas limites artificiels. | Classer les retours : défaut prouvé / manque de preuve / ambiguïté / suggestion facultative. Le PO tranche les extensions de scope. |
-| **Les preuves sont recopiées partout ou deviennent périmées.** | Beads, journal, PR et commentaires se contredisent ; la revue porte sur une autre révision. | **Beads = état et critères ; worklog éventuel = historique ; PR = livraison.** Lier les preuves aux commits/hashes ; réévaluer après changement. |
-| **Trop d'agents discutent au lieu de converger.** | Coordination, tokens et retours redondants dépassent la valeur des findings. | Un **lead responsable**, des rôles limités, des reviewers déclenchés aux jalons ; un agent `idle` est normal. Ajouter un guardian seulement si dérive ou boucles récurrentes. |
-| **Le web et l'agent local ont des visions divergentes du dépôt.** | Instructions obsolètes, branches non réconciliées, PR commentée sur un ancien commit. | GitHub comme point de synchronisation : consulter `main`, branche, PR, commentaires et état Beads **avant** chaque reprise ; ne pas se fier au résumé du chat. |
-| **Outils ou modèles instables, permissions mal définies.** | Relances inutiles, appels qui échouent, résultats non reproductibles et accès hôte non souhaité. | Vérifier routage/version/droits en début de session, sandboxer, borner retries et prévoir un repli honnête ; ne jamais déclarer une délégation ou un test réussi sans résultat. |
+| Écueil | Correction de méthode |
+| --- | --- |
+| **Décisions laissées dans le chat ou documents contradictoires** | Après chaque arbitrage, mettre à jour **une seule source normative** dans Git. Le ticket suit l'avancement, il ne redéfinit pas le produit. |
+| **Exigences « raisonnables » inventées par l'assistant ou le reviewer** | Partir du besoin exprimé. Soumettre toute nouvelle contrainte comme **option**, sans l'imposer dans les specs ou les tests. |
+| **Trop de conception, de règles et d'outils trop tôt** | Spécifier le **prochain incrément**, réutiliser les outils existants ; n'ajouter couche ou agent que s'il résout un obstacle observé. |
+| **Tests verts mais parcours utilisateur non prouvé** | Vérifier les frontières réelles : installation, configuration, permissions, erreurs, état persistant et services, selon le produit. Ne pas confondre mocks et environnement réel. |
+| **Correctifs limités au symptôme d'une revue** | Identifier le **contrat général violé**, tester des cas voisins/contraires pertinents et relancer les régressions avant de demander une nouvelle revue. |
+| **Preuves et journaux volumineux ou périmés** | **Beads = état et critères ; PR = livraison ; journal éventuel = chronologie.** Référencer commits/hashes et résultats observés, sans recopier toutes les traces. |
+| **Trop d'agents ou d'allers-retours entre LLM** | Un lead responsable ; reviewers ponctuels aux jalons ; messages courts : *constat → preuve → correction minimale*. Un agent `idle` est normal, pas une panne. |
+| **PR relue avant d'être vraiment prête** | Finaliser code, tests, Beads et description de PR **avant** la vérification finale ; tout changement significatif invalide les preuves concernées. |
 
-Le ralentissement **le plus coûteux** n'est souvent pas l'écriture du code : c'est découvrir tard que le travail ne correspondait pas à la bonne exigence, ou qu'une vérification avait testé autre chose que le parcours attendu.
+Le ralentissement majeur est souvent **la découverte tardive d'un mauvais contrat ou d'une preuve incomplète**, plus que le temps nécessaire pour écrire le code.
 
-## 4. Si je recommence un projet demain : méthode de démarrage
+## 4. Si je recommence demain : procédure simple
 
-**1 — Définir le produit, pas la solution.** Avec ChatGPT web, préciser les utilisateurs, le problème, le premier résultat réellement utilisable, les contraintes explicites et ce qui ne doit *pas* être fait. Faire proposer des choix d'architecture si nécessaire, puis les arbitrer en tant que PO. Le chat sert à raisonner ; les décisions acceptées vont dans Git.
+**1 — Cadrer avec ChatGPT web.** Décrire le problème, les utilisateurs, le premier résultat utile et les contraintes explicites. Examiner les options d'architecture, puis choisir. Ne pas laisser l'assistant transformer ses hypothèses en exigences.
 
-**2 — Créer un dépôt minimal mais durable.** Au départ, suffisent généralement : un `README` de vision/usage ; une courte page de **besoins et critères d'acceptation** ; les **choix d'architecture** qui ont un impact réel ; un **plan d'incréments** ; un `CLAUDE.md` / `AGENTS.md` ou équivalent pour les règles de l'agent. Adapter la quantité de documents à la taille du projet : un utilitaire de deux jours ne nécessite pas le dispositif d'un produit industriel.
+**2 — Créer le minimum de documentation dans Git.** Un `README` (but/usage), quelques exigences et critères observables, les choix d'architecture essentiels, une liste d'incréments, une instruction d'agent (`AGENTS.md`, `CLAUDE.md` ou équivalent). Pour un petit utilitaire, plusieurs de ces éléments peuvent tenir dans un seul fichier.
 
-**3 — Créer les tâches et les liaisons.** Dans **Beads** (ou GitHub Issues/autre outil), conserver un item par incrément ou correction significative, son état, les dépendances, les décisions courtes et les critères/observations de réception. **Les specs restent dans les docs** ; Beads sert à savoir *où l'on en est* et à reprendre après interruption. Un journal chronologique séparé peut être utile pour les travaux complexes, pas obligatoire pour tous les projets.
+**3 — Initialiser Beads ou des issues.** Un ticket par capacité ou correction significative, avec statut, dépendances, décision utile et critères de réception. Ne pas dupliquer les specs. Pour un projet minuscule, une simple liste GitHub Issues suffit ; Beads prend surtout de la valeur avec plusieurs sessions et des agents autonomes.
 
-**4 — Donner une mission complète à l'agent local.** Lui faire lire les docs et l'issue, vérifier l'état de Git, proposer un **plan bref** et les preuves à produire *avant* de coder. Ensuite il implémente, teste, corrige et prépare **une PR**. Le PO ne doit pas micromanager chaque ligne ; il intervient sur les arbitrages de produit ou les changements majeurs.
+**4 — Donner une seule mission claire à l'agent local.** Périmètre approuvé, contraintes, résultat observable, commandes/preuves attendues, fichiers à préserver, livraison sous forme de PR. L'agent inspecte Git, fait un plan court, puis implémente et vérifie sans demander une instruction humaine à chaque détail.
 
-**5 — Vérifier en deux temps.** D'abord l'agent exécute localement les tests ciblés et, quand nécessaire, un scénario **réel de bout en bout**. Ensuite la CI rejoue un sous-ensemble rapide, reproductible et adapté au risque. Une CI verte sans preuve locale suffisante ne clôt pas le besoin.
+**5 — Tester avant publication.** Exécuter localement les tests ciblés et au moins un parcours utilisateur réel lorsque le changement touche une interface ou un environnement. Préparer les preuves dans le ticket et la PR. Laisser la CI rejouer rapidement les vérifications reproductibles.
 
-**6 — Relire la PR comme un contrat.** Avec ChatGPT web et/ou un reviewer indépendant, examiner la conformité au besoin, les écarts d'architecture, les cas oubliés, le diff inutile et les preuves réellement exécutées. Pour chaque problème : commentaire GitHub précis → correction **sur la même PR** → nouveaux tests → nouvelle revue. L'agent ne fusionne pas de son propre chef.
+**6 — Relire et corriger sur la même PR.** ChatGPT web ou un reviewer examine le besoin, le diff, les tests et les cas manquants ; chaque finding fondé conduit à un correctif du contrat et à un test pertinent. Ne pas fusionner automatiquement au seul motif que l'agent ou la CI annonce « OK ».
 
-**7 — Capitaliser seulement l'enseignement réutilisable.** Après un détour coûteux, décider si la cause relève d'une spécification ambiguë, d'une mauvaise séparation des responsabilités, d'un manque de test ou d'un outil fragile. Corriger **le bon endroit** (spec, instruction agent, suite de tests, workflow), plutôt qu'ajouter une règle partout.
+**7 — Améliorer la méthode seulement après observation.** Si plusieurs boucles échouent, revoir le contrat, les tests ou l'orchestration. Ajouter éventuellement un reviewer de plan, un **evidence keeper** ou un **convergence guardian**, mais pas tous par réflexe. Transformer les enseignements durables en consignes courtes versionnées.
 
-## 5. Règles de pilotage pour converger vite
+## 5. Le critère pour savoir si cette méthode est efficace
 
-- **Le PO décide quoi et pourquoi ; l'agent décide comment dans le cadre approuvé.** ChatGPT web aide à faire le pont, mais ne remplace pas l'arbitrage du PO.
-- **Le plus petit changement *suffisant* gagne.** Le diff justifié inclut les tests, les correctifs d'erreur et les documents nécessaires ; il exclut les abstractions anticipées et les cas hors scope.
-- **La preuve doit précéder la déclaration « prêt ».** Un critère obligatoire non démontré reste explicitement ouvert. La revue finale ne doit intervenir qu'après préparation complète du candidat (code, tests, décisions, Beads, description de PR).
-- **L'indépendance est graduelle.** Un deuxième LLM apporte un autre contexte et des contre-exemples, pas une garantie d'impartialité ; conserver des tests déterministes et une décision humaine.
-- **Ne pas automatiser par principe.** Reviewer parallèle, keeper, guardian et skills ont de la valeur lorsqu'ils évitent plus de reprises qu'ils ne coûtent de coordination. Commencer simple, ajouter un rôle sur un problème répété et mesuré.
-- **Mesurer le bon résultat :** temps de l'intention approuvée à une PR réellement acceptable, nombre de tours de revue, défauts découverts tardivement et charge de synchronisation. Tokens et lignes de code sont des coûts secondaires, pas la définition du succès.
+Observer prioritairement **le temps écoulé jusqu'à une PR réellement acceptable**, puis **le nombre de tours de correction/revue** et **les défauts découverts tardivement**. Suivre aussi le temps perdu à synchroniser ChatGPT, l'agent, GitHub et Beads. Les tokens et les lignes modifiées sont des coûts, **pas** une mesure directe de réussite.
 
-### Bilan en une phrase
+Une orchestration multi-agent n'est meilleure que si ses vérifications précoces **évitent plus de reprises qu'elles ne créent de coordination**. Aucun dispositif ne dispense le PO d'arbitrer le besoin ni ne transforme une vérification LLM en preuve infaillible.
 
-**La bonne exploitation des LLM consiste à faire dialoguer librement l'humain avec un assistant de conception, formaliser leurs décisions dans un dépôt partagé, déléguer l'exécution à un agent local autonome mais borné, et accepter le travail sur des preuves réelles — pas sur l'assurance d'un modèle ni sur une CI simplement verte.**
+**Principe à retenir :** *dialoguer librement pour définir le bon produit ; figer uniquement les décisions acceptées dans Git ; déléguer l'exécution à un agent local ; suivre le travail dans Beads ; accepter chaque incrément sur des tests et des preuves réels, puis corriger la méthode là où les retours montrent un ralentissement.*
