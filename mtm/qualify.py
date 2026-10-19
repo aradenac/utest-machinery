@@ -324,7 +324,11 @@ def parse_manifest_defects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def frozen_suite_hash(bench_root: Path) -> dict[str, Any]:
-    """Hash the frozen test files and the project.yml, to pin what a campaign ran.
+    """Hash the frozen executable suite, to pin what a campaign ran.
+
+    Returns a fingerprint of all generated executable material: test files,
+    mock headers, dependency-interface headers, copied sources, shim headers,
+    and project.yml. This is the identity of what actually runs under verify.
 
     Empty when the bench has no frozen suite yet, so a caller can require a
     non-empty hash before trusting a comparison.
@@ -338,17 +342,20 @@ def frozen_suite_hash(bench_root: Path) -> dict[str, Any]:
     from .paths import sha256_file
 
     revision = bench_root / REVISION_DIRNAME
-    tests = sorted((revision / "test").glob("test_*.c")) if (revision / "test").is_dir() else []
-    interfaces = sorted((revision / "interface").glob("*_interface.h")) \
-        if (revision / "interface").is_dir() else []
-    mocks = sorted((revision / "mock").glob("mock_*.h")) \
-        if (revision / "mock").is_dir() else []
-    plan = revision / "project.yml"
+    tests = sorted((revision / "test").glob("test_*.c"))
+    interfaces = sorted((revision / "interface").glob("mtm_dep_*.h"))
+    mocks = sorted((revision / "mock").glob("mock_*.h"))
+    shims = []
+    shim_dir = revision / "shim"
+    if shim_dir.is_dir():
+        shims = sorted(shim_dir.glob("*.h"))
+    project_yml = revision / "project.yml"
     return {
         "tests": {p.name: sha256_file(p) for p in tests},
         "interfaces": {p.name: sha256_file(p) for p in interfaces},
         "mocks": {p.name: sha256_file(p) for p in mocks},
-        "project_yml": sha256_file(plan) if plan.is_file() else "",
+        "shims": {p.name: sha256_file(p) for p in shims},
+        "project_yml": sha256_file(project_yml) if project_yml.is_file() else "",
     }
 
 

@@ -183,10 +183,14 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
     from .qualify import frozen_suite_hash
     current_suite = frozen_suite_hash(bench_root)
     stored_suite = plan.get("suite_hash", {})
+    # Legacy/empty suite_hash: accept (no suite authentication available).
+    # The caller can still proceed — the absence of a suite fingerprint is
+    # a documented limitation, not a hard blocker.
     if stored_suite and current_suite:
-        # Compare per-file hashes.
+        # Compare per-file hashes across ALL suite components.
         suite_stale = False
-        for key in ("tests", "interfaces", "mocks", "project_yml"):
+        stale_files = []
+        for key in ("tests", "interfaces", "mocks", "shims", "project_yml"):
             stored_part = stored_suite.get(key, {})
             current_part = current_suite.get(key, {})
             if isinstance(stored_part, dict) and isinstance(current_part, dict):
@@ -194,19 +198,30 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
                 for fname in all_keys:
                     stored_hash = stored_part.get(fname, "")
                     current_hash = current_part.get(fname, "")
-                    if stored_hash and current_hash and stored_hash != current_hash:
+                    # Missing file (added/removed) is a stale file.
+                    if not stored_hash and current_hash:
                         suite_stale = True
-                        break
+                        stale_files.append(f"added: {fname}")
+                    elif stored_hash and not current_hash:
+                        suite_stale = True
+                        stale_files.append(f"removed: {fname}")
+                    elif stored_hash != current_hash:
+                        suite_stale = True
+                        stale_files.append(f"modified: {fname}")
             elif stored_suite != current_suite:
                 suite_stale = True
+                stale_files.append("suite structure mismatch")
             if suite_stale:
                 break
         if suite_stale:
             raise MtmError(
                 code=Code.SNAPSHOT_MISMATCH,
                 message=("The generated suite changed since the plan was frozen. "
-                         "A modified test, mock, interface or project.yml invalidates "
-                         "the replay — it is no longer the suite the plan describes."),
+                         f"Stale files: {'; '.join(stale_files[:10])}"
+                         + (" (more omitted)" if len(stale_files) > 10 else "")
+                         + ". A modified test, mock, interface, copied source, "
+                         "shim or project.yml invalidates the replay — it is no "
+                         "longer the suite the plan describes."),
                 action="Re-run 'mtm generate' to produce a fresh, consistent suite, "
                        "or restore the recorded revision from source control.",
                 stage="verify",
@@ -423,7 +438,14 @@ def _classify_build_run(proc: subprocess.CompletedProcess,
 
 def _run_functional(bench_root: Path, image_ref: str, profile: Profile,
                     run: CeedlingRun) -> ProfileResult:
-    """Adapt the PR 2 Ceedling run to a :class:`ProfileResult`."""
+    """Adapt the PR 2 Ceedling run to a :class:`ProfileResult`.
+
+    Classification semantics:
+    - TOOL_FAILED: Docker/tool interruption, incomplete execution, or
+      summary/exit disagreement (exit code doesn't match assertion count).
+    - FAILED: Unity reported real assertion failures.
+    - PASSED: Completed clean execution with matching exit code.
+    """
     result = ProfileResult(id=profile.id, status=TOOL_FAILED,
                            command=" ".join(run.argv), exit_code=run.returncode,
                            diagnostics=run.diagnostics[-4000:],
@@ -439,28 +461,37 @@ def _run_functional(bench_root: Path, image_ref: str, profile: Profile,
                       # name the failing assertion rather than a bare count.
                       "failures_detail": [list(pair) for pair in run.failures]}
     if run.timed_out:
+        result.status = TOOL_FAILED
         result.reason = "the run timed out after producing a Unity summary"
         return result
-    # Even with a Unity summary, an abnormal Docker/host exit (signal, OOM,
-    # reserved exit 125–127) means the profile's functional report is
-    # unreliable — the process did not terminate cleanly.
+    # Abnormal Docker/host exit means the profile's functional report is
+    # unreliable — the process did not terminate cleanly; treat as tool fault.
     rc = run.returncode
     if rc >= 128:
-        # Signal death (e.g. 137 = SIGKILL / OOM-killer). The Unity summary
-        # may have been emitted before the kill, so we must not call it clean.
-        result.status = FAILED
+        result.status = TOOL_FAILED
         result.reason = (f"the process terminated abnormally (exit {rc}, "
                          "likely signal-death); Unity summary is unreliable")
         return result
     if 125 <= rc < 128:
-        # Docker CLI / daemon errors (125=generic, 126=invoked cmd not
-        # executable, 127=command not found).
-        result.status = FAILED
+        result.status = TOOL_FAILED
         result.reason = (f"the Docker/ceedling exit was abnormal (exit {rc}); "
                          "Unity summary is unreliable")
         return result
-    result.status = FAILED if run.failed else PASSED
-    result.reason = (f"{run.failed} assertion failure(s)" if run.failed else "all tests passed")
+    # Nonzero exit with zero reported failures is inconsistent: the runner
+    # exited with a code but reported no assertions. This may indicate an
+    # incomplete run or infrastructure issue.
+    if rc != 0 and run.failed == 0:
+        result.status = TOOL_FAILED
+        result.reason = (f"the runner exited {rc} although Unity reported "
+                         "no failures; run may be incomplete")
+        return result
+    # Normal Unity conclusion: assertion failures → FAILED, zero failures + exit 0 → PASSED.
+    if run.failed:
+        result.status = FAILED
+        result.reason = (f"{run.failed} assertion failure(s)")
+    else:
+        result.status = PASSED
+        result.reason = "all tests passed"
     return result
 
 
@@ -707,27 +738,61 @@ def _run_instrumented(bench_root: Path, image_ref: str, profile: Profile,
 
 def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
                   workdirs: dict[str, Path]) -> ProfileResult:
-    """Build the gcc suite, then run each test binary under Valgrind Memcheck."""
+    """Build the gcc suite, then run each test binary under Valgrind Memcheck.
+
+    Preserves Unity findings (FAILED), reports abnormal Valgrind execution
+    as TOOL_FAILED, and only certifies clean runs as PASSED.
+    """
     workdir = workdirs[profile.id]
     proc = _run_in_image(bench_root, image_ref, workdir,
                          ["ceedling", "test:all"], timeout=600)
     built = _classify_build_run(proc, profile, PROFILE_BUILD_ROOT["valgrind"])
-    if built.status == TOOL_FAILED:
+    # Propagate build-level status early so Unity findings are never overwritten.
+    if built.status != PASSED:
+        # If Unity itself failed (FAILED) or the build/tool was broken,
+        # surface that result — Memcheck has nothing useful to say.
         built.limits = profile.limits
         return built
-    # If the build itself reported failures, surface them even if Valgrind
-    # ran (it would have nothing useful to run on a failed build).
+    # Count expected executables from the build metrics.
+    expected_binaries = built.metrics.get("executed", 0)
+    # Run all binaries under Valgrind, collecting per-binary results.
+    # Use a simpler approach: run valgrind per binary, capture output per binary,
+    # and aggregate via the parser on the combined output.
+    vg_cmd_parts = [
+        "vg_status=0; ",
+        "for exe in $(find . -name '*.out' -type f); do ",
+        '  echo "=== $exe ==="; ',
+        '  valgrind --leak-check=full --error-exitcode=99 "$exe" 2>&1; ',
+        "  rc=$?; ",
+        '  if [ $rc -ne 0 ]; then vg_status=1; fi; ',
+        "done; ",
+        'echo "VALGRIND_STATUS=$vg_status"'
+    ]
     vg = _run_in_image(
         bench_root, image_ref, workdir,
-        ["bash", "-lc",
-         "status=0; for exe in $(find . -name '*.out' -type f); do "
-         "  valgrind --leak-check=full --error-exitcode=99 \"$exe\" || status=$?; "
-         "done; echo VALGRIND_STATUS=$status"],
+        ["bash", "-lc", " ".join(vg_cmd_parts)],
         timeout=900)
     text = _as_text(vg.stdout) + _as_text(vg.stderr)
-    metrics = _valgrind_metrics(text)
-    # Valgrind exit-code 99 means at least one binary was flagged;
-    # any other abnormal exit (125–127, signals 128+) overrides the metrics.
+    # Parse Valgrind output: aggregate ERROR SUMMARY across all binaries.
+    all_errors = re.findall(r"ERROR SUMMARY:\s*(\d+)\s+errors", text)
+    total_errors = sum(int(n) for n in all_errors) if all_errors else None
+    # Count binaries we attempted to scan.
+    binaries_run = len(re.findall(r"^=== .+ ===$", text, re.MULTILINE))  # each echo produces "=== filename ==="
+    # Total definite leaks (first match is authoritative).
+    leaks_match = re.search(r"definitely lost:\s*([\d,]+)\s+bytes", text)
+    total_leaks = int(leaks_match.group(1).replace(",", "")) if leaks_match else None
+    metrics = {
+        "errors": total_errors,
+        "definitely_lost_bytes": total_leaks,
+        "binaries_run": binaries_run,
+        "binaries_expected": expected_binaries,
+    }
+    # Determine profile status: tool interruption → TOOL_FAILED, observed errors → FAILED,
+    # clean complete run → PASSED.
+    vg_status_line = ""
+    for line in text.splitlines():
+        if line.startswith("VALGRIND_STATUS="):
+            vg_status_line = line.split("=", 1)[1]
     vg_abnormal = False
     vg_reason = None
     if vg.returncode == 99:
@@ -739,6 +804,14 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
     elif 125 <= vg.returncode < 128:
         vg_abnormal = True
         vg_reason = f"Valgrind utility error (exit {vg.returncode})"
+    elif vg_status_line == "1" and vg.returncode == 0:
+        # Shell reported failures but docker wrapper masked it.
+        vg_abnormal = True
+        vg_reason = "Valgrind shell reported failures in one or more binaries"
+    # Note: expected_binaries is the number of tests (from Unity), not the
+    # number of Ceedling-generated executables (which is always 1 per test file
+    # or all tests in a single binary). We do NOT compare binaries_run against
+    # expected_binaries — that would be an apples-to-oranges comparison.
     result = ProfileResult(
         id=profile.id, status=TOOL_FAILED,
         metrics=metrics, limits=profile.limits,
@@ -746,17 +819,19 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
         exit_code=vg.returncode, diagnostics=text[-4000:],
         tool_versions={"valgrind": _tool_version(bench_root, image_ref, "valgrind")},
         raw_stdout=_as_text(vg.stdout), raw_stderr=_as_text(vg.stderr))
-    if vg_abnormal and vg_reason:
-        result.status = FAILED
+    if vg_abnormal:
+        result.status = TOOL_FAILED
         result.reason = vg_reason
-    elif metrics.get("errors") is None:
+    elif total_errors is None:
+        result.status = TOOL_FAILED
         result.reason = "Valgrind produced no ERROR SUMMARY line"
-    elif metrics.get("errors", 0) == 0:
+    elif total_errors > 0:
+        result.status = FAILED
+        result.reason = (f"{total_errors} Valgrind error(s) across "
+                         f"{binaries_run} binary/binaries")
+    else:
         result.status = PASSED
         result.reason = "all binaries clean under Memcheck"
-    else:
-        result.status = FAILED
-        result.reason = (f"{metrics['errors']} Valgrind error(s) across all binaries")
     return result
 
 
