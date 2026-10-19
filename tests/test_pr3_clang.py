@@ -204,6 +204,27 @@ def test_resolve_omits_the_probe_key_when_none_is_proposed(tmp_path):
     assert "probe_headers" not in seen["spec"]
 
 
+def test_the_header_probe_promotes_only_the_declaration_breaking_group():
+    """AP-08: the driver's header probe promotes a small, named set of
+    declaration-breaking warning groups to errors (``-Werror=<group>``), never a
+    blanket ``-Werror``. The set is the ``visibility`` group — a parameter naming a
+    record/enum tag the compiler never sees defined, which CMock cannot build a mock
+    from — and nothing else, so a genuinely benign warning stays admitted.
+
+    The module is importable without libclang (only ``main`` touches it), so this
+    asserts the policy on the host; the real image's verdict on the same shapes is
+    asserted in the ``docker`` tier."""
+    from mtm import clang_resolve_driver as driver
+
+    assert driver._PROBE_WERROR_GROUPS == ("visibility",)
+    assert driver._PROBE_ARGS == ["-Werror=visibility"]
+    # Idempotent: a caller that already passed the flag does not get it twice.
+    assert driver._probe_args(["-xc"]) == ["-xc", "-Werror=visibility"]
+    assert driver._probe_args(["-xc", "-Werror=visibility"]) == ["-xc", "-Werror=visibility"]
+    # It is deliberately not a blanket `-Werror`.
+    assert "-Werror" not in driver._PROBE_ARGS
+
+
 # --- offline: failure classification ----------------------------------------
 
 
@@ -356,4 +377,45 @@ def test_real_image_gates_a_proposed_header_on_its_compilation(tmp_path, product
     assert "Q" in result.header_probe["mtm_dep_v3.h"].diagnostic
     assert result.header_probe["mtm_dep_nested.h"].ok is False
     assert result.header_probe["mtm_dep_arr.h"].ok is False
+    assert result.header_probe["mtm_dep_ok.h"].ok is True
+
+
+@pytest.mark.docker
+def test_real_image_promotes_the_visibility_warning_to_a_probe_failure(
+        tmp_path, product_image):
+    """MANDATORY (lot G, I1/AP-06): the image's real clang refuses a header whose
+    only defect is that clang diagnoses it as a **``-Wvisibility`` warning**.
+
+    ``int dep_write(struct Undef s);`` (also ``union``/``enum`` and the pointer form)
+    is emitted by clang as a single Warning — "declaration of 'struct Undef' will
+    not be visible outside of this function" — so a severity-3-only probe admitted
+    it, and the real Ceedling build then failed inside CMock's generated mock
+    (``CMockExpectParameters_dep_write`` takes the tag by value, an incomplete type).
+    The probe promotes ``-Wvisibility`` to an error; the same request's **negative
+    control** — a genuinely benign warning, an unused parameter — is *not* in the
+    promoted group and stays admitted, so the policy refuses broken declarations
+    without over-refusing the project's tolerated warnings.
+    """
+    (tmp_path / "foo.h").write_text(
+        "#ifndef FOO_H\n#define FOO_H\ntypedef unsigned short Q;\nint use(int a);\n#endif\n")
+    result = ct.resolve(
+        [tmp_path / "foo.h"], bench_root=tmp_path, include_dirs=[tmp_path],
+        image=product_image,
+        probe_headers={
+            "mtm_dep_byval_struct.h": "int dep_write(struct Undef s);\n",
+            "mtm_dep_byval_union.h": "int dep_write(union Undef u);\n",
+            "mtm_dep_byval_enum.h": "int dep_write(enum Undef e);\n",
+            "mtm_dep_ptr.h": "int dep_write(struct Undef *s);\n",
+            # Negative control: a benign warning (unused parameter) is not promoted.
+            "mtm_dep_benign.h": "int dep_benign(int unused);\n",
+            # Positive control: `Q` is defined by the selected `foo.h`.
+            "mtm_dep_ok.h": '#include "foo.h"\nint dep_write(Q q);\n',
+        })
+    assert result.status == RESOLVED, (result.status, result.message, result.diagnostics)
+    for name in ("mtm_dep_byval_struct.h", "mtm_dep_byval_union.h",
+                 "mtm_dep_byval_enum.h", "mtm_dep_ptr.h"):
+        assert result.header_probe[name].ok is False, name
+        assert "Undef" in result.header_probe[name].diagnostic, \
+            (name, result.header_probe[name].diagnostic)
+    assert result.header_probe["mtm_dep_benign.h"].ok is True
     assert result.header_probe["mtm_dep_ok.h"].ok is True

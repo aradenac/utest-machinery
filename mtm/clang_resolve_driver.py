@@ -24,7 +24,10 @@ Two compiler-as-authority probes ride the same invocation: ``double_include_unsa
 (which input headers cannot be ``#include``-d twice in one TU) and
 ``header_probe`` (``probe_headers``: each *proposed* private interface header,
 compiled unsaved under the same flags). Neither is a bespoke parser: the real
-clang answers, and only an ``Error``/``Fatal`` diagnostic makes a probe fail.
+clang answers. The header probe fails on every ``Error``/``Fatal`` diagnostic
+*and* on the ``-Wvisibility`` group, which this module promotes to an error for
+the probe only (see ``_probe_headers``); every other warning is preserved but
+non-fatal.
 
 Importing this module on the host must not fail (only ``main`` touches libclang),
 so that the package stays importable where clang is absent.
@@ -39,6 +42,45 @@ from typing import Any
 #: Issue kind: the effective include/define/target context is incomplete, so the
 #: declaration could not be resolved. Consumed by :mod:`mtm.ctypes_clang`.
 MISSING_CONTEXT = "MISSING_CONTEXT"
+
+#: Warning groups the **header probe** promotes to errors (``-Werror=<group>``)
+#: for the probe parse only. A proposed interface header is not merely
+#: *syntactically* acceptable — it must be one CMock can build a mock from, and a
+#: declaration whose parameter names a record/enum tag the compiler never sees
+#: defined (``int dep_write(struct Undef s);``) is emitted by clang as a **single
+#: Warning** (``-Wvisibility``: "declaration of 'struct Undef' will not be visible
+#: outside of this function"). The header then compiles *on its own*, so a
+#: severity-3-only gate passes it — but CMock's generated mock does not: its
+#: ``CMockExpectParameters_<fn>`` takes the tag **by value**, so the real Ceedling
+#: build fails with "parameter has incomplete type"/"invalid application of
+#: 'sizeof' to incomplete type". That is I1/AP-06 (uncompilable C behind empty
+#: limitations), reached through severity rather than through a lexical rule.
+#:
+#: ``-Wvisibility`` is **exactly** the family that breaks the generated mock, so it
+#: is the principled set: it fires for every tag type the compiler has not seen
+#: defined *in the interface header's own translation unit* — a by-value parameter
+#: (``struct Undef s``), a pointer parameter (``struct Undef *s``) and a function
+#: pointer parameter naming it alike — and it is silent for a tag the header (or a
+#: header it ``#include``s) does define, so a real forward declaration or a
+#: selected defining header stays admitted (the negative control). It is
+#: deliberately **not** a blanket ``-Werror``: that would refuse genuinely benign
+#: warnings the project tolerates and this generator emits harmlessly
+#: (``-Wignored-qualifiers``, ``-Wunused-function``, ``-Wtypedef-redefinition``,
+#: ``-Wunknown-attributes``), shrinking the verified domain for no correctness
+#: gain — also a contract violation. The group is compiled into the image's clang:
+#: an unknown ``-Werror=<group>`` only yields a non-fatal unknown-warning-option
+#: diagnostic, so this list can never turn a benign header into a false refusal by
+#: itself.
+_PROBE_WERROR_GROUPS = ("visibility",)
+
+_PROBE_ARGS = [f"-Werror={group}" for group in _PROBE_WERROR_GROUPS]
+
+
+def _probe_args(args: list[str]) -> list[str]:
+    """*args* plus the header probe's error-promoted warning groups (idempotent)."""
+    extra = [flag for flag in _PROBE_ARGS if flag not in args]
+    return list(args) + extra
+
 
 #: Type kinds that name a record (``struct``/``union``/class) or an enumeration.
 _RECORD_KINDS = {"RECORD", "UNION", "ENUM"}
@@ -348,17 +390,23 @@ def _probe_headers(index: Any, spec: dict[str, Any], args: list[str],
     that names a type nothing in the selected build context defines — or whose
     ``#include``s cannot be resolved — is reported as an ``Error``/``Fatal``
     diagnostic by the real compiler instead of being silently emitted as
-    uncompilable C. Only ``Error``/``Fatal`` fails the probe: the profiles compile
-    ``-Wall -Wextra`` without ``-Werror``, so a warning (an incomplete tag in a
-    parameter list) still compiles. Batched: one parse per requested header, in the
-    caller's single driver invocation.
+    uncompilable C. The probe parse additionally promotes
+    :data:`_PROBE_WERROR_GROUPS` to errors: a body clang diagnoses only as a
+    ``-Wvisibility`` warning (a parameter naming a record/enum tag the compiler
+    never sees defined) still yields a mock CMock cannot compile, so it must be
+    refused too, while a genuinely benign warning (``-Wignored-qualifiers``,
+    ``-Wunused-function``…) is not in the promoted set and stays admitted. Only
+    ``Error``/``Fatal`` fails the probe. Batched: one parse per requested header,
+    in the caller's single driver invocation.
     """
     probe: dict[str, dict[str, Any]] = {}
+    probe_args = _probe_args(args)
     for name, text in (spec.get("probe_headers") or {}).items():
         rel = _relpath(str(name), root)
         path = root.rstrip("/") + "/" + rel.lstrip("/")
         try:
-            tu = index.parse(path, args=list(args), unsaved_files=[(path, str(text))])
+            tu = index.parse(path, args=list(probe_args),
+                             unsaved_files=[(path, str(text))])
         except Exception as exc:  # noqa: BLE001 - a probe failure is not a fact about the text
             probe[str(name)] = {"ok": False,
                                 "diagnostic": f"could not parse the header: {exc}"}
