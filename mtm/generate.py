@@ -162,6 +162,13 @@ def run_generate(
     suite_manifest = generated.to_dict()
     suite_path = write_json_atomic(state / SUITE_FILE, suite_manifest)
 
+    # Compute a fingerprint of the generated suite so that offline verify can
+    # authenticate the replay target against the plan (Invariant 1).
+    from .qualify import frozen_suite_hash
+    plan.suite_hash = frozen_suite_hash(bench_root)
+    # Rewrite the plan now that it carries the suite fingerprint.
+    plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
+
     types_status = suite_manifest.get("types", {}).get("status")
     if types_status == ctypes_clang.TOOL_FAILED:
         # The C type resolver (libclang/docker/binding) could not be used at all:

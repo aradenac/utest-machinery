@@ -151,6 +151,12 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
     stored plan's snapshot no longer matches the current one and verify refuses —
     the user must regenerate for the new snapshot (``architecture.md`` SYS-033)
     or restore the recorded revision. A missing plan is a plain input error.
+
+    In addition, the generated suite (test, mock, interface files and
+    project.yml) is authenticated against the ``suite_hash`` stored in the plan.
+    If the suite was modified after generation, verify refuses — replaying
+    against a tampered suite would invalidate Invariant 1 (offline replay
+    truthfulness).
     """
     plan = read_json(bench_root / PLAN_FILE)
     if not isinstance(plan, dict):
@@ -173,6 +179,39 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
             stage="verify",
             input_reference=f"snapshot {frozen[:12]} -> {current[:12]}",
         )
+    # Authenticate the generated suite against the plan.
+    from .qualify import frozen_suite_hash
+    current_suite = frozen_suite_hash(bench_root)
+    stored_suite = plan.get("suite_hash", {})
+    if stored_suite and current_suite:
+        # Compare per-file hashes.
+        suite_stale = False
+        for key in ("tests", "interfaces", "mocks", "project_yml"):
+            stored_part = stored_suite.get(key, {})
+            current_part = current_suite.get(key, {})
+            if isinstance(stored_part, dict) and isinstance(current_part, dict):
+                all_keys = set(stored_part.keys()) | set(current_part.keys())
+                for fname in all_keys:
+                    stored_hash = stored_part.get(fname, "")
+                    current_hash = current_part.get(fname, "")
+                    if stored_hash and current_hash and stored_hash != current_hash:
+                        suite_stale = True
+                        break
+            elif stored_suite != current_suite:
+                suite_stale = True
+            if suite_stale:
+                break
+        if suite_stale:
+            raise MtmError(
+                code=Code.SNAPSHOT_MISMATCH,
+                message=("The generated suite changed since the plan was frozen. "
+                         "A modified test, mock, interface or project.yml invalidates "
+                         "the replay — it is no longer the suite the plan describes."),
+                action="Re-run 'mtm generate' to produce a fresh, consistent suite, "
+                       "or restore the recorded revision from source control.",
+                stage="verify",
+                input_reference="suite hash mismatch",
+            )
     return frozen or current
 
 
@@ -402,6 +441,24 @@ def _run_functional(bench_root: Path, image_ref: str, profile: Profile,
     if run.timed_out:
         result.reason = "the run timed out after producing a Unity summary"
         return result
+    # Even with a Unity summary, an abnormal Docker/host exit (signal, OOM,
+    # reserved exit 125–127) means the profile's functional report is
+    # unreliable — the process did not terminate cleanly.
+    rc = run.returncode
+    if rc >= 128:
+        # Signal death (e.g. 137 = SIGKILL / OOM-killer). The Unity summary
+        # may have been emitted before the kill, so we must not call it clean.
+        result.status = FAILED
+        result.reason = (f"the process terminated abnormally (exit {rc}, "
+                         "likely signal-death); Unity summary is unreliable")
+        return result
+    if 125 <= rc < 128:
+        # Docker CLI / daemon errors (125=generic, 126=invoked cmd not
+        # executable, 127=command not found).
+        result.status = FAILED
+        result.reason = (f"the Docker/ceedling exit was abnormal (exit {rc}); "
+                         "Unity summary is unreliable")
+        return result
     result.status = FAILED if run.failed else PASSED
     result.reason = (f"{run.failed} assertion failure(s)" if run.failed else "all tests passed")
     return result
@@ -514,11 +571,16 @@ def _sanitizer_metrics(proc: subprocess.CompletedProcess) -> dict[str, Any]:
 
 
 def _valgrind_metrics(text: str) -> dict[str, Any]:
-    """Parse Valgrind's ``ERROR SUMMARY`` and leak lines."""
+    """Parse Valgrind's ``ERROR SUMMARY`` and leak lines.
+
+    When Valgrind runs multiple binaries (as the valgrind profile does), each
+    binary produces its own ``ERROR SUMMARY`` line. The old ``re.search`` only
+    captured the first — the sum of all lines is the authoritative count.
+    """
     errors = None
-    m = re.search(r"ERROR SUMMARY:\s*(\d+)\s+errors", text)
-    if m:
-        errors = int(m.group(1))
+    summary_counts = re.findall(r"ERROR SUMMARY:\s*(\d+)\s+errors", text)
+    if summary_counts:
+        errors = sum(int(n) for n in summary_counts)
     leaks = None
     m = re.search(r"definitely lost:\s*([\d,]+)\s+bytes", text)
     if m:
@@ -653,6 +715,8 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
     if built.status == TOOL_FAILED:
         built.limits = profile.limits
         return built
+    # If the build itself reported failures, surface them even if Valgrind
+    # ran (it would have nothing useful to run on a failed build).
     vg = _run_in_image(
         bench_root, image_ref, workdir,
         ["bash", "-lc",
@@ -662,21 +726,37 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
         timeout=900)
     text = _as_text(vg.stdout) + _as_text(vg.stderr)
     metrics = _valgrind_metrics(text)
+    # Valgrind exit-code 99 means at least one binary was flagged;
+    # any other abnormal exit (125–127, signals 128+) overrides the metrics.
+    vg_abnormal = False
+    vg_reason = None
+    if vg.returncode == 99:
+        vg_abnormal = True
+        vg_reason = "one or more binaries received Valgrind ERROR SUMMARY errors"
+    elif vg.returncode >= 128:
+        vg_abnormal = True
+        vg_reason = f"Valgrind terminated with exit {vg.returncode} (signal-based)"
+    elif 125 <= vg.returncode < 128:
+        vg_abnormal = True
+        vg_reason = f"Valgrind utility error (exit {vg.returncode})"
     result = ProfileResult(
-        id=profile.id,
-        status=PASSED if metrics.get("errors") == 0 else FAILED,
+        id=profile.id, status=TOOL_FAILED,
         metrics=metrics, limits=profile.limits,
         command=" ".join(vg.args) if isinstance(vg.args, list) else "",
         exit_code=vg.returncode, diagnostics=text[-4000:],
         tool_versions={"valgrind": _tool_version(bench_root, image_ref, "valgrind")},
         raw_stdout=_as_text(vg.stdout), raw_stderr=_as_text(vg.stderr))
-    if metrics.get("errors") is None:
-        result.status = TOOL_FAILED
+    if vg_abnormal and vg_reason:
+        result.status = FAILED
+        result.reason = vg_reason
+    elif metrics.get("errors") is None:
         result.reason = "Valgrind produced no ERROR SUMMARY line"
-    elif metrics["errors"]:
-        result.reason = f"Valgrind reported {metrics['errors']} error(s)"
+    elif metrics.get("errors", 0) == 0:
+        result.status = PASSED
+        result.reason = "all binaries clean under Memcheck"
     else:
-        result.reason = "no memory error or leak reported"
+        result.status = FAILED
+        result.reason = (f"{metrics['errors']} Valgrind error(s) across all binaries")
     return result
 
 

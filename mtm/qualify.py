@@ -324,22 +324,31 @@ def parse_manifest_defects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def frozen_suite_hash(bench_root: Path) -> dict[str, Any]:
-    """Hash the frozen test files and the plan, to pin what a campaign ran.
+    """Hash the frozen test files and the project.yml, to pin what a campaign ran.
 
     Empty when the bench has no frozen suite yet, so a caller can require a
     non-empty hash before trusting a comparison.
+
+    Note: we deliberately do **not** hash ``plan.json`` here. The plan carries
+    the ``suite_hash`` field (a fingerprint of this dict), so hashing plan.json
+    would create a circular dependency. The plan's own integrity is covered by
+    the input snapshot_hash; the suite_hash authenticates the generated C files.
     """
     from .ceedling import REVISION_DIRNAME
     from .paths import sha256_file
 
     revision = bench_root / REVISION_DIRNAME
     tests = sorted((revision / "test").glob("test_*.c")) if (revision / "test").is_dir() else []
+    interfaces = sorted((revision / "interface").glob("*_interface.h")) \
+        if (revision / "interface").is_dir() else []
+    mocks = sorted((revision / "mock").glob("mock_*.h")) \
+        if (revision / "mock").is_dir() else []
     plan = revision / "project.yml"
     return {
         "tests": {p.name: sha256_file(p) for p in tests},
+        "interfaces": {p.name: sha256_file(p) for p in interfaces},
+        "mocks": {p.name: sha256_file(p) for p in mocks},
         "project_yml": sha256_file(plan) if plan.is_file() else "",
-        "plan": sha256_file(bench_root / ".mtm" / "state" / "generate" / "plan.json")
-        if (bench_root / ".mtm" / "state" / "generate" / "plan.json").is_file() else "",
     }
 
 

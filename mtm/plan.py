@@ -197,6 +197,10 @@ class Plan:
     #: interface as an explicit, reviewable assumption.
     shim_headers: dict[str, str] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
+    #: SHA-256 fingerprint of the generated suite (test/mock/interface files +
+    #: project.yml). Populated after suite generation so verify can authenticate
+    #: the replay target against the plan (Invariant 1: offline replay truthfulness).
+    suite_hash: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,6 +217,9 @@ class Plan:
             # The model's raw (parsed) response, so a rejected or downgraded
             # answer stays inspectable as evidence, not just its accepted subset.
             "raw_response": self.raw_response,
+            # Fingerprint of the generated test/mock/interface/project.yml files,
+            # so offline verify can detect tampering or corruption of the suite.
+            "suite_hash": self.suite_hash,
         }
 
 
