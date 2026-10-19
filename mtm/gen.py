@@ -1356,9 +1356,16 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         if getattr(probe_facts, "status", "") == ctypes_clang.TOOL_FAILED:
             # The adapter could not be used to compile the proposed headers: no
             # header may be emitted on an unverified guess. Surface the tool fault
-            # through the same run-level path the fact resolution uses.
-            out.types["status"] = ctypes_clang.TOOL_FAILED
-            out.types["message"] = getattr(probe_facts, "message", "")
+            # through the same run-level path the fact resolution uses — but do not
+            # **clobber** a fault the primary resolution already reported (e.g. a
+            # ``BLOCKED`` status with its own missing-header message): only a clean
+            # (``RESOLVED``/empty) prior status is upgraded, and an existing
+            # message is never blanked.
+            if out.types.get("status") in (None, "", ctypes_clang.RESOLVED):
+                out.types["status"] = ctypes_clang.TOOL_FAILED
+            probe_message = str(getattr(probe_facts, "message", "") or "")
+            if probe_message and not out.types.get("message"):
+                out.types["message"] = probe_message
     for symbol in sorted(bodies):
         key = header_for[symbol]
         verdict = probe_verdicts.get(key)

@@ -139,15 +139,34 @@ def host_double_include_unsafe(files, include_dirs) -> dict:
     return unsafe
 
 
+#: gcc diagnostic families that mirror the driver's header-probe error-promoted
+#: warning groups (``mtm/clang_resolve_driver._PROBE_WERROR_GROUPS``). clang groups
+#: this diagnostic as ``-Wvisibility`` (promoted with ``-Werror=visibility``); gcc
+#: emits the *same* semantic diagnostic — a parameter naming a record/enum tag not
+#: visible in the translation unit — unconditionally, under no ``-W`` option (it is
+#: not controllable by ``-Wdeclaration-missing-parameter-type`` or any other group,
+#: verified on gcc 15.2), so the double recognises it by its fixed message instead.
+#: This mirrors the *family*, not a lexical type rule: the compiler still decides,
+#: and a benign warning (``-Wignored-qualifiers``, ``-Wunused-function``…) is absent
+#: from this set and stays admitted.
+_HOST_BREAKING_DIAGNOSTICS = (
+    "declared inside parameter list will not be visible",
+)
+
+
 def host_header_probe(spec, include_dirs) -> dict:
     """The **real host compiler**'s verdict on each proposed header body.
 
     Mirrors the adapter driver's ``header_probe`` with gcc: each body is written to
     a scratch file and compiled ``-fsyntax-only`` with the same ``-I`` include
     dirs, so a body naming a type nothing defines (or whose ``#include``s do not
-    resolve) is reported as an error. Returns the driver's ``{name: {"ok",
-    "diagnostic"}}`` shape. A missing compiler yields an empty map, which only
-    weakens the offline contrast, never the docker-tier proof.
+    resolve) is reported as an error. A body gcc accepts **only with a diagnostic
+    in** :data:`_HOST_BREAKING_DIAGNOSTICS` (the family clang's probe promotes to an
+    error in the real driver) is likewise reported not-ok, while any other warning
+    stays admitted — the offline contrast to the driver's ``-Werror=<group>`` policy.
+    Returns the driver's ``{name: {"ok", "diagnostic"}}`` shape. A missing compiler
+    yields an empty map, which only weakens the offline contrast, never the
+    docker-tier proof.
     """
     import shutil
     import subprocess
@@ -168,7 +187,9 @@ def host_header_probe(spec, include_dirs) -> dict:
                 capture_output=True, text=True)
             out = ((proc.stderr or "") + (proc.stdout or "")).strip()
             first = out.splitlines()[0] if out else ""
-            probe[str(name)] = {"ok": proc.returncode == 0, "diagnostic": first}
+            breaking = any(k in out for k in _HOST_BREAKING_DIAGNOSTICS)
+            probe[str(name)] = {"ok": proc.returncode == 0 and not breaking,
+                                "diagnostic": first if breaking or proc.returncode else ""}
     return probe
 
 

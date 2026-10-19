@@ -3058,13 +3058,64 @@ def test_llm_prototypes_using_only_standard_and_real_types_still_emit(tmp_path):
 
 def test_a_struct_or_enum_tag_in_an_llm_prototype_is_not_an_undefined_type(tmp_path):
     """Neighboring acceptance: a ``struct``/``union``/``enum`` *tag* names an
-    aggregate by identity, not an alias that must be defined; the guard must not
-    read the tag as an undefined named type. (The tag's own completeness is the
-    SUT's concern — the same declaration the selected header would supply.)"""
+    aggregate by identity, not an alias that must be defined; a declaration whose
+    tags the interface header itself defines must be admitted.
+
+    The lot-G correction: the earlier form of this test asserted admission for
+    ``int dep_write(struct Foo *p, enum Bar e);`` with **neither** tag defined
+    anywhere — a *false success*. The real Ceedling build on that exact header
+    fails (``field 'Expected_e' has incomplete type`` / ``sizeof`` on an incomplete
+    ``enum Bar``), so the compiler probe must refuse it. The genuine acceptance is
+    the case below: the field pairs its tag definitions with the prototype (the
+    same companion-statement carriage TC-2 uses), so clang is silent and CMock can
+    build the mock — refusing *this* would shrink the verified domain."""
     bench, out = _llm_fallback_bench(
         tmp_path, "tag-ok",
-        "int dep_write(struct Foo *p, enum Bar e);")
+        "typedef struct Foo { int v; } Foo;\n"
+        "typedef enum Bar { BAR_1 } Bar;\n"
+        "int dep_write(Foo *p, Bar e);")
     assert out.test_functions, out.limitations
+    assert out.limitations == [], out.limitations
+    assert _generated_header_compiles(bench, tmp_path, "dep_write")
+
+
+def test_a_by_value_tag_not_defined_in_the_header_is_refused(tmp_path):
+    """MANDATORY (lot G): a parameter naming a record/enum tag the header never
+    defines — by value **or** through a pointer — is diagnosed by clang only as a
+    ``-Wvisibility`` **warning** (``int dep_write(struct Undef s);``), so a
+    severity-3-only probe admitted it; the real Ceedling build then fails
+    (``CMockExpectParameters_dep_write`` takes the tag by value, an incomplete
+    type; a pointer form fails on CMock's ``ReturnMemThruPtr`` ``sizeof``). The
+    probe promotes that group to an error, so the header is refused with a named
+    per-symbol limitation and no test function is emitted. Covers the
+    ``struct``/``union``/``enum`` spellings and the pointer form."""
+    for label, field in (
+            ("byvalue-struct", "int dep_write(struct Undef s);"),
+            ("byvalue-union", "int dep_write(union Undef u);"),
+            ("byvalue-enum", "int dep_write(enum Undef e);"),
+            ("pointer-struct", "int dep_write(struct Undef *s);")):
+        bench, out = _llm_fallback_bench(tmp_path, f"lotg-{label}", field)
+        assert out.test_functions == [], (label, out.test_functions)
+        assert any("dep_write" in lim and "interface header does not compile" in lim
+                   and "Undef" in lim for lim in out.limitations), (label, out.limitations)
+        assert not (bench / ".mtm" / "gen" / "interface"
+                    / "mtm_dep_dep_write.h").exists(), label
+
+
+def test_a_benign_warning_in_a_proposed_header_is_still_admitted(tmp_path):
+    """Discriminating NEGATIVE control (MANDATORY, guard against over-refusal): a
+    header that draws a genuinely **benign** warning must still be admitted with
+    ``limitations: []`` and compile. The probe promotes only the ``-Wvisibility``
+    group (the declaration-breaking family), never a blanket ``-Werror``: an unused
+    parameter — and any other warning the project's own ``-Wall -Wextra`` tolerates —
+    stays non-fatal. Over-refusing here would be a false refusal, also a contract
+    violation."""
+    bench, out = _llm_fallback_bench(
+        tmp_path, "lotg-benign-warning",
+        "int dep_write(int unused);")
+    assert out.test_functions, out.limitations
+    assert out.limitations == [], out.limitations
+    assert _generated_header_compiles(bench, tmp_path, "dep_write")
 
 
 def test_an_undefined_alias_in_an_llm_return_type_is_also_refused(tmp_path):
@@ -3149,7 +3200,16 @@ def test_v3_an_alias_resting_on_a_selected_but_incomplete_typedef_is_refused(tmp
 
 
 def _generated_header_compiles(bench: Path, tmp_path: Path, name: str) -> bool:
-    """Compile the interface header (then the unit header, the test's order)."""
+    """Compile the interface header (then the unit header, the test's order).
+
+    Compiled under the **production profile's** flags for the gcc functional build
+    (``-Wall -Wextra``, *no* ``-Werror`` — ``mtm/profiles.py``'s ``functional``
+    profile and the generated ``project.yml`` build with warnings on but not fatal),
+    so the helper asserts the header is acceptable to the toolchain the product
+    actually runs, not a stricter bar. The probe's own, stricter acceptance (it also
+    refuses the ``-Wvisibility`` declaration-breaking family the real CMock build
+    cannot compile) is asserted where the probe verdict is produced.
+    """
     import shutil
     import subprocess
     if not shutil.which("gcc"):
@@ -3160,7 +3220,7 @@ def _generated_header_compiles(bench: Path, tmp_path: Path, name: str) -> bool:
     tu.write_text(f'#include "mtm_dep_{name}.h"\n#include "foo.h"\n'
                   "int main(void) { return 0; }\n")
     proc = subprocess.run(
-        ["gcc", "-std=c99", "-Wall", "-Werror",
+        ["gcc", "-std=c99", "-Wall", "-Wextra",
          "-I", str(bench / ".mtm" / "gen" / "src"),
          "-I", str(bench / ".mtm" / "gen" / "interface"),
          "-c", str(tu), "-o", str(comp / "tu.o")],
@@ -3283,6 +3343,53 @@ def test_lot_f_a_tool_fault_while_compiling_a_proposed_header_is_a_run_level_fau
     assert result.status == "TOOL_FAILURE" and result.exit_code == 30
     assert result.smoke["ran"] is False
     assert result.findings == []  # never a SUT defect
+
+
+def test_lot_g_a_probe_tool_fault_does_not_clobber_an_existing_fault_status(
+        fixture_bench):
+    """Advisory (lot G): the probe-phase fault handling surfaces its ``TOOL_FAILED``
+    through ``out.types['status']`` without **overwriting** a fault/diagnosis the
+    primary resolution already reported.
+
+    A real divergence is engineered here: the primary resolve reports
+    ``UNRESOLVED`` (the offline "no resolver available" status) with its own
+    message, so the LLM-fallback declarations still build proposed headers, and the
+    probe phase then fails as a ``TOOL_FAILED``. Before the fix the probe fault
+    unconditionally overwrote both fields, discarding the primary diagnosis; now an
+    existing non-clean status and an existing message survive. (The mandatory case
+    is unchanged and asserted separately: a clean ``RESOLVED`` primary **is**
+    upgraded to ``TOOL_FAILED`` — ``test_lot_f_a_tool_fault_while_compiling_a_*``.)"""
+    from mtm import ctypes_clang
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+    import yaml
+
+    bench = fixture_bench("mocked-sensor")
+    inventory = build_inventory(
+        bench, yaml.safe_load((bench / "project.yaml").read_text()).get("scopes", []))
+    scenario = {
+        "id": "S1", "title": "t", "function": "sample_sensor",
+        "requirement_ids": ["SEN-002"], "mocks": ["platform_read_sensor"],
+        "mock_declarations": {"platform_read_sensor": "int platform_read_sensor(int x);"},
+        "cases": [{"args": [0], "expected": 0, "mocks": {"platform_read_sensor": {}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
+    plan = parse_plan(json.dumps({"scenarios": [scenario]}), inventory,
+                      LLMIdentity(provider="test", model="t"))
+
+    def half_broken(paths, **kwargs):
+        if kwargs.get("probe_headers"):
+            return ctypes_clang.CTypeResolution(
+                status=ctypes_clang.TOOL_FAILED, message="probe phase fault")
+        return ctypes_clang.CTypeResolution(
+            status="UNRESOLVED", clang_version="test-double",
+            message="primary context incomplete: 'vendor.h' file not found")
+
+    out = generate_suite(bench, plan, inventory, resolve=half_broken)
+    # The earlier diagnosis is preserved, not clobbered by the probe fault.
+    assert out.types["status"] == "UNRESOLVED", out.types
+    assert "vendor.h" in out.types["message"], out.types
 
 
 # --- AP-08 / IMP-18: a real declaration is authoritative over an LLM proposal --
