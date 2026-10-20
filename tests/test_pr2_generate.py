@@ -537,7 +537,7 @@ def test_pointer_argument_carries_its_planned_initial_value(fixture_bench):
             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
         }],
     })
-    generate_suite(bench, plan, inventory)
+    generate_suite(bench, plan, inventory, resolve=_offline_resolve)
     source = _gen_test(bench, "sensor")
     assert "uint16_t out0_0 = (uint16_t)642;" in source
 
@@ -568,7 +568,7 @@ def test_expect_calls_is_materialised_as_per_call_expectations(fixture_bench):
             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
         }],
     })
-    generate_suite(bench, plan, inventory)
+    generate_suite(bench, plan, inventory, resolve=_offline_resolve)
     source = _gen_test(bench, "sensor")
     # One expectation per case (count 1 each), not reused across cases.
     assert source.count("platform_read_sensor_ExpectAnyArgsAndReturn(") == 2
@@ -596,6 +596,6 @@ def test_unfaithful_scenario_is_a_limitation_not_a_fabricated_finding(fixture_be
             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
         }],
     })
-    generated = generate_suite(bench, plan, inventory)
+    generated = generate_suite(bench, plan, inventory, resolve=_offline_resolve)
     assert any("sequence" in lim for lim in generated.limitations)
     assert generated.test_functions == []
