@@ -398,7 +398,7 @@ def test_directory_scope_materialises_its_files_and_detects_inner_collisions(
             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
         }],
     }), inventory, LLMIdentity(provider="test", model="t"))
-    generated = generate_suite(bench, plan, inventory)
+    generated = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     src = bench / ".mtm" / "gen" / "src"
     # The directory's sources are copied (not silently dropped).
     assert sorted(p.name for p in src.iterdir()) == ["sensor.c", "sensor.h"]
@@ -411,7 +411,7 @@ def test_directory_scope_materialises_its_files_and_detects_inner_collisions(
     shutil.copy(pkg / "sensor.c", clash / "sensor.c")
     run_mtm_json("scope", "add", "other/sensor.c", "--kind", "source", cwd=bench)
     inventory2 = build_inventory(bench, _scopes(bench))
-    generated2 = generate_suite(bench, plan, inventory2)
+    generated2 = generate_suite(bench, plan, inventory2, resolve=_fake_resolve)
     assert any("basename" in lim for lim in generated2.limitations)
 
 
@@ -439,7 +439,7 @@ def test_scenario_ids_normalising_to_one_test_name_are_refused_not_duplicated(
     }
     plan = parse_plan(json.dumps(payload), inventory,
                       LLMIdentity(provider="test", model="t"))
-    generated = generate_suite(bench, plan, inventory)
+    generated = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     # Exactly one test function survives, and the other is recorded, not lost.
     assert len(generated.test_functions) == 1
     assert any("normalisation" in lim for lim in generated.limitations)
@@ -502,7 +502,7 @@ def test_a_declared_mock_without_a_per_case_expectation_is_refused(fixture_bench
 
     # Declared but unconfigured -> refused, and told why.
     plan, inventory = _plan_for(bench, [scen([{"args": [1], "expected": "SENSOR_OK"}])])
-    out = generate_suite(bench, plan, inventory)
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     assert out.test_functions == []
     assert any("platform_read_sensor" in lim and "expectation" in lim
                for lim in out.limitations)
@@ -511,12 +511,12 @@ def test_a_declared_mock_without_a_per_case_expectation_is_refused(fixture_bench
     plan, inventory = _plan_for(bench, [scen([{
         "args": [1], "expected": "SENSOR_OK",
         "mocks": {"platform_read_sensor": {"ret": 0, "reading": 1}}}])])
-    out = generate_suite(bench, plan, inventory)
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     assert len(out.test_functions) == 1 and not out.limitations
 
     plan, inventory = _plan_for(bench, [scen([{
         "args": [1], "expected": "SENSOR_OK", "expect_calls": {"platform_read_sensor": 0}}])])
-    out = generate_suite(bench, plan, inventory)
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     assert len(out.test_functions) == 1 and not out.limitations
 
 
@@ -537,7 +537,7 @@ def test_expect_calls_zero_with_a_configured_mock_emits_no_expectation(fixture_b
                 "cases": [case],
                 "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
         plan, inventory = _plan_for(bench, [scen])
-        generate_suite(bench, plan, inventory)
+        generate_suite(bench, plan, inventory, resolve=_fake_resolve)
         return (bench / ".mtm" / "gen" / "test" / "test_sensor.c").read_text()
 
     zero = src_for({"args": [1], "expected": "SENSOR_OK",
@@ -565,7 +565,7 @@ def test_expect_calls_for_an_unmocked_symbol_is_refused(fixture_bench):
                        "expect_calls": {"not_a_mock": 3}}],
             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"}}
     plan, inventory = _plan_for(bench, [scen])
-    out = generate_suite(bench, plan, inventory)
+    out = generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     assert out.test_functions == []
     assert any("not_a_mock" in lim for lim in out.limitations)
 
@@ -914,14 +914,15 @@ def test_revision_is_rebuilt_so_a_scope_change_leaves_no_stale_test(fixture_benc
             "oracle": {"kind": "SPECIFIED", "statement": "x", "rationale": "y"},
         }],
     }), inventory, LLMIdentity(provider="test", model="t"))
-    generate_suite(bench, plan, inventory)
+    generate_suite(bench, plan, inventory, resolve=_fake_resolve)
     assert list((bench / ".mtm" / "gen" / "test").glob("test_sensor.c"))
     assert list((bench / ".mtm" / "gen" / "interface").glob("mtm_dep_*.h"))
 
     # Narrow the scope: the unit is now excluded (e.g. it became BLOCKED). A
     # rebuilt revision must not leave the previous test or interface behind.
     unit_id = inventory.units[0].id
-    generate_suite(bench, plan, inventory, excluded_units={unit_id})
+    generate_suite(bench, plan, inventory, excluded_units={unit_id},
+                   resolve=_fake_resolve)
     assert not list((bench / ".mtm" / "gen" / "test").glob("test_sensor.c"))
     assert not list((bench / ".mtm" / "gen" / "interface").glob("mtm_dep_*.h"))
 
