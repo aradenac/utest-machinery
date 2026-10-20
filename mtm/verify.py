@@ -613,9 +613,9 @@ def _valgrind_metrics(text: str) -> dict[str, Any]:
     if summary_counts:
         errors = sum(int(n) for n in summary_counts)
     leaks = None
-    m = re.search(r"definitely lost:\s*([\d,]+)\s+bytes", text)
-    if m:
-        leaks = int(m.group(1).replace(",", ""))
+    lost = re.findall(r"definitely lost:\s*([\d,]+)\s+bytes", text)
+    if lost:
+        leaks = sum(int(n.replace(",", "")) for n in lost)
     return {"errors": errors, "definitely_lost_bytes": leaks}
 
 
@@ -753,65 +753,86 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
         # surface that result — Memcheck has nothing useful to say.
         built.limits = profile.limits
         return built
-    # Count expected executables from the build metrics.
-    expected_binaries = built.metrics.get("executed", 0)
-    # Run all binaries under Valgrind, collecting per-binary results.
-    # Use a simpler approach: run valgrind per binary, capture output per binary,
-    # and aggregate via the parser on the combined output.
-    vg_cmd_parts = [
-        "vg_status=0; ",
-        "for exe in $(find . -name '*.out' -type f); do ",
-        '  echo "=== $exe ==="; ',
-        '  valgrind --leak-check=full --error-exitcode=99 "$exe" 2>&1; ',
-        "  rc=$?; ",
-        '  if [ $rc -ne 0 ]; then vg_status=1; fi; ',
-        "done; ",
-        'echo "VALGRIND_STATUS=$vg_status"'
-    ]
+    # Count ACTUAL Ceedling executables, not Unity test cases. One executable
+    # may contain many test cases; the previous "executed" count therefore could
+    # not establish whether Memcheck visited every binary.
+    binaries = sorted(
+        p.relative_to(workdir).as_posix()
+        for p in workdir.rglob("*.out") if p.is_file()
+    )
+    if not binaries:
+        return ProfileResult(
+            id=profile.id, status=TOOL_FAILED,
+            reason="the Ceedling build produced no Valgrind test executables",
+            metrics={"binaries_expected": 0, "binaries_run": 0},
+            limits=profile.limits)
+
+    # One Docker invocation, with an explicit start and exit marker per child.
+    # "$@" conveys the exact discovered executable set without shell word
+    # splitting/globbing; a later child is attempted even if an earlier one fails.
+    # The parent shell exits 0 only if its own traversal completes. Child status
+    # is *not* inferred from the parent's exit code or from a global summary.
+    script = (
+        'for exe in "$@"; do '
+        'printf "__MTM_VG_BEGIN__=%s\n" "$exe"; '
+        'valgrind --leak-check=full --error-exitcode=99 "$exe" 2>&1; '
+        'printf "__MTM_VG_EXIT__=%s\n" "$?"; '
+        'done'
+    )
     vg = _run_in_image(
         bench_root, image_ref, workdir,
-        ["bash", "-lc", " ".join(vg_cmd_parts)],
+        ["bash", "-lc", script, "mtm-valgrind", *(f"./{p}" for p in binaries)],
         timeout=900)
-    text = _as_text(vg.stdout) + _as_text(vg.stderr)
-    # Parse Valgrind output: aggregate ERROR SUMMARY across all binaries.
-    all_errors = re.findall(r"ERROR SUMMARY:\s*(\d+)\s+errors", text)
-    total_errors = sum(int(n) for n in all_errors) if all_errors else None
-    # Count binaries we attempted to scan.
-    binaries_run = len(re.findall(r"^=== .+ ===$", text, re.MULTILINE))  # each echo produces "=== filename ==="
-    # Total definite leaks (first match is authoritative).
-    leaks_match = re.search(r"definitely lost:\s*([\d,]+)\s+bytes", text)
-    total_leaks = int(leaks_match.group(1).replace(",", "")) if leaks_match else None
+    output = _as_text(vg.stdout)
+    text = output + _as_text(vg.stderr)
+
+    # Each expected binary must have one start marker, one numeric exit status,
+    # and one native Memcheck ERROR SUMMARY. A single clean report never proves
+    # that subsequent binaries ran; missing reports are TOOL_FAILED, not PASSED.
+    begins = list(re.finditer(r"(?m)^__MTM_VG_BEGIN__=(.+)$", output))
+    observed: list[dict[str, Any]] = []
+    errors: list[int] = []
+    leaks: list[int] = []
+    incomplete: list[str] = []
+    if vg.returncode != 0:
+        incomplete.append(f"Valgrind runner exited {vg.returncode}")
+    if len(begins) != len(binaries):
+        incomplete.append(
+            f"only {len(begins)} of {len(binaries)} executables were attempted")
+    for index, match in enumerate(begins):
+        name = match.group(1).strip()
+        section_end = begins[index + 1].start() if index + 1 < len(begins) else len(output)
+        section = output[match.end():section_end]
+        exits = re.findall(r"(?m)^__MTM_VG_EXIT__=(\d+)$", section)
+        summaries = re.findall(r"ERROR SUMMARY:\s*(\d+)\s+errors", section)
+        lost = re.findall(r"definitely lost:\s*([\d,]+)\s+bytes", section)
+        rc = int(exits[0]) if len(exits) == 1 else None
+        count = int(summaries[0]) if len(summaries) == 1 else None
+        if name != f"./{binaries[index]}" if index < len(binaries) else True:
+            incomplete.append(f"unexpected executable {name}")
+        if rc is None or count is None:
+            incomplete.append(f"{name}: no complete Memcheck report/exit status")
+        elif rc not in (0, 99) or (rc == 99 and count == 0):
+            # Exit 99 with diagnosed errors is Valgrind's *intentional* error
+            # exit code, not an infrastructure fault. Every other nonzero status
+            # (or exit 99 without evidence of errors) is untrustworthy.
+            incomplete.append(f"{name}: inconsistent Valgrind exit {rc}")
+        if count is not None:
+            errors.append(count)
+        leaks.extend(int(value.replace(",", "")) for value in lost)
+        observed.append({"executable": name, "exit_code": rc, "errors": count,
+                         "definitely_lost_bytes": sum(
+                             int(value.replace(",", "")) for value in lost)
+                         if lost else None})
     metrics = {
-        "errors": total_errors,
-        "definitely_lost_bytes": total_leaks,
-        "binaries_run": binaries_run,
-        "binaries_expected": expected_binaries,
+        "errors": sum(errors) if errors else None,
+        "definitely_lost_bytes": sum(leaks) if leaks else None,
+        "binaries_expected": len(binaries),
+        "binaries_attempted": len(begins),
+        "binaries_run": len(observed) - sum(
+            1 for item in observed if item["exit_code"] is None or item["errors"] is None),
+        "per_binary": observed,
     }
-    # Determine profile status: tool interruption → TOOL_FAILED, observed errors → FAILED,
-    # clean complete run → PASSED.
-    vg_status_line = ""
-    for line in text.splitlines():
-        if line.startswith("VALGRIND_STATUS="):
-            vg_status_line = line.split("=", 1)[1]
-    vg_abnormal = False
-    vg_reason = None
-    if vg.returncode == 99:
-        vg_abnormal = True
-        vg_reason = "one or more binaries received Valgrind ERROR SUMMARY errors"
-    elif vg.returncode >= 128:
-        vg_abnormal = True
-        vg_reason = f"Valgrind terminated with exit {vg.returncode} (signal-based)"
-    elif 125 <= vg.returncode < 128:
-        vg_abnormal = True
-        vg_reason = f"Valgrind utility error (exit {vg.returncode})"
-    elif vg_status_line == "1" and vg.returncode == 0:
-        # Shell reported failures but docker wrapper masked it.
-        vg_abnormal = True
-        vg_reason = "Valgrind shell reported failures in one or more binaries"
-    # Note: expected_binaries is the number of tests (from Unity), not the
-    # number of Ceedling-generated executables (which is always 1 per test file
-    # or all tests in a single binary). We do NOT compare binaries_run against
-    # expected_binaries — that would be an apples-to-oranges comparison.
     result = ProfileResult(
         id=profile.id, status=TOOL_FAILED,
         metrics=metrics, limits=profile.limits,
@@ -819,19 +840,15 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
         exit_code=vg.returncode, diagnostics=text[-4000:],
         tool_versions={"valgrind": _tool_version(bench_root, image_ref, "valgrind")},
         raw_stdout=_as_text(vg.stdout), raw_stderr=_as_text(vg.stderr))
-    if vg_abnormal:
-        result.status = TOOL_FAILED
-        result.reason = vg_reason
-    elif total_errors is None:
-        result.status = TOOL_FAILED
-        result.reason = "Valgrind produced no ERROR SUMMARY line"
-    elif total_errors > 0:
+    if incomplete:
+        result.reason = "; ".join(incomplete[:5])
+    elif metrics["errors"] is not None and metrics["errors"] > 0:
         result.status = FAILED
-        result.reason = (f"{total_errors} Valgrind error(s) across "
-                         f"{binaries_run} binary/binaries")
+        result.reason = (f"{metrics['errors']} Memcheck error(s) across "
+                         f"{len(binaries)} executables")
     else:
         result.status = PASSED
-        result.reason = "all binaries clean under Memcheck"
+        result.reason = f"all {len(binaries)} executables clean under Memcheck"
     return result
 
 
