@@ -52,8 +52,10 @@ def _frozen_bench(tmp_path: Path, name: str = "bench") -> tuple[Path, list[dict]
     state.mkdir(parents=True)
     frozen = snapshot_hash(resolve_scope_paths(bench, selected))
     (state / "inventory.json").write_text(json.dumps({"snapshot_hash": frozen}))
+    from mtm.qualify import frozen_suite_hash
     (state / "plan.json").write_text(json.dumps(
-        {"snapshot_hash": frozen, "scenarios": []}))
+        {"snapshot_hash": frozen, "scenarios": [],
+         "suite_hash": frozen_suite_hash(bench)}))
     return bench, selected
 
 
@@ -156,6 +158,12 @@ def test_verify_never_writes_to_the_selected_inputs_or_frozen_tests(tmp_path):
     bench, selected = _frozen_bench(tmp_path)
     revision = bench / ".mtm" / "gen"
     (revision / "test" / "test_f.c").write_text("/* frozen */\n")
+    # The fixture's newly added generated test is part of its frozen identity.
+    from mtm.qualify import frozen_suite_hash
+    plan_path = bench / ".mtm" / "state" / "generate" / "plan.json"
+    plan = json.loads(plan_path.read_text())
+    plan["suite_hash"] = frozen_suite_hash(bench)
+    plan_path.write_text(json.dumps(plan))
     before = {
         "src": (bench / "src.c").read_bytes(),
         "project": (revision / "project.yml").read_bytes(),
@@ -368,3 +376,60 @@ def test_valgrind_without_discovered_executable_is_not_a_pass(tmp_path, monkeypa
     result = _valgrind_case(tmp_path, monkeypatch, [])
     assert result.status == TOOL_FAILED
     assert result.metrics["binaries_expected"] == 0
+
+
+
+# --- executable-suite tampering is never a successful frozen replay ---------
+
+
+@pytest.mark.parametrize("relative_path, action", [
+    ("src/copied.c", "modify"),
+    ("interface/unit.h", "modify"),
+    ("test/test_added.c", "add"),
+    ("test/test_existing.c", "delete"),
+    ("project.yml", "modify"),
+])
+def test_changed_executable_material_is_refused_before_execution(
+        tmp_path, relative_path, action):
+    """All executable inputs, not only the user's original sources, are pinned."""
+    from mtm.qualify import frozen_suite_hash
+
+    bench, selected = _frozen_bench(tmp_path)
+    revision = bench / ".mtm" / "gen"
+    for name in ("src/copied.c", "interface/unit.h", "test/test_existing.c"):
+        target = revision / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("/* original */\n")
+    plan_file = bench / ".mtm" / "state" / "generate" / "plan.json"
+    plan = json.loads(plan_file.read_text())
+    plan["suite_hash"] = frozen_suite_hash(bench)
+    plan_file.write_text(json.dumps(plan))
+    target = revision / relative_path
+    if action == "delete":
+        target.unlink()
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("/* changed */\n")
+    executions = []
+
+    def forbidden_runner(*args, **kwargs):
+        executions.append(True)
+        return _ceedling_run()
+
+    with pytest.raises(MtmError) as exc:
+        run_verify(bench, selected, image_ref="img", runner=forbidden_runner,
+                   profile_runner=_profiles_fn({}))
+    assert exc.value.code == Code.SNAPSHOT_MISMATCH
+    assert not executions
+
+
+def test_legacy_suite_without_fingerprint_cannot_claim_authenticated_success(tmp_path):
+    bench, selected = _frozen_bench(tmp_path)
+    plan_file = bench / ".mtm" / "state" / "generate" / "plan.json"
+    plan = json.loads(plan_file.read_text())
+    plan.pop("suite_hash")
+    plan_file.write_text(json.dumps(plan))
+    with pytest.raises(MtmError) as exc:
+        run_verify(bench, selected, image_ref="img",
+                   runner=_runner(), profile_runner=_profiles_fn({}))
+    assert exc.value.code == Code.EVIDENCE_INVALID
