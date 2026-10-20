@@ -709,7 +709,8 @@ def cmd_generate(args: Any, ctx: "Context") -> dict[str, Any]:
 
     result = run_generate(root, config.scopes, provider=provider,
                           dry_run=getattr(args, "dry_run", False),
-                          image=image_ref(ctx.image_tag))
+                          image=image_ref(ctx.image_tag),
+                          build_context=config.raw.get("build_context"))
     state = root / ".mtm" / "state" / "generate"
     record = _record(
         op, "generate", result.status,
