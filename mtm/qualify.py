@@ -343,18 +343,23 @@ def frozen_suite_hash(bench_root: Path) -> dict[str, Any]:
 
     revision = bench_root / REVISION_DIRNAME
     tests = sorted((revision / "test").glob("test_*.c"))
-    interfaces = sorted((revision / "interface").glob("mtm_dep_*.h"))
+    # The private interface also contains generated *unit* headers (e.g.
+    # interface/foo.h), not just mtm_dep_*.h. Both affect the C translation unit.
+    interfaces = sorted((revision / "interface").glob("*.h"))
     mocks = sorted((revision / "mock").glob("mock_*.h"))
-    shims = []
-    shim_dir = revision / "shim"
-    if shim_dir.is_dir():
-        shims = sorted(shim_dir.glob("*.h"))
+    shims = sorted((revision / "shim").glob("*.h"))
+    sources = sorted(p for p in (revision / "src").rglob("*") if p.is_file())
+    includes = sorted(p for p in (revision / "inc").rglob("*") if p.is_file())
     project_yml = revision / "project.yml"
     return {
         "tests": {p.name: sha256_file(p) for p in tests},
         "interfaces": {p.name: sha256_file(p) for p in interfaces},
         "mocks": {p.name: sha256_file(p) for p in mocks},
         "shims": {p.name: sha256_file(p) for p in shims},
+        "sources": {p.relative_to(revision).as_posix(): sha256_file(p)
+                    for p in sources},
+        "includes": {p.relative_to(revision).as_posix(): sha256_file(p)
+                     for p in includes},
         "project_yml": sha256_file(project_yml) if project_yml.is_file() else "",
     }
 
