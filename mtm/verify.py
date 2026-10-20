@@ -183,14 +183,21 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
     from .qualify import frozen_suite_hash
     current_suite = frozen_suite_hash(bench_root)
     stored_suite = plan.get("suite_hash", {})
-    # Legacy/empty suite_hash: accept (no suite authentication available).
-    # The caller can still proceed — the absence of a suite fingerprint is
-    # a documented limitation, not a hard blocker.
+    # An unpinned legacy suite is not an authenticated frozen replay. Fail
+    # closed rather than returning an indistinguishable SUCCEEDED result.
+    if not isinstance(stored_suite, dict) or not stored_suite:
+        raise MtmError(
+            code=Code.EVIDENCE_INVALID,
+            message="The frozen plan has no executable-suite fingerprint.",
+            action="Re-run 'mtm generate' to authenticate the suite before verify.",
+            stage="verify",
+        )
     if stored_suite and current_suite:
         # Compare per-file hashes across ALL suite components.
         suite_stale = False
         stale_files = []
-        for key in ("tests", "interfaces", "mocks", "shims", "project_yml"):
+        for key in ("tests", "interfaces", "mocks", "shims", "sources",
+                    "includes", "project_yml"):
             stored_part = stored_suite.get(key, {})
             current_part = current_suite.get(key, {})
             if isinstance(stored_part, dict) and isinstance(current_part, dict):
