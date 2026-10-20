@@ -914,6 +914,8 @@ def cmd_verify(args: Any, ctx: "Context") -> dict[str, Any]:
         profiles=[p.to_dict() for p in result.profiles],
         counts=result.counts,
         findings=result.findings,
+        toolchain=result.toolchain,
+        replay=result.replay,
         exit_code=result.exit_code,
     )
     if result.status == "TOOL_FAILURE":
@@ -929,12 +931,24 @@ def cmd_verify(args: Any, ctx: "Context") -> dict[str, Any]:
         )
     elif result.status == "PARTIAL":
         unsupported = [p for p in result.profiles if p.status == "UNSUPPORTED"]
-        record.update(
-            category=Category.INPUT_LIMITATION,
-            code=Code.HOST_UNSUPPORTED,
-            message="Verification is incomplete: some profiles could not run.",
-            action="; ".join(f"{p.id}: {p.reason}" for p in unsupported)[:800],
-        )
+        if result.replay.get("deviated"):
+            record.update(
+                category=Category.INPUT_LIMITATION,
+                code=Code.REPLAY_DEVIATION,
+                message=("Forced replay executed the original frozen suite while "
+                         "selected inputs differed; this is not authenticated "
+                         "verification of the changed inputs."),
+                action=("Regenerate against the changed inputs for an authenticated "
+                        "campaign. " + "; ".join(
+                            f"{p.id}: {p.reason}" for p in unsupported))[:800],
+            )
+        else:
+            record.update(
+                category=Category.INPUT_LIMITATION,
+                code=Code.HOST_UNSUPPORTED,
+                message="Verification is incomplete: some profiles could not run.",
+                action="; ".join(f"{p.id}: {p.reason}" for p in unsupported)[:800],
+            )
     elif result.status == "FINDINGS":
         record.update(
             category=Category.TEST_FINDING,
