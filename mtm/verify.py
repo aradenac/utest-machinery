@@ -169,6 +169,21 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
             stage="verify",
         )
     frozen = str(plan.get("snapshot_hash", ""))
+    # Build settings are not source/SDD scopes; bind their exact content to
+    # the plan so later -D/-I/database edits cannot silently replay another TU.
+    stored_context = plan.get("build_context_hash", "")
+    if stored_context:
+        from .build_context import context_identity
+        import yaml
+        project = bench_root / "project.yaml"
+        raw = yaml.safe_load(project.read_text(encoding="utf-8")) if project.is_file() else {}
+        current_context = context_identity(bench_root, (raw or {}).get("build_context"))
+        if stored_context != current_context:
+            raise MtmError(code=Code.SNAPSHOT_MISMATCH,
+                           stage="verify",
+                           message="The selected compilation context changed since generation.",
+                           action="Restore the original project.yaml/compile_commands.json "
+                                  "or regenerate the frozen suite.")
     current = _current_snapshot(bench_root, selected)
     if not force and frozen and current and frozen != current:
         raise MtmError(
