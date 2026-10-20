@@ -1664,9 +1664,16 @@ def _authoritative_declaration(
             # through to the real selected header rather than emit it.
             if decl and split_declaration(decl) is not None:
                 return decl, DECL_FROM_CLANG, {}
-    real = _prototype_for_symbol(bench_root, inventory, symbol)
-    if real:
-        return real, DECL_FROM_HEADER, {}
+    # A successful *real* Clang parse with no declaration is authoritative
+    # negative evidence. Text scanning cannot override preprocessor branches
+    # (#if 0, conditional macros) that Clang deliberately excluded. Offline
+    # resolver doubles advertise their provenance explicitly and retain the
+    # legacy header seam for syntax/generation unit tests only.
+    if (getattr(facts, "status", "") != ctypes_clang.RESOLVED
+            or getattr(facts, "clang_version", "") == "test-double"):
+        real = _prototype_for_symbol(bench_root, inventory, symbol)
+        if real:
+            return real, DECL_FROM_HEADER, {}
     llm = _prototype_from_llm_text(llm_text, symbol)
     if llm:
         return llm, DECL_FROM_LLM, _llm_field_aliases(llm_text)
