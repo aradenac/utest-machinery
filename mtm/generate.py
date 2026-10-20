@@ -103,6 +103,7 @@ def run_generate(
     image: str = "utest-machinery/mtm:1.0.0",
     runner=run_ceedling,
     resolve=None,
+    build_context: dict[str, Any] | None = None,
 ) -> GenerateResult:
     """Run the full generation pipeline for a bench.
 
@@ -146,6 +147,8 @@ def run_generate(
     prompt = build_prompt(inventory)
     response = provider.complete(prompt)
     plan: Plan = parse_plan(response, inventory, provider.identity)
+    from .build_context import context_identity
+    plan.build_context_hash = context_identity(bench_root, build_context)
     plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
 
     provider_record = _provider_record(provider)
@@ -158,7 +161,8 @@ def run_generate(
     # resolves the selected C context (the semantic authority, owner decision
     # 0017). A resolution tool fault is a run-level tool fault, not a SUT defect.
     generated = generate_suite(bench_root, plan, inventory, excluded_units=excluded,
-                               image=image, resolve=resolve)
+                               image=image, resolve=resolve,
+                               build_context=build_context)
     suite_manifest = generated.to_dict()
     suite_path = write_json_atomic(state / SUITE_FILE, suite_manifest)
 
