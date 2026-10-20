@@ -121,8 +121,13 @@ def run_generate(
     inventory = build_inventory(bench_root, selected)
     inventory_path = write_json_atomic(state / INVENTORY_FILE, inventory.to_dict())
 
+    from .build_context import resolve_build_context
+    from .inventory import resolve_scope_paths
+    compiler_context = resolve_build_context(
+        bench_root, build_context, resolve_scope_paths(bench_root, selected))
     compiler = compiler or HostCompiler()
-    verdicts = assess_inventory(bench_root, inventory, compiler)
+    verdicts = assess_inventory(bench_root, inventory, compiler,
+                                context=compiler_context)
     feasibility_path = write_json_atomic(
         state / FEASIBILITY_FILE,
         {"units": [v.to_dict() for v in verdicts], "counts": summarize(verdicts)},
