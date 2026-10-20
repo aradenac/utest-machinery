@@ -1866,10 +1866,12 @@ def _project_yml(context=None, *, bench_root: Path | None = None,
     if context.defines:
         lines.extend([":defines:", "  :test:"])
         lines += [f"    - {value}" for value in context.defines]
-        lines.append("  :test_preprocess:")
+        lines.append("  :preprocess:")
         lines += [f"    - {value}" for value in context.defines]
     if context.args:
         lines.extend([":flags:", "  :test:", "    :compile:", "      :*:"])
+        lines += [f"        - {arg}" for arg in context.args]
+        lines.extend(["    :preprocess:", "      :*:"])
         lines += [f"        - {arg}" for arg in context.args]
         link_args = [arg for arg in context.args if arg in ("-m32", "-m64")]
         if link_args:
