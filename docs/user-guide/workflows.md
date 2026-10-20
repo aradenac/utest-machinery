@@ -76,6 +76,34 @@ flowchart TD
 
 Scope changes never delete historical evidence. Adding an input triggers discovery, impact analysis and proposed tests. Removing an input marks related scenarios out-of-scope or obsolete, shows the impact before applying it, and preserves historical IDs. Regeneration must be incremental; never overwrite previously validated oracles silently. A developer can review proposed edits and explicitly accept or reject them.
 
+### Selected host compilation context (milestone 3)
+
+When source files depend on selected macros, include roots, or host C ABI flags,
+declare the effective build context in the bench's existing `project.yaml`. It is
+used by **host feasibility, libclang and Ceedling/CMock together**; verification
+checks that it has not changed since generation.
+
+```yaml
+build_context:
+  include_dirs: [include]
+  defines: [FEATURE_SENSOR=1]
+  args: [-std=c11]
+  # Optional: explicit bench-local compile_commands.json instead of/manual plus
+  # the above settings. Its selected C-unit options must be compatible.
+  # compile_commands: compile_commands.json
+  mock_preprocessor: auto  # auto | mocks | none
+```
+
+All include roots and a selected compilation database must live within the
+bench. Supported host flags include `-std`, `-m32` / `-m64`, enum/char ABI
+options, `-D` and `-U`. Unsupported target-only options, missing
+compilation-database commands and incompatible per-unit contexts fail with an
+explicit configuration error; they are **not** silently ignored or claimed to
+be equivalent to the MCU toolchain. Ceedling mock-header preprocessing uses
+its native `:mocks` mode for conditional headers (or when explicitly
+selected). The compiler and native tools remain the semantic authority, not
+a hand-written preprocessor.
+
 ## Routine and offline replay
 
 - First use: install → init → scope add → generate → plan → verify → interpret → report. Native feasibility is automatic, never a separate mandatory command.
