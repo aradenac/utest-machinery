@@ -323,6 +323,27 @@ def parse_manifest_defects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return defects
 
 
+def execution_image_identity(image_ref: str) -> dict[str, str]:
+    """Pin an executable image by its local immutable Docker image ID.
+
+    A tag alone can be moved between generate and verify. An unresolved ID is
+    left *empty*, never guessed; verify refuses to certify such a replay.
+    Test doubles may inject this single transport seam without using Docker.
+    """
+    import subprocess
+
+    ref = str(image_ref or "")
+    if not ref:
+        return {"ref": ref, "id": ""}
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", ref],
+            capture_output=True, text=True, check=False, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"ref": ref, "id": ""}
+    return {"ref": ref, "id": proc.stdout.strip() if proc.returncode == 0 else ""}
+
+
 def frozen_suite_hash(bench_root: Path) -> dict[str, Any]:
     """Hash the frozen executable suite, to pin what a campaign ran.
 
