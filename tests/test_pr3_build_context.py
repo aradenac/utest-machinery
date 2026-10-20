@@ -31,7 +31,7 @@ def test_explicit_includes_defines_and_abi_reach_ceedling_and_profile(tmp_path):
                        mock_headers=[tmp_path / "include" / "switch.h"])
     assert ":use_test_preprocessor: :mocks" in yml
     assert "../../include/**" in yml
-    assert ":test_preprocess:" in yml and "FEATURE_X=1" in yml
+    assert ":preprocess:" in yml and "FEATURE_X=1" in yml
     assert "- -std=c11" in yml and "- -m64" in yml
     coverage = next(p for p in PROFILES if p.id == "coverage")
     derived = _profile_project_yml(yml, coverage)
@@ -39,7 +39,7 @@ def test_explicit_includes_defines_and_abi_reach_ceedling_and_profile(tmp_path):
     config = yaml.safe_load(derived)
     assert "../../../../include/**" in config[":paths"][":include"]
     assert "FEATURE_X=1" in config[":defines"][":test"]
-    assert "FEATURE_X=1" in config[":defines"][":test_preprocess"]
+    assert "FEATURE_X=1" in config[":defines"][":preprocess"]
     assert "-std=c11" in config[":flags"][":test"][":compile"][":*"]
     assert "-m64" in config[":flags"][":test"][":link"][":*"]
     assert "-fcoverage-mcdc" in config[":flags"][":test"][":compile"][":*"]
