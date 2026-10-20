@@ -201,6 +201,7 @@ class Plan:
     #: project.yml). Populated after suite generation so verify can authenticate
     #: the replay target against the plan (Invariant 1: offline replay truthfulness).
     suite_hash: dict[str, Any] = field(default_factory=dict)
+    build_context_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +221,7 @@ class Plan:
             # Fingerprint of the generated test/mock/interface/project.yml files,
             # so offline verify can detect tampering or corruption of the suite.
             "suite_hash": self.suite_hash,
+            "build_context_hash": self.build_context_hash,
         }
 
 
