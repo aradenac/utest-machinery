@@ -125,6 +125,7 @@ class VerifyResult:
     findings: list[dict[str, Any]] = field(default_factory=list)
     evidence_dir: str = ""
     toolchain: dict[str, Any] = field(default_factory=dict)
+    replay: dict[str, Any] = field(default_factory=dict)
 
 
 # --- snapshot / staleness ---------------------------------------------------
@@ -143,7 +144,8 @@ def _current_snapshot(bench_root: Path, selected: list[dict[str, Any]]) -> str:
 
 
 def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
-                 *, force: bool = False) -> str:
+                 *, force: bool = False,
+                 image_ref: str | None = None) -> str:
     """Return the frozen snapshot hash, or raise ``SNAPSHOT_MISMATCH``.
 
     A frozen suite may only be replayed against the exact bytes it was generated
@@ -233,6 +235,34 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
                        "or restore the recorded revision from source control.",
                 stage="verify",
                 input_reference="suite hash mismatch",
+            )
+    if image_ref is not None:
+        from .qualify import execution_image_identity
+
+        pinned = stored_suite.get("image", {})
+        if not isinstance(pinned, dict) or not pinned.get("id") or not pinned.get("ref"):
+            raise MtmError(
+                code=Code.EVIDENCE_INVALID,
+                message="The frozen suite has no authenticated Docker image identity.",
+                action="Re-run 'mtm generate' with the product image available; "
+                       "a mutable tag alone cannot authenticate a replay.",
+                stage="verify",
+            )
+        observed = execution_image_identity(image_ref)
+        if not observed.get("id"):
+            raise MtmError(
+                code=Code.EVIDENCE_INVALID,
+                message=f"The verification image {image_ref!r} could not be inspected.",
+                action="Ensure Docker is accessible and the image is present.",
+                stage="verify",
+            )
+        if observed != pinned:
+            raise MtmError(
+                code=Code.SNAPSHOT_MISMATCH,
+                message="The execution image changed since the suite was frozen.",
+                action="Restore the original Docker image or generate a new suite.",
+                stage="verify",
+                input_reference=f"image {pinned.get('id', '')[:20]} -> {observed['id'][:20]}",
             )
     return frozen or current
 
@@ -640,7 +670,14 @@ def run_verify(bench_root: Path, selected: list[dict[str, Any]], *,
     defaults to the real in-image path. Both are injectable so the classification
     logic is testable without Docker.
     """
-    frozen = check_frozen(bench_root, selected, force=force)
+    frozen = check_frozen(bench_root, selected, force=force, image_ref=image_ref)
+    from .qualify import execution_image_identity
+    pinned_image = execution_image_identity(image_ref)
+    # Invoke Docker by immutable image ID after authenticating the requested tag,
+    # so tag reassignment during execution cannot silently change the toolchain.
+    runtime_image = pinned_image["id"]
+    current_snapshot = _current_snapshot(bench_root, selected)
+    deviated = bool(force and frozen != current_snapshot)
     run_id = run_id or f"verify-{datetime.now(timezone.utc):%Y%m%d}-{_short_id(bench_root)}"
     revision = _revision(bench_root)
     if not (revision / "project.yml").is_file():
@@ -663,14 +700,14 @@ def run_verify(bench_root: Path, selected: list[dict[str, Any]], *,
 
     workdirs = _write_profile_projects(bench_root)
     results: list[ProfileResult] = []
-    toolchain: dict[str, Any] = {}
+    toolchain: dict[str, Any] = {"image": pinned_image}
 
     # 1. Functional profile: the PR 2 Ceedling run (byte-identical suite).
     functional = PROFILES[0]
     if profile_runner is None or functional.id == "functional":
         try:
-            cee = runner(bench_root, image_ref=image_ref)
-            results.append(_run_functional(bench_root, image_ref, functional, cee))
+            cee = runner(bench_root, image_ref=runtime_image)
+            results.append(_run_functional(bench_root, runtime_image, functional, cee))
         except MtmError:
             raise
         except Exception as exc:  # pragma: no cover - defensive: never lose a fault
@@ -681,16 +718,23 @@ def run_verify(bench_root: Path, selected: list[dict[str, Any]], *,
     #    never a silent pass; the others still run.
     for profile in PROFILES[1:]:
         runner_fn = profile_runner or _run_profile
-        results.append(runner_fn(bench_root, image_ref, profile, workdirs))
+        results.append(runner_fn(bench_root, runtime_image, profile, workdirs))
 
     counts = _count(results)
     findings = _findings(results)
     status, exit_code = _overall(results)
+    # --force permits an exploratory run but never calls a changed-input replay
+    # fully authenticated. Preserve findings/tool faults, downgrade only success.
+    if deviated and status == "SUCCEEDED":
+        status, exit_code = "PARTIAL", 20
     record = VerifyResult(
         status=status, exit_code=exit_code, run_id=run_id, profiles=results,
         counts=counts, snapshot_hash=frozen, findings=findings,
         evidence_dir=str(evidence_dir.relative_to(bench_root)) if evidence_dir else "",
         toolchain=toolchain,
+        replay={"frozen_snapshot": frozen, "current_snapshot": current_snapshot,
+                "forced": bool(force), "deviated": deviated,
+                "authenticated": not deviated},
     )
     _persist(bench_root, record, selected)
     return record
@@ -976,6 +1020,7 @@ def _persist(bench_root: Path, record: VerifyResult,
         "profiles": [p.to_dict() for p in record.profiles],
         "findings": record.findings,
         "toolchain": record.toolchain,
+        "replay": record.replay,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "note": "host-native evidence only; no target-MCU claim",
     }
