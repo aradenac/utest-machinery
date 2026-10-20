@@ -808,7 +808,8 @@ def _run_valgrind(bench_root: Path, image_ref: str, profile: Profile,
         lost = re.findall(r"definitely lost:\s*([\d,]+)\s+bytes", section)
         rc = int(exits[0]) if len(exits) == 1 else None
         count = int(summaries[0]) if len(summaries) == 1 else None
-        if name != f"./{binaries[index]}" if index < len(binaries) else True:
+        expected_name = f"./{binaries[index]}" if index < len(binaries) else None
+        if name != expected_name:
             incomplete.append(f"unexpected executable {name}")
         if rc is None or count is None:
             incomplete.append(f"{name}: no complete Memcheck report/exit status")
