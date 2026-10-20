@@ -164,8 +164,9 @@ def run_generate(
 
     # Compute a fingerprint of the generated suite so that offline verify can
     # authenticate the replay target against the plan (Invariant 1).
-    from .qualify import frozen_suite_hash
+    from .qualify import execution_image_identity, frozen_suite_hash
     plan.suite_hash = frozen_suite_hash(bench_root)
+    plan.suite_hash["image"] = execution_image_identity(image)
     # Rewrite the plan now that it carries the suite fingerprint.
     plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
 
