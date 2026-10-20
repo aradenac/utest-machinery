@@ -33,6 +33,14 @@ from mtm.profiles import FAILED, PASSED, TOOL_FAILED, UNSUPPORTED
 from mtm.verify import ProfileResult, latest_run, run_verify
 
 
+@pytest.fixture(autouse=True)
+def _fixed_test_image_identity(monkeypatch):
+    """Unit tests use a stable pretend image; no Docker is consulted."""
+    monkeypatch.setattr("mtm.qualify.execution_image_identity",
+                        lambda ref: {"ref": ref, "id": "sha256:offline-fixture"})
+
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -52,10 +60,11 @@ def _frozen_bench(tmp_path: Path, name: str = "bench") -> tuple[Path, list[dict]
     state.mkdir(parents=True)
     frozen = snapshot_hash(resolve_scope_paths(bench, selected))
     (state / "inventory.json").write_text(json.dumps({"snapshot_hash": frozen}))
-    from mtm.qualify import frozen_suite_hash
+    from mtm.qualify import execution_image_identity, frozen_suite_hash
+    suite_hash = frozen_suite_hash(bench)
+    suite_hash["image"] = execution_image_identity("img")
     (state / "plan.json").write_text(json.dumps(
-        {"snapshot_hash": frozen, "scenarios": [],
-         "suite_hash": frozen_suite_hash(bench)}))
+        {"snapshot_hash": frozen, "scenarios": [], "suite_hash": suite_hash}))
     return bench, selected
 
 
@@ -140,7 +149,8 @@ def test_force_runs_despite_a_changed_snapshot(tmp_path):
     (bench / "src.c").write_text("int f(void) { return 2; }\n")
     result = run_verify(bench, selected, image_ref="img", force=True,
                         runner=_runner(), profile_runner=_profiles_fn({}))
-    assert result.status == "SUCCEEDED"
+    assert result.status == "PARTIAL" and result.exit_code == 20
+    assert result.replay["deviated"] and not result.replay["authenticated"]
 
 
 def test_a_missing_plan_is_an_input_error_not_a_replay(tmp_path):
@@ -162,7 +172,9 @@ def test_verify_never_writes_to_the_selected_inputs_or_frozen_tests(tmp_path):
     from mtm.qualify import frozen_suite_hash
     plan_path = bench / ".mtm" / "state" / "generate" / "plan.json"
     plan = json.loads(plan_path.read_text())
+    image = plan["suite_hash"]["image"]
     plan["suite_hash"] = frozen_suite_hash(bench)
+    plan["suite_hash"]["image"] = image
     plan_path.write_text(json.dumps(plan))
     before = {
         "src": (bench / "src.c").read_bytes(),
@@ -402,7 +414,9 @@ def test_changed_executable_material_is_refused_before_execution(
         target.write_text("/* original */\n")
     plan_file = bench / ".mtm" / "state" / "generate" / "plan.json"
     plan = json.loads(plan_file.read_text())
+    image = plan["suite_hash"]["image"]
     plan["suite_hash"] = frozen_suite_hash(bench)
+    plan["suite_hash"]["image"] = image
     plan_file.write_text(json.dumps(plan))
     target = revision / relative_path
     if action == "delete":
@@ -429,6 +443,29 @@ def test_legacy_suite_without_fingerprint_cannot_claim_authenticated_success(tmp
     plan = json.loads(plan_file.read_text())
     plan.pop("suite_hash")
     plan_file.write_text(json.dumps(plan))
+    with pytest.raises(MtmError) as exc:
+        run_verify(bench, selected, image_ref="img",
+                   runner=_runner(), profile_runner=_profiles_fn({}))
+    assert exc.value.code == Code.EVIDENCE_INVALID
+
+
+
+def test_changed_docker_image_id_is_a_snapshot_mismatch(tmp_path, monkeypatch):
+    bench, selected = _frozen_bench(tmp_path)
+    monkeypatch.setattr(
+        "mtm.qualify.execution_image_identity",
+        lambda ref: {"ref": ref, "id": "sha256:another-image"})
+    with pytest.raises(MtmError) as exc:
+        run_verify(bench, selected, image_ref="img",
+                   runner=_runner(), profile_runner=_profiles_fn({}))
+    assert exc.value.code == Code.SNAPSHOT_MISMATCH
+
+
+def test_unresolved_docker_image_id_refuses_authenticated_replay(tmp_path, monkeypatch):
+    bench, selected = _frozen_bench(tmp_path)
+    monkeypatch.setattr(
+        "mtm.qualify.execution_image_identity",
+        lambda ref: {"ref": ref, "id": ""})
     with pytest.raises(MtmError) as exc:
         run_verify(bench, selected, image_ref="img",
                    runner=_runner(), profile_runner=_profiles_fn({}))
