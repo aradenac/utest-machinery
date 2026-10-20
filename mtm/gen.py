@@ -150,6 +150,8 @@ def _resolve_type_map(
     resolve: Callable[..., Any] | None = None,
     resolver: Any = None,
     probe_headers: dict[str, str] | None = None,
+    defines: list[str] | None = None,
+    args: list[str] | None = None,
 ) -> Any:
     """Resolve the selected inputs with the clang adapter (fail-soft).
 
@@ -165,7 +167,9 @@ def _resolve_type_map(
     source = resolve or ctypes_clang.resolve
     try:
         return source(inputs, bench_root=bench_root, image=image,
-                      include_dirs=list(include_dirs or []), resolver=resolver,
+                      include_dirs=list(include_dirs or []),
+                      defines=list(defines or []), args=list(args or []),
+                      resolver=resolver,
                       probe_headers=dict(probe_headers or {}))
     except Exception as exc:  # noqa: BLE001 - surfaced as a tool fault, never a crash
         return ctypes_clang.CTypeResolution(
@@ -1070,7 +1074,8 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
                    *, excluded_units: set[str] | None = None,
                    image: str | None = None,
                    resolve: Callable[..., Any] | None = None,
-                   resolver: Any = None) -> Generated:
+                   resolver: Any = None,
+                   build_context: dict[str, Any] | None = None) -> Generated:
     """Write a Ceedling project under ``<bench>/.mtm/gen`` from the plan.
 
     *excluded_units* are feasibility-BLOCKED unit ids: they are left out of the
@@ -1087,6 +1092,9 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     limitations, ``TOOL_FAILED`` into a run-level tool fault — never an uncaught
     exception, and never a guessed type.
     """
+    from .build_context import resolve_build_context
+    context = resolve_build_context(Path(bench_root), build_context,
+                                    resolve_scope_paths(bench_root, inventory.selected))
     excluded = set(excluded_units or set())
     blocked_ids = set(excluded)
     revision = Path(bench_root) / REVISION_DIRNAME
@@ -1184,7 +1192,8 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     resolve_inputs += [shim_dir / name for name in shim_names]
     facts = _resolve_type_map(
         bench_root, resolve_inputs, image=image, resolve=resolve, resolver=resolver,
-        include_dirs=[shim_dir, src_dir])
+        include_dirs=[shim_dir, src_dir, *context.include_dirs],
+        defines=list(context.defines), args=list(context.args))
     out.types = {
         "status": facts.status,
         "clang_version": facts.clang_version,
@@ -1350,7 +1359,9 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         probe_spec = {header_for[sym]: text for sym, text in bodies.items()}
         probe_facts = _resolve_type_map(
             bench_root, resolve_inputs, image=image, resolve=resolve,
-            resolver=resolver, include_dirs=[shim_dir, src_dir],
+            resolver=resolver,
+            include_dirs=[shim_dir, src_dir, *context.include_dirs],
+            defines=list(context.defines), args=list(context.args),
             probe_headers=probe_spec)
         probe_verdicts = getattr(probe_facts, "header_probe", None) or {}
         if getattr(probe_facts, "status", "") == ctypes_clang.TOOL_FAILED:
@@ -1437,7 +1448,10 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         out.limitations.extend(skipped)
 
     # 5. The Ceedling project file.
-    (revision / "project.yml").write_text(_project_yml(), encoding="utf-8")
+    (revision / "project.yml").write_text(
+        _project_yml(context, bench_root=Path(bench_root),
+                     mock_headers=[src_dir / x for x in copied if x.endswith(".h")]),
+        encoding="utf-8")
     out.files["project.yml"] = "project"
 
     # Provenance of each mock declaration (AP-08): which authority supplied it, so
@@ -1805,42 +1819,75 @@ def _alias_source_for_decl(decl: str, alias_source: dict[str, str],
     return includes, statements, ""
 
 
-def _project_yml() -> str:
-    """The Ceedling project file for a generated suite.
+def _project_yml(context=None, *, bench_root: Path | None = None,
+                 mock_headers: list[Path] | None = None) -> str:
+    """One Ceedling compiler context shared with the Clang resolution pass.
 
-    ``:enforce_strict_ordering: FALSE`` keeps a scenario's expectations in the
-    order written without demanding global ordering across mocks; the mock
-    plugins provide the expressiveness the plan uses (return values, out
-    parameters, unlimited coverage calls for UNDETERMINED cases).
+    Native :mocks header preprocessing is selected automatically when a copied
+    real header contains conditionals; callers may explicitly opt in/out. This
+    heuristic *only* chooses a build mode, never asserts C type/preprocessor
+    semantics (libclang and native Ceedling still decide those).
     """
-    return (
-        ":project:\n"
-        "  :use_exceptions: FALSE\n"
-        "  :use_mocks: TRUE\n"
-        "  :use_test_preprocessor: :none\n"
-        "  :build_root: build\n"
-        "  :test_file_prefix: test_\n"
-        "  :which_ceedling: gem\n"
-        ":paths:\n"
-        "  :source:\n"
-        f"    - {SOURCE_DIRNAME}/**\n"
-        "  :include:\n"
-        f"    - {SHIM_DIRNAME}/**\n"
-        f"    - {INTERFACE_DIRNAME}/**\n"
-        f"    - {SOURCE_DIRNAME}/**\n"
-        "  :test:\n"
-        f"    - {TEST_DIRNAME}/**\n"
-        ":cmock:\n"
-        "  :mock_prefix: mock_\n"
-        "  :when_no_prototypes: :warn\n"
-        "  :enforce_strict_ordering: FALSE\n"
-        "  :plugins:\n"
-        "    - :ignore\n"
-        "    - :expect_any_args\n"
-        "    - :return_thru_ptr\n"
-        "    - :ignore_arg\n"
-        "    - :callback\n"
+    from .build_context import BuildContext
+
+    context = context or BuildContext()
+    headers = mock_headers or []
+    conditional = any(
+        re.search(r"(?m)^\s*#\s*(?:if|ifdef|ifndef|elif|else)\b",
+                  _safe_read(header))
+        for header in headers if header.is_file()
     )
+    use_mocks = (context.mock_preprocessor == "mocks"
+                 or (context.mock_preprocessor == "auto" and conditional))
+    lines = [
+        ":project:",
+        "  :use_exceptions: FALSE",
+        "  :use_mocks: TRUE",
+        f"  :use_test_preprocessor: {':mocks' if use_mocks else ':none'}",
+        "  :build_root: build",
+        "  :test_file_prefix: test_",
+        "  :which_ceedling: gem",
+        ":paths:",
+        "  :source:",
+        f"    - {SOURCE_DIRNAME}/**",
+        "  :include:",
+        f"    - {SHIM_DIRNAME}/**",
+        f"    - {INTERFACE_DIRNAME}/**",
+        f"    - {SOURCE_DIRNAME}/**",
+    ]
+    if bench_root is not None:
+        for folder in context.include_dirs:
+            rel = folder.relative_to(bench_root.resolve()).as_posix()
+            lines.append(f"    - ../../{rel}/**")
+    lines.extend([
+        "  :test:",
+        f"    - {TEST_DIRNAME}/**",
+    ])
+    if context.defines:
+        lines.extend([":defines:", "  :test:"])
+        lines += [f"    - {value}" for value in context.defines]
+        lines.append("  :test_preprocess:")
+        lines += [f"    - {value}" for value in context.defines]
+    if context.args:
+        lines.extend([":flags:", "  :test:", "    :compile:", "      :*:"])
+        lines += [f"        - {arg}" for arg in context.args]
+        link_args = [arg for arg in context.args if arg in ("-m32", "-m64")]
+        if link_args:
+            lines.extend(["    :link:", "      :*:"])
+            lines += [f"        - {arg}" for arg in link_args]
+    lines.extend([
+        ":cmock:",
+        "  :mock_prefix: mock_",
+        "  :when_no_prototypes: :warn",
+        "  :enforce_strict_ordering: FALSE",
+        "  :plugins:",
+        "    - :ignore",
+        "    - :expect_any_args",
+        "    - :return_thru_ptr",
+        "    - :ignore_arg",
+        "    - :callback",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 # --- test emission ----------------------------------------------------------
