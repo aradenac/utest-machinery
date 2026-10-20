@@ -217,9 +217,9 @@ def check_frozen(bench_root: Path, selected: list[dict[str, Any]],
                     elif stored_hash != current_hash:
                         suite_stale = True
                         stale_files.append(f"modified: {fname}")
-            elif stored_suite != current_suite:
+            elif stored_part != current_part:
                 suite_stale = True
-                stale_files.append("suite structure mismatch")
+                stale_files.append(f"modified: {key}")
             if suite_stale:
                 break
         if suite_stale:
