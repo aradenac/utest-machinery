@@ -292,14 +292,17 @@ def _profile_project_yml(base_yml: str, profile: Profile) -> str:
     text = re.sub(r"(?m)^(\s*:build_root:).*$",
                   f"\\1 {PROFILE_BUILD_ROOT.get(profile.id, f'build-{profile.id}')}",
                   base_yml)
-    # Re-point only the relative *path* entries under :paths: up two levels (the
-    # profile work directory is ``<revision>/profiles/<id>/``), so they still reach
-    # the same frozen files. A path entry is a list item that is not a Ceedling
-    # symbol (`:ignore`, `:return_thru_ptr`, …): those are left untouched, or the
-    # `:cmock:` plugin list would be corrupted. `:build_root:` stays *local* to the
-    # profile directory, which keeps each profile's objects and report artefacts
-    # under its own tree (`find .` then finds them).
-    text = re.sub(r"(?m)^(\s*- )(?!\.\./|:)(\S+)$", r"\1../../\2", text)
+    # Only :paths: entries are path-qualified. The previous global expression
+    # also rewrote :defines: and compiler :flags: list entries, corrupting the
+    # selected compilation context when generating a profile project.
+    def repoint(match):
+        body = match.group(2)
+        body = re.sub(r"(?m)^(\s*- )([^:\s]\S*)$",
+                      lambda m: m.group(1) + "../../" + m.group(2), body)
+        return match.group(1) + body
+
+    text = re.sub(r"(?ms)(^:paths:\n)(.*?)(?=^:[A-Za-z_]\w*:|\Z)",
+                  repoint, text)
     text = text.rstrip("\n")
     if profile.compiler:
         text += (
@@ -314,6 +317,17 @@ def _profile_project_yml(base_yml: str, profile: Profile) -> str:
     # flags (e.g. the portability/`-O2` profile) must omit the whole ``:flags:``
     # block rather than declare it empty.
     if profile.compile_flags or profile.link_flags:
+        # Merge with the frozen project's *selected* C options, rather than
+        # appending a second :flags: key whose YAML parse could discard them.
+        if re.search(r"(?m)^:flags:", text):
+            import yaml
+            obj = yaml.safe_load(text)
+            flags = obj.setdefault(":flags", {}).setdefault(":test", {})
+            if profile.compile_flags:
+                flags.setdefault(":compile", {}).setdefault(":*", []).extend(profile.compile_flags)
+            if profile.link_flags:
+                flags.setdefault(":link", {}).setdefault(":*", []).extend(profile.link_flags)
+            return yaml.safe_dump(obj, sort_keys=False)
         text += ":flags:\n  :test:\n"
         if profile.compile_flags:
             text += "    :compile:\n      :*:\n"
