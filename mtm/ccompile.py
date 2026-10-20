@@ -65,9 +65,10 @@ class HostCompiler:
     def available(self) -> bool:
         return self.compiler is not None
 
-    def syntax_check(self, source: Path, include_dirs: list[Path]) -> CompileResult:
-        """Compile-only (syntax/semantic) check of a single source file."""
-        return self._run(["-fsyntax-only"], source, include_dirs)
+    def syntax_check(self, source: Path, include_dirs: list[Path], *,
+                     extra_flags: list[str] | None = None) -> CompileResult:
+        """Compile-only (syntax/semantic) check using selected host C options."""
+        return self._run(["-fsyntax-only", *(extra_flags or [])], source, include_dirs)
 
     def link(
         self,
