@@ -297,3 +297,74 @@ def test_the_profile_project_yml_keeps_the_frozen_paths_and_isolates_builds():
     assert ":build_root: build-coverage" in coverage
     assert "clang-18" in coverage and "-fcoverage-mcdc" in coverage
     assert ":build_root: build\n" not in coverage  # the frozen one is replaced
+
+
+# --- Valgrind: every executable needs a trustworthy independent verdict -------
+
+
+def _valgrind_case(tmp_path, monkeypatch, reports, *, runner_rc=0):
+    """Drive Memcheck's real classification with a fake Docker transport only.
+
+    Each report is (ERROR SUMMARY count or None, native child exit code).
+    Executable discovery uses real files in the private profile build tree.
+    """
+    import subprocess
+    from mtm import verify as v
+    from mtm.profiles import PROFILES
+
+    bench = tmp_path / "bench"
+    workdir = bench / ".mtm" / "gen" / "profiles" / "valgrind"
+    workdir.mkdir(parents=True)
+    output = ""
+    for index, (errors, rc) in enumerate(reports):
+        name = f"test_{index}.out"
+        (workdir / name).write_text("")
+        output += f"__MTM_VG_BEGIN__=./{name}\n"
+        if errors is not None:
+            output += f"==42== ERROR SUMMARY: {errors} errors from 0 contexts\n"
+            output += f"==42==    definitely lost: {index + 1} bytes in 1 blocks\n"
+        output += f"__MTM_VG_EXIT__={rc}\n"
+
+    def fake_run(bench_root, image_ref, cwd, argv, **kwargs):
+        if argv == ["ceedling", "test:all"]:
+            return subprocess.CompletedProcess(
+                argv, 0, f"{max(len(reports), 1)} Tests 0 Failures 0 Ignored\n", "")
+        assert argv[:2] == ["bash", "-lc"]
+        assert argv[4:] == [f"./test_{i}.out" for i in range(len(reports))]
+        return subprocess.CompletedProcess(argv, runner_rc, output, "")
+
+    monkeypatch.setattr(v, "_run_in_image", fake_run)
+    monkeypatch.setattr(v, "_tool_version", lambda *_: "Valgrind test")
+    profile = next(p for p in PROFILES if p.id == "valgrind")
+    return v._run_valgrind(bench, "img", profile, {"valgrind": workdir})
+
+
+@pytest.mark.parametrize("reports, expected", [
+    ([(0, 0), (0, 0)], PASSED),
+    ([(0, 0), (2, 99)], FAILED),
+    ([(0, 0), (None, 1)], TOOL_FAILED),
+    ([(0, 99)], TOOL_FAILED),
+    ([(0, 0), (0, 127)], TOOL_FAILED),
+])
+def test_valgrind_requires_complete_per_binary_reports(
+        tmp_path, monkeypatch, reports, expected):
+    """A clean earlier binary cannot conceal a later fault or memory violation."""
+    result = _valgrind_case(tmp_path, monkeypatch, reports)
+    assert result.status == expected, (result.status, result.reason, result.metrics)
+    assert result.metrics["binaries_expected"] == len(reports)
+    assert result.metrics["binaries_attempted"] == len(reports)
+    if expected == FAILED:
+        assert result.metrics["errors"] == 2
+        assert result.metrics["definitely_lost_bytes"] == 3
+
+
+def test_valgrind_runner_failure_cannot_claim_clean_memcheck(tmp_path, monkeypatch):
+    result = _valgrind_case(tmp_path, monkeypatch, [(0, 0)], runner_rc=125)
+    assert result.status == TOOL_FAILED
+    assert "125" in result.reason
+
+
+def test_valgrind_without_discovered_executable_is_not_a_pass(tmp_path, monkeypatch):
+    result = _valgrind_case(tmp_path, monkeypatch, [])
+    assert result.status == TOOL_FAILED
+    assert result.metrics["binaries_expected"] == 0
