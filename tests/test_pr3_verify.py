@@ -470,3 +470,29 @@ def test_unresolved_docker_image_id_refuses_authenticated_replay(tmp_path, monke
         run_verify(bench, selected, image_ref="img",
                    runner=_runner(), profile_runner=_profiles_fn({}))
     assert exc.value.code == Code.EVIDENCE_INVALID
+
+
+
+def test_selected_build_configuration_change_invalidates_frozen_replay(tmp_path):
+    """A changed -D macro is a different executable context, even with same SDD/C."""
+    from mtm.build_context import context_identity
+
+    bench, selected = _frozen_bench(tmp_path)
+    (bench / "project.yaml").write_text("schema_version: 1\nbench_id: x\n")
+    plan_file = bench / ".mtm" / "state" / "generate" / "plan.json"
+    plan = json.loads(plan_file.read_text())
+    plan["build_context_hash"] = context_identity(bench, {})
+    plan_file.write_text(json.dumps(plan))
+    # Positive: no change to the selected compilation context.
+    result = run_verify(bench, selected, image_ref="img",
+                        runner=_runner(), profile_runner=_profiles_fn({}))
+    assert result.status == "SUCCEEDED"
+    # Negative: no C or SDD source bytes changed, but effective -D now differs.
+    (bench / "project.yaml").write_text(
+        "schema_version: 1\nbench_id: x\n"
+        "build_context:\n  defines:\n    - FEATURE_SWITCH=1\n")
+    with pytest.raises(MtmError) as exc:
+        run_verify(bench, selected, image_ref="img",
+                   runner=_runner(), profile_runner=_profiles_fn({}))
+    assert exc.value.code == Code.SNAPSHOT_MISMATCH
+    assert "compilation context" in exc.value.message
