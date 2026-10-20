@@ -143,3 +143,57 @@ def _scopes_of(bench: Path) -> list[dict]:
     import yaml
 
     return yaml.safe_load((bench / "project.yaml").read_text())["scopes"]
+
+
+
+def test_conditional_mock_uses_selected_macro_and_native_ceedling_preprocessor(
+        tmp_path, product_image):
+    """DoD B/C: real Clang + CMock must compile a macro-selected interface.
+
+    Without FEATURE_SENSOR the selected header does not declare the mockable
+    symbol. The generator must preserve that context in both native tools.
+    """
+    from mtm.ceedling import run_ceedling
+    from mtm.gen import generate_suite
+    from mtm.inventory import build_inventory
+    from mtm.llm import LLMIdentity
+    from mtm.plan import parse_plan
+
+    bench = tmp_path / "conditional-mock"
+    bench.mkdir()
+    (bench / "include").mkdir()
+    (bench / "include" / "adapter.h").write_text(
+        "#ifndef ADAPTER_H\n#define ADAPTER_H\n"
+        "#ifdef FEATURE_SENSOR\nint platform_value(int x);\n#endif\n"
+        "#endif\n")
+    (bench / "sensor.c").write_text(
+        '#include "adapter.h"\n'
+        "int sensor_read(int x) { return platform_value(x); }\n")
+    (bench / "sdd.md").write_text(
+        "# SDD\n- **SEN-001**: sensor_read SHALL return the dependency's value.\n")
+    run_mtm_json("init", str(bench))
+    for name, kind in (("sensor.c", "source"), ("include", "include"),
+                       ("sdd.md", "spec")):
+        _, code = run_mtm_json("scope", "add", name, "--kind", kind, cwd=bench)
+        assert code == 0
+    scopes = _scopes_of(bench)
+    inventory = build_inventory(bench, scopes)
+    plan = parse_plan(json.dumps({"scenarios": [{
+        "id": "S1", "title": "macro mock", "function": "sensor_read",
+        "requirement_ids": ["SEN-001"], "mocks": ["platform_value"],
+        "cases": [{"args": [2], "expected": 7,
+                   "mocks": {"platform_value": {"ret": 7}}}],
+        "oracle": {"kind": "SPECIFIED", "statement": "returns dependency value",
+                   "rationale": "SEN-001"}}]}), inventory,
+        LLMIdentity(provider="test", model="t"))
+    context = {"include_dirs": ["include"], "defines": ["FEATURE_SENSOR=1"],
+               "mock_preprocessor": "mocks"}
+    out = generate_suite(bench, plan, inventory, image=product_image,
+                         build_context=context)
+    assert out.test_functions, out.limitations
+    assert out.types["declaration_sources"]["platform_value"] == "clang"
+    project = (bench / ".mtm" / "gen" / "project.yml").read_text()
+    assert ":use_test_preprocessor: :mocks" in project
+    assert "FEATURE_SENSOR=1" in project
+    run = run_ceedling(bench, image_ref=product_image)
+    assert run.ran and run.failed == 0 and run.total >= 1, run.diagnostics
