@@ -101,8 +101,18 @@ def test_same_frozen_suite_passes_correct_and_detects_the_faulty_sut(tmp_path, p
         data["snapshot_hash"] = new_hash
         write_json_atomic(path, data)
 
+    # The cloned faulty variant is a *different frozen SUT identity*, not a
+    # mutation replayed under the correct variant's authenticated fingerprint.
+    # Re-seal this independent fixture after the deliberate SUT substitution;
+    # test/oracle bytes stay identical, copied executable-source hashes do not.
+    plan_path = faulty / ".mtm" / "state" / "generate" / "plan.json"
+    plan_data = json.loads(plan_path.read_text())
+    plan_data["suite_hash"] = frozen_suite_hash(faulty)
+    write_json_atomic(plan_path, plan_data)
     assert (frozen_suite_hash(correct)["tests"]
             == frozen_suite_hash(faulty)["tests"]), "the frozen tests must be unchanged"
+    assert (frozen_suite_hash(correct)["sources"]
+            != frozen_suite_hash(faulty)["sources"]), "the SUT variant must differ"
 
     rf, code = run_mtm_json("--image-tag", tag, "verify", cwd=faulty)
     assert code == 10, rf  # a real finding
