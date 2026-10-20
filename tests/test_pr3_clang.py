@@ -419,3 +419,26 @@ def test_real_image_promotes_the_visibility_warning_to_a_probe_failure(
             (name, result.header_probe[name].diagnostic)
     assert result.header_probe["mtm_dep_benign.h"].ok is True
     assert result.header_probe["mtm_dep_ok.h"].ok is True
+
+
+def test_clang_absence_beats_inactive_textual_prototype(tmp_path):
+    """B2: a lexical '#if 0' prototype must never become semantic authority."""
+    from mtm.gen import _authoritative_declaration, DECL_NONE, DECL_FROM_HEADER
+    from mtm.inventory import Inventory
+
+    (tmp_path / "inactive.h").write_text(
+        "#if 0\nint inactive_dependency(unsigned v);\n#endif\n")
+    inventory = Inventory(snapshot_hash="fake",
+                          selected=[{"path": "inactive.h", "kind": "source"}])
+    real_clang = CTypeResolution(status=RESOLVED, clang_version="clang version 18",
+                                 functions=[])
+    decl, source, _ = _authoritative_declaration(
+        real_clang, "inactive_dependency", "", tmp_path, inventory)
+    assert decl == "" and source == DECL_NONE
+    # Test-only fake resolver preserves legacy generator syntax fixtures;
+    # the product image never identifies itself as "test-double".
+    fake_clang = CTypeResolution(status=RESOLVED, clang_version="test-double",
+                                 functions=[])
+    decl, source, _ = _authoritative_declaration(
+        fake_clang, "inactive_dependency", "", tmp_path, inventory)
+    assert source == DECL_FROM_HEADER and "inactive_dependency" in decl
