@@ -4,37 +4,37 @@ This note concerns the **development agent and the product's in-Docker LLM harne
 
 ## Product generation: no-agent direct API
 
-\`mtm generate\` uses one direct in-container HTTPS Chat Completions request to
-Scaleway (\`deepseek-v4.1-flash\` by default). The independent **development
+`mtm generate` uses one direct in-container HTTPS Chat Completions request to
+Scaleway (`deepseek-v4.1-flash` by default). The independent **development
 agent** on WSL may still use Pi, Claude Code or another harness; this is not
-installed or executed by the product. \`mtm verify\` remains token-free and
+installed or executed by the product. `mtm verify` remains token-free and
 network-disabled.
 
-\`\`\`mermaid
+```mermaid
 flowchart LR
   M["mtm generate: selected inventory"] --> D["In-image Python direct HTTP client"]
   D --> S["Scaleway Chat Completions / DeepSeek"]
   S --> P["Grounded JSON plan"]
   P --> C["Deterministic Ceedling/CMock generator"]
-\`\`\`
+```
 
 The product image retains its pinned Node base for now, but no longer installs
 Claude Code, CCR, a routing daemon or their configuration. Migrating the base
 image is a separate reproducibility change, not required for this provider
 replacement.
 
-The optional settings \`MTM_LLM_REASONING_EFFORT\` (default \`low\`; \`none\`,
-\`medium\`, \`high\` or \`default\`) and \`MTM_LLM_MAX_TOKENS\` (default 8192;
+The optional settings `MTM_LLM_REASONING_EFFORT` (default `low`; `none`,
+`medium`, `high` or `default`) and `MTM_LLM_MAX_TOKENS` (default 8192;
 256–16384) are read by the in-container worker. They may be supplied through
 the credentials env file or explicitly exported in the calling shell. The
-provider calls **Chat Completions**, not \`/responses\`, requests JSON-object
+provider calls **Chat Completions**, not `/responses`, requests JSON-object
 output, refuses truncation and does not automatically retry failed requests.
 The upstream token counters, when present, are recorded in the generated
 plan/provider evidence; missing counters are not estimated.
 
-\`SCW_BASE_URL\` must be an HTTPS endpoint at API version root (e.g.
-\`https://api.scaleway.ai/v1\`) or the full \`/chat/completions\` path. The
-existing \`scaleway/model\` CLI syntax is accepted. Never put keys in the
+`SCW_BASE_URL` must be an HTTPS endpoint at API version root (e.g.
+`https://api.scaleway.ai/v1`) or the full `/chat/completions` path. The
+existing `scaleway/model` CLI syntax is accepted. Never put keys in the
 repository or image.
 
 
