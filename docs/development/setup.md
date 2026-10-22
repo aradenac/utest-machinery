@@ -2,24 +2,47 @@
 
 This note concerns the **development agent and the product's in-Docker LLM harness**, not a new user-facing installation requirement.
 
-## Expected LLM chain
+## Product generation: no-agent direct API
 
-```mermaid
+\`mtm generate\` uses one direct in-container HTTPS Chat Completions request to
+Scaleway (\`deepseek-v4.1-flash\` by default). The independent **development
+agent** on WSL may still use Pi, Claude Code or another harness; this is not
+installed or executed by the product. \`mtm verify\` remains token-free and
+network-disabled.
+
+\`\`\`mermaid
 flowchart LR
-  H["Claude Code on development host"] --> R["CCR"] --> M["DeepSeek V4.1 Flash"]
-  D["In-container Claude Code (noninteractive)"] --> C["In-container CCR"] --> M
-  P["Host/CI credential source"] -->|ephemeral, protected| C
-```
+  M["mtm generate: selected inventory"] --> D["In-image Python direct HTTP client"]
+  D --> S["Scaleway Chat Completions / DeepSeek"]
+  S --> P["Grounded JSON plan"]
+  P --> C["Deterministic Ceedling/CMock generator"]
+\`\`\`
 
-The initial stack is **Claude Code + `@musistudio/claude-code-router` (CCR) + `deepseek-v4.1-flash`**. Match the **working host configuration**, not its home-directory files blindly. The host setup previously used Claude Code `2.1.296`, CCR `3.1.3`, and `SCW_BASE_URL` / `SCW_BEARER_TOKEN` for the upstream gateway; **inspect and pin the currently working versions and actual provider/model route before building the image**. Those versions are starting references, not a declaration that they are still installed or compatible.
+The product image retains its pinned Node base for now, but no longer installs
+Claude Code, CCR, a routing daemon or their configuration. Migrating the base
+image is a separate reproducibility change, not required for this provider
+replacement.
 
-The image contains Node, Claude Code, CCR, a sanitized router configuration template and the other free verification tools. It must run the router **inside** the container: `localhost:3456` on the WSL host is not the container's localhost. Test a real request inside the image before claiming parity. Product `verify` is network-disabled and needs no token; only `generate` and `interpret` call the LLM.
+The optional settings \`MTM_LLM_REASONING_EFFORT\` (default \`low\`; \`none\`,
+\`medium\`, \`high\` or \`default\`) and \`MTM_LLM_MAX_TOKENS\` (default 8192;
+256–16384) are read by the in-container worker. They may be supplied through
+the credentials env file or explicitly exported in the calling shell. The
+provider calls **Chat Completions**, not \`/responses\`, requests JSON-object
+output, refuses truncation and does not automatically retry failed requests.
+The upstream token counters, when present, are recorded in the generated
+plan/provider evidence; missing counters are not estimated.
+
+\`SCW_BASE_URL\` must be an HTTPS endpoint at API version root (e.g.
+\`https://api.scaleway.ai/v1\`) or the full \`/chat/completions\` path. The
+existing \`scaleway/model\` CLI syntax is accepted. Never put keys in the
+repository or image.
+
 
 ## Credentials: locally
 
-1. Preserve your working `SCW_BASE_URL` and `SCW_BEARER_TOKEN` **outside the repository**, e.g. environment provided by your shell or a protected `~/.config/utest-machinery/credentials.env` (mode `0600`). Do **not** copy `~/.claude`, `~/.claude-code-router`, OAuth caches or provider keys into the image or Git.
-2. Give the Docker **LLM operation only** its required values using a narrowly scoped `--env-file` or runtime secret mount (never `ARG`, `ENV` in Dockerfile, `COPY` of credentials or verbose logs). Sanitized nonsecret CCR route configuration may be versioned in product templates.
-3. Verify reachability/authentication and correct DeepSeek model routing using a short noninteractive Claude Code call from *inside* Docker, with an explicit timeout and budget. Fail `LLM_AUTH`, `LLM_NETWORK` or `LLM_CONFIG` clearly; do not quietly use another model.
+1. Preserve your working `SCW_BASE_URL` and `SCW_BEARER_TOKEN` **outside the repository**, e.g. environment provided by your shell or a protected `~/.config/utest-machinery/credentials.env` (mode `0600`). Do **not** copy developer-agent home directories, OAuth caches or provider keys into the image or Git.
+2. Give the Docker **LLM operation only** its required values using a narrowly scoped `--env-file` or runtime secret mount (never `ARG`, `ENV` in Dockerfile, `COPY` of credentials or verbose logs). No router configuration is required.
+3. Verify reachability/authentication and the requested model using the direct in-image worker or a bounded real `mtm generate --provider scaleway` call. Fail `LLM_AUTH`, `LLM_NETWORK` or `LLM_CONFIG` clearly; do not quietly use another model.
 4. The optional developer convenience target `make credentials` **may be implemented** to check existence/permissions of local credential sources, never to echo/save secrets. It is **not** a prerequisite for CI or a new public `mtm` command.
 
 ## Credentials: GitHub Actions
