@@ -1,7 +1,7 @@
 """Single-shot, no-agent Scaleway Chat Completions worker.
 
 Run ONLY in the transient model-enabled Docker container, never in offline
-\`mtm verify\`. Reads the selected-input planning prompt from stdin, performs
+`mtm verify`. Reads the selected-input planning prompt from stdin, performs
 one bounded HTTPS request, and emits a JSON envelope containing the model's
 text and provider-reported usage. No tools, routing daemon, model fallback,
 workspace mount, or credential logging.
