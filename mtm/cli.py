@@ -86,9 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     wstatus.add_argument("--run-id", required=True, help="the run id to inspect")
 
     generate = sub.add_parser("generate", help="assess selected inputs, plan and generate a unit-test bench")
-    generate.add_argument("--provider", default="auto", choices=["auto", "mock", "claude-code"],
-                          help="generation model provider: 'auto'/'claude-code' run the in-image "
-                               "model (requires the image and credentials); 'mock' explicitly uses "
+    generate.add_argument("--provider", default="auto", choices=["auto", "mock", "scaleway"],
+                          help="generation model provider: 'auto'/'scaleway' use the in-image "
+                               "direct API worker (requires image and credentials); 'mock' explicitly uses "
                                "a recorded fixture response, offline and token-free — it is never "
                                "selected implicitly")
     generate.add_argument("--model", default="scaleway/deepseek-v4.1-flash",
