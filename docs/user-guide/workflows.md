@@ -78,19 +78,19 @@ Scope changes never delete historical evidence. Adding an input triggers discove
 
 ### Direct model inference (no agent harness)
 
-\`mtm generate --provider scaleway\` (or \`--provider auto\`) performs one
+`mtm generate --provider scaleway` (or `--provider auto`) performs one
 bounded direct Chat Completions request inside the product image. It neither
 runs Claude Code/CCR nor mounts source files into the inference container.
-\`--provider mock\` remains an explicit token-free recorded-fixture mode; it
+`--provider mock` remains an explicit token-free recorded-fixture mode; it
 is never selected silently after a real-provider failure. Use
-\`--model scaleway/deepseek-v4.1-flash\` to select the known model.
+`--model scaleway/deepseek-v4.1-flash` to select the known model.
 
-Configure \`SCW_BASE_URL\` and \`SCW_BEARER_TOKEN\` in the existing protected
-user credentials file. Optional \`MTM_LLM_REASONING_EFFORT=low\` and
-\`MTM_LLM_MAX_TOKENS=8192\` tune the inference budget. The plan's model
+Configure `SCW_BASE_URL` and `SCW_BEARER_TOKEN` in the existing protected
+user credentials file. Optional `MTM_LLM_REASONING_EFFORT=low` and
+`MTM_LLM_MAX_TOKENS=8192` tune the inference budget. The plan's model
 metadata carries provider-reported token usage when available; none is
 fabricated. Upstream transient failures and truncated responses do not turn
-into passing tests. The ensuing \`mtm verify\` does not use an LLM.
+into passing tests. The ensuing `mtm verify` does not use an LLM.
 
 
 ### Selected host compilation context (milestone 3)
