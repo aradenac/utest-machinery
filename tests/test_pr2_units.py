@@ -187,14 +187,14 @@ def test_make_provider_auto_does_not_silently_fall_back_to_recordings(tmp_path):
     assert "mtm install" in (exc.value.action or "")
 
 
-def test_make_provider_claude_code_requires_credentials(tmp_path):
+def test_make_provider_scaleway_requires_credentials(tmp_path):
     # With a nonexistent image, the image check fires first (LLM_CONFIG). To
     # exercise the credential branch, point at an image that exists.
     from mtm.docker import image_exists
     if not image_exists("img:1"):
         pytest.skip("no local image named img:1 to pass the image-existence check")
     with pytest.raises(MtmError) as exc:
-        make_provider("claude-code", image_ref="img:1", credentials_file=tmp_path / "absent.env")
+        make_provider("scaleway", image_ref="img:1", credentials_file=tmp_path / "absent.env")
     assert exc.value.code == "LLM_AUTH"
 
 
