@@ -26,7 +26,7 @@ The `/verify-feature` subagent supports **PRE_PR** (current milestone's contract
 | --- | --- | --- |
 | All PRs | Python/C syntax and basic unit tests, contract/schema/Markdown checks, selected input preservation, critical CLI smoke and one negative error path | All changed feature cases, failure/recovery cases, native reports and previous smoke regressions |
 | PR 1: control | CLI init/status/doctor, simple headless DAG result/error | WSL installation, Docker lifecycle, interruption and recovery, optional diagram view |
-| PR 2: generation | Recorded/mock LLM response → one reproducible generated-test smoke, no secret | Real Claude Code + CCR + DeepSeek request inside Docker; all relevant functional fixtures, mocks, oracle gaps |
+| PR 2: generation | Recorded/mock LLM response → one reproducible generated-test smoke, no secret | Real direct Scaleway Chat Completions + DeepSeek request inside Docker; all relevant functional fixtures, mocks, oracle gaps |
 | PR 3: verification | Offline frozen `verify` small fixture + one sanitizer/coverage check | All applicable Clang/GCC/LLVM/Valgrind profiles; intentionally faulty fixture |
 | PR 4: advanced tests | Short bounded mutation/fuzz regression fixtures | Full local seeded mutation/fuzz corpus and replay evidence |
 | PR 5: reports | Report links, run JSON, status/error mapping | Ambiguous SDD, defect, partial and tool-error findings plus LLM recommendation quality |
