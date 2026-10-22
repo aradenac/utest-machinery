@@ -13,7 +13,7 @@ flowchart TB
   subgraph CONTAINER["Reusable generic Docker image"]
     RUNNER["Core API and workflow runner"]
     DAG["Headless Dagu candidate"]
-    AGENT["Claude Code + CCR + DeepSeek V4.1 Flash"]
+    AGENT["Direct Scaleway Chat API + DeepSeek V4.1 Flash"]
     TEST["Native C test engines"]
     REPORT["Evidence and report engine"]
     RUNNER --> DAG
@@ -122,7 +122,7 @@ Requirements below express **observable behavior**; schemas are specified in [da
 | SYS-033 | A frozen re-execution SHALL reject unavailable or hash-mismatched original selected inputs; historical viewing SHALL remain available. |
 | SYS-034 | Mutations SHALL preserve an operator configuration, per-mutant identity/status and native reports; invalid/equivalent mutants SHALL be accounted for separately. |
 | SYS-035 | Fuzz campaigns SHALL record corpus, seeds, budgets, properties and replayable reproductions for reported failures. |
-| SYS-036 | The in-image harness SHALL initially run Claude Code through CCR to DeepSeek V4.1 Flash, matching the validated host route without copying user secrets into the image. |
+| SYS-036 | The in-image generation provider SHALL call Scaleway Chat Completions directly, without an agent harness or routing daemon; use ephemeral credentials, bounded request/output limits, explicit model identity and honest upstream token usage when reported. Verification SHALL remain offline and without any model calls. |
 | SYS-037 | All bundled testing/workflow tools SHALL be free to use internally, with reproducible versions and recorded license information. |
 
 ## Technical boundaries
