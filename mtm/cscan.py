@@ -180,5 +180,59 @@ def scan_prototypes(path: Path) -> list[tuple[str, str]]:
     return found
 
 
+#: Alias-name patterns for an **opaque** declarator, where the trailing-identifier
+#: extraction cannot reach the name: a *function pointer* ``typedef void (*cb)(int);``
+#: (``decl`` ends in ``)``) and a *function type* / *array* ``typedef int Func(int);``
+#: / ``typedef int Arr[4];`` (the name is the identifier before the first
+#: ``(``/``[``). Used only to *locate* a verbatim statement for the no-includable-
+#: header fallback (:func:`typedef_statement_map`); it makes no type claim.
+_FNPTR_ALIAS_RE = re.compile(r"\(\s*\*\s*(?P<name>[A-Za-z_]\w*)\s*\)\s*\(")
+_ARRAY_ALIAS_RE = re.compile(r"(?P<name>[A-Za-z_]\w*)\s*\[")
+
+#: Every `typedef ...;` statement (including an inline struct/union body), so a
+#: declaration that *uses* an alias can carry that alias's own definition. The
+#: statement may follow a previous one on the same line. **Lexical text only**:
+#: the semantic type/depth/record facts come from libclang (``mtm.ctypes_clang``),
+#: never from this scanner.
+_TYPEDEF_STMT_RE = re.compile(
+    r"(?m)(?:^[ \t]*|(?<=[;}])[ \t]*)typedef\b[^;{}]*(?:\{[^}]*\}[^;{}]*)?;")
+
+
+def typedef_statement_map(text: str) -> dict[str, str]:
+    """Map each alias *name* in *text* to the verbatim statement defining it.
+
+    A **lexical text** helper (not a type resolution): used to make a private
+    interface header self-sufficient for an alias that is defined in a `.c` with
+    no includable header, so its defining statement can be carried verbatim. The
+    alias's canonical base/depth/record identity still comes from libclang.
+    """
+    clean = strip_comments_and_strings(text)
+    result: dict[str, str] = {}
+    for m in _TYPEDEF_STMT_RE.finditer(clean):
+        statement = m.group(0).strip()
+        # An inline struct/union body: the alias is the identifier after ``}``.
+        decl = re.sub(r"^\s*typedef\b", "", statement).rstrip(";").strip()
+        body = re.search(r"\}(?P<rest>[^;]*)$", decl)
+        if body:
+            name_m = re.search(r"([A-Za-z_]\w*)\s*$", body.group("rest"))
+            if name_m:
+                result.setdefault(name_m.group(1), statement)
+            continue
+        name = None
+        if "(" in decl:
+            fn = _FNPTR_ALIAS_RE.search(decl)
+            name = fn.group("name") if fn else None
+        if name is None and "[" in decl:
+            arr = _ARRAY_ALIAS_RE.search(decl)
+            name = arr.group("name") if arr else None
+        if name is None:
+            tail = re.search(r"([A-Za-z_]\w*)\s*$", decl)
+            name = tail.group(1) if tail else None
+        if name:
+            result.setdefault(name, statement)
+    return result
+
+
+
 def _line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1

@@ -29,6 +29,7 @@ from .commands import (
     cmd_scope_list,
     cmd_scope_remove,
     cmd_status,
+    cmd_verify,
     cmd_workflow_run,
     cmd_workflow_status,
     cmd_workflow_view,
@@ -85,9 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     wstatus.add_argument("--run-id", required=True, help="the run id to inspect")
 
     generate = sub.add_parser("generate", help="assess selected inputs, plan and generate a unit-test bench")
-    generate.add_argument("--provider", default="auto", choices=["auto", "mock", "claude-code"],
-                          help="generation model provider: 'auto'/'claude-code' run the in-image "
-                               "model (requires the image and credentials); 'mock' explicitly uses "
+    generate.add_argument("--provider", default="auto", choices=["auto", "mock", "scaleway"],
+                          help="generation model provider: 'auto'/'scaleway' use the in-image "
+                               "direct API worker (requires image and credentials); 'mock' explicitly uses "
                                "a recorded fixture response, offline and token-free — it is never "
                                "selected implicitly")
     generate.add_argument("--model", default="scaleway/deepseek-v4.1-flash",
@@ -97,8 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("plan", help="view the verification plan and planned vs generated scenarios")
 
+    verify = sub.add_parser(
+        "verify", help="replay the frozen suite offline across profiles (no LLM)")
+    verify.add_argument("--run-id", default=None,
+                        help="stable id for this run's evidence (default: timestamped)")
+    verify.add_argument("--force", action="store_true",
+                        help="run even if the selected inputs changed since the plan "
+                             "was frozen (NOT recommended: the replay may not match them)")
+
     for name, help_text in (
-        ("verify", "run the frozen suite offline (later milestone)"),
         ("interpret", "interpret evidence with the LLM (later milestone)"),
         ("report", "open the results report (later milestone)"),
     ):
@@ -120,6 +128,7 @@ DISPATCH: dict[str, Callable[[Any, Context], dict[str, Any]]] = {
     "workflow-status": cmd_workflow_status,
     "generate": cmd_generate,
     "plan": cmd_plan,
+    "verify": cmd_verify,
 }
 
 
@@ -171,6 +180,21 @@ def _print_human(record: dict[str, Any], command: str) -> None:
     for finding in record.get("findings", []):
         print(f"  ! finding [{finding.get('category')}] {finding.get('test')}: "
               f"{finding.get('observed', '')} (expected: {finding.get('expected_behavior', '')})")
+    # 'verify': render each profile's honest status, not only the JSON.
+    for profile in record.get("profiles", []):
+        metrics = profile.get("metrics") or {}
+        detail = ""
+        if metrics.get("tests") is not None:
+            detail = (f" tests={metrics.get('tests')} failures={metrics.get('failures')}"
+                      f" ignored={metrics.get('ignored')}")
+        elif metrics:
+            detail = " " + ", ".join(
+                f"{k}={metrics[k].get('percent') if isinstance(metrics.get(k), dict) else metrics[k]}"
+                for k in sorted(metrics) if k != "per_file")
+        print(f"  [{profile.get('status')}] {profile.get('id')}: "
+              f"{profile.get('reason', '')}{detail}")
+    if record.get("run_id"):
+        print(f"  run: {record['run_id']}  evidence: {record.get('evidence_dir', '')}")
     if record.get("feasibility_counts"):
         print(f"  feasibility: {record['feasibility_counts']}")
     provider = record.get("provider")

@@ -12,13 +12,14 @@ Full licence texts are shipped inside the image under `/usr/share/doc/<component
 | --- | --- | --- | --- | --- |
 | Node.js base image | `node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | various (MIT, BSD, GPL for Debian components) | image base | Docker Hub official |
 | Dagu | `v2.20.1`, tar.gz sha256 `0d5c1612cd842931fe6d4e598fc2e43fb912a94122e571c62a8f73691ea49837` | **GPL-3.0-only** | image (separate binary) | github.com/dagu-org/dagu |
-| Claude Code | `2.1.302` (npm `@anthropic-ai/claude-code`) | Anthropic commercial terms (see shipped LICENSE) | image (separate CLI) | registry.npmjs.org |
-| Claude Code Router (CCR) | `3.1.3` (npm `@musistudio/claude-code-router`) | MIT | image (separate CLI) | registry.npmjs.org |
 | Ruby | `3.1` (distro `ruby` + `ruby-dev`) | Ruby / BSD-2-Clause | image (runtime for Ceedling) | debian package |
 | Ceedling | `1.1.10` (gem) | MIT | image (separate CLI; drives the generated functional suite) | rubygems.org |
 | Unity | `2.7.2` (vendored **by Ceedling**, not by this repo) | MIT | image (compiled into the generated suite only) | github.com/ThrowTheSwitch/Unity |
 | CMock | `2.7.2` (vendored **by Ceedling**, not by this repo) | MIT | image (generates the mocked dependencies for the generated suite) | github.com/ThrowTheSwitch/CMock |
 | GCC / libc6-dev / make | distro packages | GPL-3.0-or-later (GCC runtime exception) | image (C toolchain used by Ceedling) | debian package |
+| Clang / LLVM | `18.1.8` (distro `clang-18`, `llvm-18`, `llvm-18-tools`) | Apache-2.0 WITH LLVM-exception | image (compiler for the coverage/MC-DC, ASan/UBSan and `-O2` profiles) | apt.llvm.org |
+| libclang | `18.1.8` (distro `libclang-18-dev`, `python3-clang-18`) | Apache-2.0 WITH LLVM-exception | image (C API + Python bindings; the semantic reader for C declarations/types in `mtm/ctypes_clang.py`) | apt.llvm.org |
+| Valgrind | `3.19.0` (distro package) | GPL-2.0-or-later | image (Memcheck profile) | debian package |
 | Python | `3.11+` (host floor), `3.12` in image | PSF-2.0 | host CLI + image | debian package |
 | PyYAML | `>=6.0` | MIT | host CLI + image | PyPI |
 | jsonschema | `>=4.0` | MIT | host CLI + image | PyPI |
@@ -38,5 +39,15 @@ vendored inside the image by Ceedling, not stored in this repository.
 
 ## Not yet bundled (later milestones)
 
-Clang/LLVM, sanitizers, Mull, libFuzzer, Valgrind (PR 3/4). Each addition
-updates this SBOM in the same PR.
+Mull and libFuzzer (PR 4). Each addition updates this SBOM in the same PR.
+
+Clang/LLVM and Valgrind are bundled as of PR 3 (see the rows above): the offline
+`mtm verify` profiles compile with `clang-18` (coverage incl. MC/DC, ASan/UBSan and
+`-O2` portability) and run the built suite under Valgrind Memcheck. They are
+invoked as separate executables and never linked into the product code.
+
+`libclang-18-dev` + `python3-clang-18` are bundled as of PR 3 lot A: they provide
+the C API and its Python bindings that `mtm/ctypes_clang.py` uses as the sole
+semantic authority for C declarations and types (owner decision 0017). They are
+loaded at run time by the in-image driver (never linked into the product binary)
+and supersede the earlier regex/include-guard type heuristics.

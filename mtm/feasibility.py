@@ -71,7 +71,7 @@ def _missing_header(diagnostics: str) -> str | None:
 
 
 def assess_unit(unit: Unit, unit_dir: Path, include_dirs: list[Path],
-                compiler: HostCompiler) -> Feasibility:
+                compiler: HostCompiler, context=None) -> Feasibility:
     """Classify one unit from a real compile attempt of the original source."""
     if not compiler.available:
         return Feasibility(
@@ -89,7 +89,12 @@ def assess_unit(unit: Unit, unit_dir: Path, include_dirs: list[Path],
         source = unit_dir / Path(unit.path).name
 
     includes = _unique_dirs([unit_dir, *include_dirs])
-    result: CompileResult = compiler.syntax_check(source, includes)
+    if context is not None and (context.defines or context.args):
+        flags = [*(f"-D{d}" for d in context.defines), *context.args]
+        result: CompileResult = compiler.syntax_check(source, includes,
+                                                      extra_flags=flags)
+    else:
+        result = compiler.syntax_check(source, includes)
     diagnostics = result.diagnostics
 
     if result.ok:
@@ -148,7 +153,8 @@ def assess_unit(unit: Unit, unit_dir: Path, include_dirs: list[Path],
 
 
 def assess_inventory(bench_root: Path, inventory: Inventory,
-                     compiler: HostCompiler | None = None) -> list[Feasibility]:
+                     compiler: HostCompiler | None = None,
+                     context=None) -> list[Feasibility]:
     """Assess every unit in an inventory. Deterministic, no LLM."""
     compiler = compiler or HostCompiler()
     selected_files = [bench_root / s["path"] for s in inventory.selected
@@ -157,12 +163,14 @@ def assess_inventory(bench_root: Path, inventory: Inventory,
     for entry in inventory.selected:
         candidate = bench_root / entry["path"]
         dirs.append(candidate if candidate.is_dir() else candidate.parent)
-    include_dirs = _unique_dirs(dirs + selected_files)
+    include_dirs = _unique_dirs(dirs + selected_files
+                                + (list(context.include_dirs) if context else []))
 
     verdicts: list[Feasibility] = []
     for unit in inventory.units:
         unit_dir = (bench_root / unit.path).parent
-        verdicts.append(assess_unit(unit, unit_dir, include_dirs, compiler))
+        verdicts.append(assess_unit(unit, unit_dir, include_dirs, compiler,
+                                    context=context))
     return verdicts
 
 

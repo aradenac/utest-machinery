@@ -34,8 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import ctypes_clang
 from .ccompile import HostCompiler
 from .ceedling import CeedlingRun, docker_fault_reason, run_ceedling
+from .errors import EXIT_TOOL_FAILURE
 from .feasibility import BLOCKED, assess_inventory, summarize
 from .gen import generate_suite
 from .inventory import build_inventory
@@ -100,11 +102,15 @@ def run_generate(
     dry_run: bool = False,
     image: str = "utest-machinery/mtm:1.0.0",
     runner=run_ceedling,
+    resolve=None,
+    build_context: dict[str, Any] | None = None,
 ) -> GenerateResult:
     """Run the full generation pipeline for a bench.
 
     *runner* is the Ceedling executor (injectable so tests can drive the
     classification logic without Docker); it defaults to the real in-image run.
+    *resolve* is the libclang adapter seam (injectable for the same reason);
+    it defaults to :func:`mtm.ctypes_clang.resolve` running in *image*.
     """
     state = _state_dir(bench_root)
     # Derived artefacts are cleared before every run, so a run that stops early
@@ -115,8 +121,13 @@ def run_generate(
     inventory = build_inventory(bench_root, selected)
     inventory_path = write_json_atomic(state / INVENTORY_FILE, inventory.to_dict())
 
+    from .build_context import resolve_build_context
+    from .inventory import resolve_scope_paths
+    compiler_context = resolve_build_context(
+        bench_root, build_context, resolve_scope_paths(bench_root, selected))
     compiler = compiler or HostCompiler()
-    verdicts = assess_inventory(bench_root, inventory, compiler)
+    verdicts = assess_inventory(bench_root, inventory, compiler,
+                                context=compiler_context)
     feasibility_path = write_json_atomic(
         state / FEASIBILITY_FILE,
         {"units": [v.to_dict() for v in verdicts], "counts": summarize(verdicts)},
@@ -141,6 +152,15 @@ def run_generate(
     prompt = build_prompt(inventory)
     response = provider.complete(prompt)
     plan: Plan = parse_plan(response, inventory, provider.identity)
+    # Record actual upstream usage, without estimating absent token counters.
+    usage = getattr(provider, "usage", None)
+    if isinstance(usage, dict) and usage:
+        plan.model["usage"] = dict(usage)
+    returned_model = getattr(provider, "returned_model", "")
+    if isinstance(returned_model, str) and returned_model:
+        plan.model["returned_model"] = returned_model
+    from .build_context import context_identity
+    plan.build_context_hash = context_identity(bench_root, build_context)
     plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
 
     provider_record = _provider_record(provider)
@@ -149,9 +169,36 @@ def run_generate(
     # break the build of the independent, feasible units. It stays visible in
     # the feasibility report and the denominator (R03).
     excluded = {v.unit_id for v in verdicts if v.status == BLOCKED}
-    generated = generate_suite(bench_root, plan, inventory, excluded_units=excluded)
+    # The image ref is threaded through so the libclang type/declaration adapter
+    # resolves the selected C context (the semantic authority, owner decision
+    # 0017). A resolution tool fault is a run-level tool fault, not a SUT defect.
+    generated = generate_suite(bench_root, plan, inventory, excluded_units=excluded,
+                               image=image, resolve=resolve,
+                               build_context=build_context)
     suite_manifest = generated.to_dict()
     suite_path = write_json_atomic(state / SUITE_FILE, suite_manifest)
+
+    # Compute a fingerprint of the generated suite so that offline verify can
+    # authenticate the replay target against the plan (Invariant 1).
+    from .qualify import execution_image_identity, frozen_suite_hash
+    plan.suite_hash = frozen_suite_hash(bench_root)
+    plan.suite_hash["image"] = execution_image_identity(image)
+    # Rewrite the plan now that it carries the suite fingerprint.
+    plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
+
+    types_status = suite_manifest.get("types", {}).get("status")
+    if types_status == ctypes_clang.TOOL_FAILED:
+        # The C type resolver (libclang/docker/binding) could not be used at all:
+        # no declaration can be typed faithfully, so this is a tool fault of the
+        # *operation* — exit 30, never a SUT defect or a functional result (I4).
+        return GenerateResult(
+            status="TOOL_FAILURE", exit_code=EXIT_TOOL_FAILURE, inventory=inventory_path,
+            feasibility=feasibility, plan=plan_path, suite=suite_manifest,
+            smoke={"built": False, "ran": False,
+                   "reason": suite_manifest.get("types", {}).get("message")
+                   or "the C type resolver could not be used"},
+            counts=counts, model=plan.model, provider=provider_record,
+        )
 
     limitations = suite_manifest.get("limitations", [])
     if not generated.test_functions:
@@ -199,10 +246,14 @@ def _provider_record(provider: LLMProvider) -> dict[str, Any]:
     identity = provider.identity
     mode = {
         "mock": "recorded fixture (offline, token-free)",
-        "claude-code": "in-image Claude Code + CCR (live model)",
+        "scaleway": "in-image direct Scaleway Chat Completions (live model)",
     }.get(identity.provider, identity.provider)
-    return {"name": identity.provider, "model": identity.model, "mode": mode,
-            "prompt_version": identity.prompt_version, "called": True}
+    result = {"name": identity.provider, "model": identity.model, "mode": mode,
+              "prompt_version": identity.prompt_version, "called": True}
+    usage = getattr(provider, "usage", None)
+    if isinstance(usage, dict) and usage:
+        result["usage"] = dict(usage)
+    return result
 
 
 def _run_and_classify(bench_root: Path, plan: Plan, generated, *,

@@ -136,12 +136,24 @@ def test_doctor_flags_world_readable_credentials(bench: Path, tmp_path: Path):
     assert "600" in entry["action"]
 
 
-@pytest.mark.parametrize("command", ["verify", "interpret", "report"])
+@pytest.mark.parametrize("command", ["interpret", "report"])
 def test_unimplemented_commands_are_explicit(command: str, bench: Path):
     record, code = run_mtm_json(command, cwd=bench)
     assert code == 40
     assert record["code"] == "NOT_IMPLEMENTED"
     assert "later milestone" in record["action"] or "PR" in record["action"]
+
+
+def test_verify_on_an_empty_bench_is_an_input_error(bench: Path):
+    """`verify` is implemented in PR 3: with no frozen plan it is an input error.
+
+    It must NOT report NOT_IMPLEMENTED, and it must not run anything — there is no
+    plan to replay, so the honest outcome is a missing-input (exit 40) fault.
+    """
+    record, code = run_mtm_json("verify", cwd=bench)
+    assert code == 40
+    assert record["code"] == "INPUT_MISSING"
+    assert record["stage"] == "verify"
 
 
 def test_bench_flag_switches_directory(bench: Path, tmp_path: Path):

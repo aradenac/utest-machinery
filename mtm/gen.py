@@ -21,8 +21,9 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from . import cscan, ctypes_clang
 from .ceedling import REVISION_DIRNAME
 from .inventory import Inventory, resolve_scope_paths
 from .plan import Plan, Scenario
@@ -57,6 +58,124 @@ SOURCE_DIRNAME = "src"
 #: Where the generated Unity test files live (Ceedling ``:paths: :test``).
 TEST_DIRNAME = "test"
 
+#: Resolution status used when no clang resolver is available (offline unit
+#: tests, or a caller that does not thread an image). Distinct from
+#: ``ctypes_clang.TOOL_FAILED`` (a real tool fault) so the generator can tell "we
+#: could not ask" from "asking failed".
+UNRESOLVED = "UNRESOLVED"
+
+
+#: clang record ``kind``s whose pointee is a true **aggregate**: a struct, union
+#: or class. An ``ENUM`` is deliberately absent — an enumeration is a *scalar* C
+#: type (``e_t x = (e_t)7;`` and ``TEST_ASSERT_EQUAL`` compile), so a scalar for
+#: it is materialisable and must not be refused. Conflating ``ENUM`` with
+#: ``RECORD``/``UNION`` (clang groups all three under ``record``) silently shrank
+#: the verified domain to every non-enum API — the regression this predicate
+#: exists to prevent.
+_AGGREGATE_RECORD_KINDS = frozenset({"RECORD", "UNION"})
+
+
+def _is_aggregate_record(record: Any) -> bool:
+    """True when clang's *record* fact names a struct/union (not an enum).
+
+    The single source of the aggregate/``record`` boundary: a struct/union pointee
+    cannot be initialised from a scalar, whereas an enum pointee can. Consumed by
+    both :func:`_chart_type_map` (the ``Typedef.aggregate`` marker) and the
+    ``aggregates`` name set ``is_aggregate_base`` tests, so the two refusal paths
+    cannot drift apart again.
+    """
+    return bool(record) and record.get("kind") in _AGGREGATE_RECORD_KINDS
+
+
+@dataclass
+class Typedef:
+    """One resolved C alias, charted from libclang facts (``_chart_type_map``).
+
+    ``base`` is the canonical pointee base and ``depth`` its ``*`` count;
+    ``opaque`` marks a function-pointer/array shape this generator cannot render;
+    ``aggregate`` marks an alias whose ultimate base is a **struct/union** (a
+    scalar cannot initialise a pointer to it). An enum alias is *not* aggregate: an
+    enumeration is a scalar type, so a scalar (or enum identifier) for it is
+    materialisable. Both are clang's identity facts, replacing the retired regex
+    scanner's textual guesses on this path.
+    """
+
+    base: str
+    depth: int
+    opaque: bool = False
+    aggregate: bool = False
+
+
+def _safe_read(path: Path) -> str:
+    """Read *path* as text, tolerating a non-UTF-8 byte (the C inputs are external)."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _chart_type_map(facts: Any) -> dict[str, Typedef]:
+    """Chart the generator's ``typedefs`` map from clang's authoritative facts.
+
+    Each alias clang resolved becomes a :class:`Typedef` (base, depth, ``opaque``,
+    ``aggregate``) — the value type ``split_params``/``_resolve_typedef``/
+    ``mock_controls``/``_unsupported_param_shape`` consume unchanged. This is where
+    clang **replaces** the regex's semantic claims: the
+    depth of ``typedef int *P; P *pp`` is clang's 2, not a textual guess.
+
+    ``aggregate`` is set when the alias's ultimate base names a **struct/union**
+    (``record.kind`` in ``RECORD``/``UNION``) or a function/array shape
+    (``opaque``) — the *identity* clang reports, not a ``struct``-in-braces text
+    match. An ``ENUM`` base is a scalar, so its alias is **not** aggregate (see
+    :func:`_is_aggregate_record`). This keeps the aggregate-refusal family
+    (a scalar for a struct/union pointee) and the chained-alias case covered
+    without blanket-refusing every enum-typed parameter.
+    """
+    charted: dict[str, Typedef] = {}
+    aliases = getattr(facts, "aliases", None) or {}
+    for name, fact in aliases.items():
+        charted[name] = Typedef(
+            base=fact.base,
+            depth=fact.depth,
+            opaque=fact.opaque,
+            aggregate=_is_aggregate_record(fact.record) or fact.opaque,
+        )
+    return charted
+
+
+def _resolve_type_map(
+    bench_root: Path, inputs: list[Path], *,
+    image: str | None = None,
+    include_dirs: list[Path] | None = None,
+    resolve: Callable[..., Any] | None = None,
+    resolver: Any = None,
+    probe_headers: dict[str, str] | None = None,
+    defines: list[str] | None = None,
+    args: list[str] | None = None,
+) -> Any:
+    """Resolve the selected inputs with the clang adapter (fail-soft).
+
+    Never raises: the adapter already maps a resolution/tool failure to a typed
+    status, and any unexpected exception here is caught and folded into a
+    ``TOOL_FAILED`` fact set, so a broken resolver can never abort generation with
+    an uncaught error (I4). *resolve* is the injectable seam (defaults to
+    :func:`mtm.ctypes_clang.resolve`); *resolver* is the adapter's own resolver
+    seam (an image-backed transport override). *probe_headers* rides this same
+    call so each proposed interface header is compiled in the selected context
+    without a second driver invocation.
+    """
+    source = resolve or ctypes_clang.resolve
+    try:
+        return source(inputs, bench_root=bench_root, image=image,
+                      include_dirs=list(include_dirs or []),
+                      defines=list(defines or []), args=list(args or []),
+                      resolver=resolver,
+                      probe_headers=dict(probe_headers or {}))
+    except Exception as exc:  # noqa: BLE001 - surfaced as a tool fault, never a crash
+        return ctypes_clang.CTypeResolution(
+            status=ctypes_clang.TOOL_FAILED,
+            message=f"the C type resolver failed: {type(exc).__name__}: {exc}")
+
 
 @dataclass
 class CParam:
@@ -88,6 +207,11 @@ class Generated:
     test_functions: list[str] = field(default_factory=list)
     mocks: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    #: The clang resolution status the type map was charted from
+    #: (``RESOLVED``/``BLOCKED``/``TOOL_FAILED``/``UNRESOLVED`` — the last when no
+    #: resolver was available, e.g. an offline unit test driving the generator
+    #: without an image). A run-level tool fault is surfaced separately.
+    types: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,13 +220,14 @@ class Generated:
             "test_functions": self.test_functions,
             "mocks": self.mocks,
             "limitations": self.limitations,
+            "types": self.types,
         }
 
 
 # --- C signature parsing ----------------------------------------------------
 
 
-def split_params(params: str) -> list[CParam]:
+def split_params(params: str, typedefs: dict[str, Any] | None = None) -> list[CParam]:
     """Split a C parameter list into ``CParam``s by top-level commas."""
     params = params.strip()
     if params in ("", "void"):
@@ -116,15 +241,15 @@ def split_params(params: str) -> list[CParam]:
         elif ch == ")":
             depth -= 1
         if ch == "," and depth == 0:
-            result.append(parse_param(current))
+            result.append(parse_param(current, typedefs))
             current = ""
         else:
             current += ch
-    result.append(parse_param(current))
+    result.append(parse_param(current, typedefs))
     return result
 
 
-def parse_param(text: str) -> CParam:
+def parse_param(text: str, typedefs: dict[str, Any] | None = None) -> CParam:
     """Parse one C parameter declarator into a :class:`CParam`.
 
     The pointer *depth* is preserved (``int **pp`` → depth 2) and the **pointee**
@@ -134,6 +259,16 @@ def parse_param(text: str) -> CParam:
     *p``) is ignored by C for compatibility and does **not** belong to the pointee,
     so keeping it in the base would change the type (``char * const *`` would
     become the incompatible ``const char **``).
+
+    *typedefs* (charted from libclang facts by :func:`_chart_type_map`) resolves a
+    **pointer alias**
+    so the reported depth is the parameter's real indirection count: with
+    ``typedef int *P``, the declarator ``P *pp`` is an ``int **`` (depth 2), not an
+    ``int *`` (depth 1) — the difference between emitting a compilable call that
+    observes the pointee and an uncompilable ``P v = (P)scalar`` that observes a
+    stale local (the F3 defect). An alias to a **function-pointer/array** type is
+    marked opaque and left unresolved so the caller refuses the shape (a named
+    limitation) instead of guessing a depth.
     """
     text = text.strip()
     segments = text.split("*")
@@ -144,23 +279,57 @@ def parse_param(text: str) -> CParam:
             return CParam(type="", name="", depth=0)
         if len(tokens) >= 2 and tokens[-1] not in _CTYPE_WORDS \
                 and not _looks_like_type(tokens[-1]):
-            return CParam(type=" ".join(tokens[:-1]).strip(), name=tokens[-1], depth=0)
+            return _resolve_typedef(
+                CParam(type=" ".join(tokens[:-1]).strip(), name=tokens[-1], depth=0),
+                typedefs)
         if len(tokens) == 1:
-            return CParam(type=tokens[0], name="", depth=0)
-        return CParam(type=text, name="", depth=0)
+            return _resolve_typedef(CParam(type=tokens[0], name="", depth=0), typedefs)
+        return _resolve_typedef(CParam(type=text, name="", depth=0), typedefs)
     # depth >= 1: the pointee type is the first segment (qualifiers kept, storage
     # class dropped); the declared name is the trailing token of the last segment.
     base_tokens = [t for t in segments[0].split() if t not in _STORAGE_CLASS]
     tail = segments[-1].split()
     name = tail[-1] if tail else ""
-    return CParam(type=" ".join(base_tokens).strip(), name=name, depth=depth)
+    return _resolve_typedef(
+        CParam(type=" ".join(base_tokens).strip(), name=name, depth=depth), typedefs)
+
+
+def _resolve_typedef(param: CParam, typedefs: dict[str, Any] | None) -> CParam:
+    """Fold a pointer ``typedef`` alias in *param* into a real base + depth.
+
+    ``typedef`` aliases hide the ``*`` inside a *name*, so a declarator that uses
+    one is parsed with the wrong depth and an unknown base type. Substituting the
+    alias's own base and adding its depth recovers the true type. A **pointer**
+    alias (``typedef int *P``) contributes its depth wherever the alias is the
+    pointee; an **opaque** alias (function pointer / array) is left untouched so
+    the shape is refused downstream rather than mis-rendered. A plain (non-pointer)
+    alias is left as-is: its name is a valid base token for the emitter (e.g.
+    ``mode_t``) and contributes no depth.
+    """
+    if not typedefs:
+        return param
+    alias_name = ""
+    alias = None
+    for token in param.type.split():
+        if token in typedefs and typedefs[token].depth >= 1:
+            alias_name, alias = token, typedefs[token]
+            break
+    if alias is None:
+        return param
+    base = param.type
+    if alias.base:
+        # Replace the alias name with its base, keeping any pointee qualifiers
+        # (`const P *p` → `const int *` with one extra level).
+        base = " ".join(alias.base if w == alias_name else w
+                        for w in param.type.split()).strip()
+    return CParam(type=base, name=param.name, depth=param.depth + alias.depth)
 
 
 def _looks_like_type(token: str) -> bool:
     return token.endswith("_t") or token in _CTYPE_WORDS
 
 
-def _unsupported_param_shape(params: list[CParam]) -> str | None:
+def _unsupported_param_shape(params: list[CParam], typedefs: dict[str, Any] | None = None) -> str | None:
     """A reason a parameter list cannot be materialised faithfully, or ``None``.
 
     The generator renders each argument as a cast to the parameter's type and,
@@ -173,10 +342,21 @@ def _unsupported_param_shape(params: list[CParam]) -> str | None:
     an admitted-but-uncompilable/crashing bench (``implementation.md``:
     "unsupported shapes are recorded limitations, never silent passes").
 
+    A parameter using a **function-pointer or array ``typedef``** (an alias whose
+    declarator has no ``*`` this scanner can honour) is refused by the same rule:
+    it has no honest indirection depth, so emitting a cast would be a guess.
+
     An **unnamed** parameter (``int foo(int)``, ``int foo(char *)``) is *not*
     refused: that is legal C and renders fine as ``(type)value`` — refusing it
     would be a false refusal of a common prototype form.
+
+    A parameter that points at an aggregate reached through a ``typedef`` alias is
+    *not* refused here: an aggregate pointee is renderable via the
+    ``{"expr": …}`` escape hatch, so that is decided per **argument** in
+    :func:`_case_problem` (see ``aggregate_params``), exactly like the inline
+    ``typedef struct`` form.
     """
+    opaque = {name for name, t in (typedefs or {}).items() if getattr(t, "opaque", False)}
     for param in params:
         if "..." in param.type:
             return "a variadic (`...`) parameter is not supported"
@@ -185,12 +365,15 @@ def _unsupported_param_shape(params: list[CParam]) -> str | None:
             # type or name (`int a[3]` → name `a[3]`; `int (*cb)(int)` → name
             # `(cb)(int)`); the generator cannot render such an argument.
             return ("a function-pointer or array parameter is not supported")
+        if opaque and any(tok in opaque for tok in param.type.split()):
+            return ("a function-pointer/array `typedef` used as a parameter type "
+                    "has no honourable indirection depth and is not supported")
     return None
 
 
-def func_params(signature: str) -> list[CParam]:
+def func_params(signature: str, typedefs: dict[str, Any] | None = None) -> list[CParam]:
     m = re.search(r"\(([^)]*)\)", signature)
-    return split_params(m.group(1)) if m else []
+    return split_params(m.group(1), typedefs) if m else []
 
 
 def return_type(signature: str) -> str:
@@ -504,12 +687,19 @@ def _strip_c_comments(text: str) -> str:
     return re.sub(r"//[^\n]*", " ", text)
 
 
-def split_declaration(decl: str) -> tuple[str, list[CParam]] | None:
+def split_declaration(decl: str,
+                      typedefs: dict[str, Any] | None = None) -> tuple[str, list[CParam]] | None:
     """Split a C function declaration into ``(return_type, params)``.
 
     ``None`` when the declaration has a shape this generator does not support
     (variadics, a function-pointer/array parameter, or an unparseable header),
     so the caller records a limitation instead of emitting wrong code.
+
+    *typedefs* (the aliases the compiled project sees) resolves a **pointer
+    alias** in a *dependency's* declaration — ``typedef int *P; void dep(P *pp);``
+    is ``int **`` and must be treated at depth 2, exactly like the SUT parameter
+    path. Without it the mock path reported depth 1 and emitted an uncompilable
+    ``P v = scalar;`` plus a ``ReturnThruPtr`` at the wrong indirection.
     """
     decl = _strip_c_comments(decl or "").strip().rstrip(";")
     if not decl:
@@ -520,7 +710,7 @@ def split_declaration(decl: str) -> tuple[str, list[CParam]] | None:
     ret = m.group("ret").strip()
     if "*" in ret or "..." in m.group("params"):
         return None
-    params = split_params(m.group("params"))
+    params = split_params(m.group("params"), typedefs)
     for p in params:
         if not p.name or "(" in p.type:
             return None
@@ -656,7 +846,8 @@ def _pointer_arg(param: CParam, var: str, value: Any) -> tuple[list[str], str, s
 
 
 def mock_controls(decl: str, symbol: str,
-                  aggregates: set[str] | None = None) -> dict[str, Any] | None:
+                  aggregates: set[str] | None = None,
+                  typedefs: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The control surface CMock will expose for *symbol*.
 
     ``{"return": bool, "out": [names], "out_aggregate": set, "out_depth": {name:
@@ -668,16 +859,22 @@ def mock_controls(decl: str, symbol: str,
     ``ReturnThruPtr`` for a ``void *`` pointee) — the same refusal contract the
     SUT parameter path follows.
     """
-    split = split_declaration(decl)
+    split = split_declaration(decl, typedefs)
     if split is None:
         return None
     ret, params = split
     pointers = [p for p in params if p.pointer]
+    # An out-parameter whose base reaches an aggregate through a *typedef alias*
+    # must be recognised as an aggregate too, so the caller refuses its scalar
+    # write-through rather than emitting an uncompilable assignment (plan §C).
+    alias_aggregates = {name for name, t in (typedefs or {}).items()
+                        if getattr(t, "aggregate", False)}
     return {
         "return": ret not in _VOID,
         "out": [p.name for p in pointers],
         "out_aggregate": {p.name for p in pointers
-                          if is_aggregate_base(_base_type(p), aggregates)},
+                          if is_aggregate_base(_base_type(p), aggregates)
+                          or any(tok in alias_aggregates for tok in p.type.split())},
         "out_depth": {p.name: p.depth for p in pointers},
         "out_void": {p.name for p in pointers if _is_void_base(_base_type(p))},
     }
@@ -691,7 +888,8 @@ def _is_c_expression(value: Any) -> bool:
 def _case_problem(case, controls: dict[str, dict[str, Any]],
                   params: list[CParam], aggregates: set[str] | None = None,
                   declared_mocks: list[str] | None = None,
-                  determined: bool = True) -> str | None:
+                  determined: bool = True,
+                  typedefs: dict[str, Any] | None = None) -> str | None:
     """Why *case* cannot be materialised faithfully, or ``None`` if it can.
 
     The plan is model output: it may ask for a control this generator does not
@@ -705,7 +903,7 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
     # callee dereferences it (a crash misread as an IMPLEMENTATION_DEFECT). Checked
     # before the arity test so the reason names the real cause, not a misleading
     # argument count (the scanner counts a trailing `...` as a parameter).
-    shape_problem = _unsupported_param_shape(params)
+    shape_problem = _unsupported_param_shape(params, typedefs)
     if shape_problem is not None:
         return shape_problem
     # The argument count must match the real signature: `signatures` come from the
@@ -768,8 +966,15 @@ def _case_problem(case, controls: dict[str, dict[str, Any]],
                 return (f"mock {symbol!r} sets {key!r}, whose pointee is an aggregate "
                         "type; supply it as {\"expr\": \"<C initializer>\"} instead of a scalar")
     pointer_indices = {i for i, p in enumerate(params) if p.pointer}
+    # A look-through-`typedef` aggregate alias (the chained form the inline
+    # `aggregate_aliases` scan misses, or a pointer alias whose pointee is an
+    # aggregate). Recognised here, per argument, so the `{"expr": …}` hatch still
+    # initialises it faithfully and only a *scalar* for it is refused.
+    alias_aggregate: set[str] = {name for name, t in (typedefs or {}).items()
+                                 if getattr(t, "aggregate", False)}
     aggregate_params = {i for i, p in enumerate(params)
-                        if p.pointer and is_aggregate_base(_base_type(p), aggregates)}
+                        if (p.pointer and is_aggregate_base(_base_type(p), aggregates))
+                        or any(tok in alias_aggregate for tok in p.type.split())}
     for index in range(min(len(case.args), len(params))):
         value = case.args[index]
         if index in aggregate_params:
@@ -866,7 +1071,11 @@ def _expression(value: Any) -> str:
 
 
 def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
-                   *, excluded_units: set[str] | None = None) -> Generated:
+                   *, excluded_units: set[str] | None = None,
+                   image: str | None = None,
+                   resolve: Callable[..., Any] | None = None,
+                   resolver: Any = None,
+                   build_context: dict[str, Any] | None = None) -> Generated:
     """Write a Ceedling project under ``<bench>/.mtm/gen`` from the plan.
 
     *excluded_units* are feasibility-BLOCKED unit ids: they are left out of the
@@ -874,7 +1083,18 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
     visible in the feasibility report and denominator (R03). A unit excluded for a
     *basename collision* (below) is added to the same exclusion set, so it too is
     driven out of the executable scope and recorded as a limitation.
+
+    *image* is the product image the libclang type/declaration adapter runs in;
+    the selected C inputs are resolved there into the authoritative type map (I2)
+    and the interface-header sharing decision (I3). ``resolve`` overrides the
+    adapter call (an offline test seam) and ``resolver`` its transport. Any
+    resolution failure is classified per I4 — ``BLOCKED`` into per-symbol
+    limitations, ``TOOL_FAILED`` into a run-level tool fault — never an uncaught
+    exception, and never a guessed type.
     """
+    from .build_context import resolve_build_context
+    context = resolve_build_context(Path(bench_root), build_context,
+                                    resolve_scope_paths(bench_root, inventory.selected))
     excluded = set(excluded_units or set())
     blocked_ids = set(excluded)
     revision = Path(bench_root) / REVISION_DIRNAME
@@ -958,48 +1178,238 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         shutil.copy2(candidate, src_dir / candidate.name)
         out.files[f"{SOURCE_DIRNAME}/{candidate.name}"] = "source"
 
+    # 2b. Resolve the C aliases the compiled project sees with libclang — the
+    #     **sole semantic authority** for declarations/types (owner decision
+    #     0017). A pointer hidden behind a `typedef` (`typedef int *P; … P *pp`)
+    #     is materialised at its real indirection depth — clang's depth 2, not a
+    #     textual guess — so the generator never emits the uncompilable
+    #     `P v = (P)scalar` that observes a stale local (the F3 defect). The
+    #     lexical scanner's own type claims are retired on this path: they were a
+    #     partial reimplementation of C semantics and accumulated same-class
+    #     counterexamples (`#if 0`, `#else` branches, `#undef`, mid-file guards).
+    resolve_inputs = [src_dir / name for name in sorted(copied)
+                      if name.endswith((".c", ".h"))]
+    resolve_inputs += [shim_dir / name for name in shim_names]
+    facts = _resolve_type_map(
+        bench_root, resolve_inputs, image=image, resolve=resolve, resolver=resolver,
+        include_dirs=[shim_dir, src_dir, *context.include_dirs],
+        defines=list(context.defines), args=list(context.args))
+    out.types = {
+        "status": facts.status,
+        "clang_version": facts.clang_version,
+        "message": facts.message,
+        "issues": list(getattr(facts, "issues", []) or []),
+        "diagnostics": list(getattr(facts, "diagnostics", []) or []),
+    }
+    typedefs: dict[str, Any] = _chart_type_map(facts)
+    # Headers clang proved cannot be `#include`-d twice in one TU (a redefinition
+    # diagnostic). The interface header substitutes such an alias's defining
+    # statement verbatim instead of including the header — the compiler decides,
+    # not a regex guard classifier.
+    unsafe_headers: set[str] = {name for name, bad in
+                                (getattr(facts, "double_include_unsafe", None) or {}).items()
+                                if bad}
+    # Which copied file defines each alias (clang's declaration location, mapped
+    # back into the revision by basename). An alias whose defining file is a
+    # copied *header* can be shared by `#include`; one defined in a `.c` has no
+    # includable definition and is carried verbatim (`_alias_source_for_decl`).
+    alias_source: dict[str, str] = {}
+    alias_facts: dict[str, Any] = {}
+    includable = set(copied) | set(shim_names)
+    for name, fact in (getattr(facts, "aliases", None) or {}).items():
+        defining = Path(fact.file).name if fact.file else ""
+        # Only a *header* is includable; an alias whose defining location is a `.c`
+        # has no includable definition and is carried verbatim (including a `.c`
+        # would duplicate the SUT's own definitions). A private shim header counts
+        # (it is on the include path), so an alias it defines is shared, not
+        # refused.
+        if defining.endswith(".h") and defining in includable:
+            alias_source[name] = defining
+        alias_facts[name] = fact
+    # Verbatim `typedef` text per alias, for an alias with no includable header
+    # (a lexical text fallback only — never a semantic type claim).
+    alias_statements: dict[str, str] = {}
+    for name in sorted(copied):
+        if name.endswith((".c", ".h")):
+            for alias, statement in cscan.typedef_statement_map(
+                    _safe_read(src_dir / name)).items():
+                alias_statements.setdefault(alias, statement)
+
     # 3. One interface header per mocked symbol: CMock generates the mock from
     #    the header, so it declares only that symbol and the types it needs.
     interfaces: dict[str, str] = {}
     declarations: dict[str, str] = {}
+    refused_mocks: dict[str, str] = {}
+    #: Which authority supplied each mocked symbol's declaration (provenance for
+    #: the manifest — ``clang`` / ``selected-header`` / ``llm`` / ``none``).
+    declaration_sources: dict[str, str] = {}
+    #: ``typedef`` statements the plan's own ``mock_declarations`` text carries,
+    #: per mocked symbol (see `_llm_field_aliases`). Threaded into the interface
+    #: header so an alias only that text defines is not left undefined (I1/AP-06).
+    llm_field_aliases_by_symbol: dict[str, dict[str, str]] = {}
     for scenario in plan.scenarios:
         if scenario.unit_id in excluded:
             continue
         for symbol in scenario.mocks:
-            declared = scenario.mock_declarations.get(symbol) or ""
-            if not declared:
-                declared = _prototype_for_symbol(bench_root, inventory, symbol)
-            declarations.setdefault(symbol, declared)
+            if symbol in declarations:
+                continue
+            # I4 first: an adapter BLOCKED status (incomplete build context) means
+            # we cannot trust any type in this declaration. Refuse every mock with
+            # a named per-symbol limitation carrying the diagnostic — never guess a
+            # type, and never let the model's text stand in for the real one.
+            if facts.status == ctypes_clang.BLOCKED:
+                refused_mocks[symbol] = (
+                    f"mocked symbol {symbol!r}: the selected C build context could "
+                    f"not be resolved by libclang, so its declaration cannot be "
+                    f"typed faithfully ({facts.message})")
+                continue
+            # AP-08 / IMP-18: a **real** declaration resolved from the selected
+            # build context wins unconditionally; the plan's model-supplied text is
+            # a fallback used only when no real declaration exists. See
+            # `_authoritative_declaration`.
+            declared, source, field_aliases = _authoritative_declaration(
+                facts, symbol, scenario.mock_declarations.get(symbol) or "",
+                bench_root, inventory)
+            declarations[symbol] = declared
+            declaration_sources[symbol] = source
+            # A `typedef` the plan's own `mock_declarations` text carries (e.g.
+            # `typedef unsigned short Q; int dep_write(Q q);`) must travel with the
+            # prototype it defines, exactly as the pre-IMP-18 generator's verbatim
+            # field did; keeping it lets `_alias_source_for_decl` carry it into the
+            # interface header. Empty for the real clang/header authorities, whose
+            # aliases come from the selected build context.
+            llm_field_aliases_by_symbol[symbol] = field_aliases
+
+    # Assemble (do not yet write) the interface-header body for every symbol that
+    # has a usable declaration and whose alias machinery could share its types. The
+    # compiler is the gate (AP-08): all bodies are collected first and handed to the
+    # **same** clang adapter in one batched ``probe_headers`` request, so a body
+    # naming a type nothing in the selected build context defines — or whose
+    # ``#include``s cannot be resolved — is refused with a named per-symbol
+    # limitation instead of being emitted as uncompilable C behind empty
+    # limitations (I1/AP-06). No bespoke parser and no lexical undefined-type guard:
+    # the real compiler answers.
+    bodies: dict[str, str] = {}
+    header_for: dict[str, str] = {}
     for symbol, decl in sorted(declarations.items()):
+        if symbol in refused_mocks:
+            continue
         if not decl.strip():
+            # No real declaration resolved and no unambiguous usable prototype in
+            # the plan's text: record a precise limitation (never an invented
+            # signature). Distinguish the ambiguous model field for the reader.
+            llm_entry = next(
+                (sc.mock_declarations.get(symbol) for sc in plan.scenarios
+                 if symbol in sc.mock_declarations), "")
+            if llm_entry:
+                detail = ("the plan's `mock_declarations` entry for it is not one "
+                          "unambiguous prototype and no real declaration was "
+                          "resolved from the selected build context")
+            else:
+                detail = ("no declaration exists in the selected build context and "
+                          "the plan supplied none")
             out.limitations.append(
-                f"mocked symbol {symbol!r} has no declared interface; its "
-                "scenarios are not executed")
+                f"mocked symbol {symbol!r} has no usable declaration; {detail}, so "
+                "its scenarios are not executed")
+            continue
+        # A declaration may name a `typedef` alias (`typedef int *P; void dep(P p);`).
+        # The private header is compiled on its own (CMock generates the mock from
+        # it, and the test includes it before the unit header), so every alias its
+        # parameters mention must be visible here — otherwise the adapter and the
+        # mock's TU see `unknown type name 'P'` and *every* scenario that mocks the
+        # symbol dies as an opaque build failure. For each alias the declaration
+        # uses, `#include` the ORIGINAL defining header (one shared definition per
+        # TU) — the real compiler is the sharing gate. `:use_test_preprocessor:
+        # :none` means Ceedling does not preprocess the header, so a duplicate
+        # inline `{…}` body would be a hard redefinition error; an alias whose
+        # defining statement has such a body *and* no includable header cannot be
+        # duplicated and is refused with a named limitation instead.
+        alias_includes, alias_defs, unduplicable = _alias_source_for_decl(
+            decl, alias_source, alias_facts, alias_statements, unsafe_headers,
+            llm_field_aliases_by_symbol.get(symbol))
+        if unduplicable:
+            refused_mocks[symbol] = (
+                f"mocked symbol {symbol!r} declares a parameter through the "
+                f"typedef {unduplicable!r}, whose defining statement has an inline "
+                "`struct`/`union`/`enum` body and whose defining file clang proved "
+                "cannot be included twice in one translation unit; it cannot be "
+                "shared with the unit's own header without redefining that type")
             continue
         header_name = f"mtm_dep_{symbol}.h"
         interface_guard = f"MTM_DEP_{_ident(symbol).upper()}_H"
-        body = (
+        bodies[symbol] = (
             f"/* Private interface for the mocked dependency {symbol!r}.\n"
             f" * Declared from the plan/SDD so CMock can generate a mock. This\n"
             f" * header is NEVER written into the source directory. */\n"
             f"#ifndef {interface_guard}\n#define {interface_guard}\n"
-            f"{shim_includes}#include <stdint.h>\n\n{decl.strip()}\n\n"
+            f"{shim_includes}#include <stdint.h>\n"
+            f"{alias_includes}\n"
+            f"{alias_defs}{decl.strip()}\n\n"
             f"#endif /* {interface_guard} */\n"
         )
-        (iface_dir / header_name).write_text(body, encoding="utf-8")
+        header_for[symbol] = header_name
+
+    # One batched request: every proposed header is compiled by the same driver,
+    # in the selected build context, in a **single** invocation (one extra parse
+    # per header, not N docker runs). A genuine tool fault here is a run-level tool
+    # fault, surfaced through the existing ``types.status`` path (exit 30) — this
+    # adds no second fault path.
+    probe_verdicts: dict[str, Any] = {}
+    if bodies:
+        probe_spec = {header_for[sym]: text for sym, text in bodies.items()}
+        probe_facts = _resolve_type_map(
+            bench_root, resolve_inputs, image=image, resolve=resolve,
+            resolver=resolver,
+            include_dirs=[shim_dir, src_dir, *context.include_dirs],
+            defines=list(context.defines), args=list(context.args),
+            probe_headers=probe_spec)
+        probe_verdicts = getattr(probe_facts, "header_probe", None) or {}
+        if getattr(probe_facts, "status", "") == ctypes_clang.TOOL_FAILED:
+            # The adapter could not be used to compile the proposed headers: no
+            # header may be emitted on an unverified guess. Surface the tool fault
+            # through the same run-level path the fact resolution uses — but do not
+            # **clobber** a fault the primary resolution already reported (e.g. a
+            # ``BLOCKED`` status with its own missing-header message): only a clean
+            # (``RESOLVED``/empty) prior status is upgraded, and an existing
+            # message is never blanked.
+            if out.types.get("status") in (None, "", ctypes_clang.RESOLVED):
+                out.types["status"] = ctypes_clang.TOOL_FAILED
+            probe_message = str(getattr(probe_facts, "message", "") or "")
+            if probe_message and not out.types.get("message"):
+                out.types["message"] = probe_message
+    for symbol in sorted(bodies):
+        key = header_for[symbol]
+        verdict = probe_verdicts.get(key)
+        if not getattr(verdict, "ok", False):
+            diagnostic = str(getattr(verdict, "diagnostic", "") or "").strip()
+            if diagnostic:
+                detail = f"clang: {diagnostic}"
+            elif key in probe_verdicts:
+                detail = "clang reported an error in the selected build context"
+            else:
+                detail = ("the selected C build context could not be re-resolved by "
+                          "libclang to compile it")
+            refused_mocks[symbol] = (
+                f"mocked symbol {symbol!r}'s interface header does not compile in "
+                f"the selected build context ({detail}); its scenarios are not "
+                "executed")
+            continue
+        header_name = header_for[symbol]
+        (iface_dir / header_name).write_text(bodies[symbol], encoding="utf-8")
         out.files[f"{INTERFACE_DIRNAME}/{header_name}"] = "interface"
         out.mocks.append(symbol)
         interfaces[symbol] = header_name
 
-    # Aggregate aliases from every C text the project compiles against.
-    aggregates: set[str] = set()
-    for content in (plan.shim_headers or {}).values():
-        aggregates |= aggregate_aliases(content)
-    for decl in declarations.values():
-        aggregates |= aggregate_aliases(decl)
-    for name in sorted(copied):
-        if name.endswith((".c", ".h")):
-            aggregates |= aggregate_aliases((src_dir / name).read_text(encoding="utf-8", errors="replace"))
+    # Aggregate identity comes from clang (a struct/union base), charted into the
+    # same `aggregates` name set `is_aggregate_base` consumes — a scalar supplied
+    # for a struct/union pointee is refused before a verdict. An **enum** base is a
+    # scalar type and is deliberately excluded (its alias is not aggregate — see
+    # `_is_aggregate_record`), else every enum-typed parameter/out-param would be
+    # blanket-refused. Function/array aliases (opaque) are excluded here too: they
+    # are refused by the `opaque` type map on the argument path, not treated as
+    # aggregates.
+    aggregates: set[str] = {name for name, fact in (getattr(facts, "aliases", None) or {}).items()
+                            if _is_aggregate_record(fact.record)}
 
     # 4. One Unity test file per unit holding that unit's scenarios.
     by_unit: dict[str, list[Scenario]] = {}
@@ -1030,7 +1440,7 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
             continue
         code, names, skipped = _emit_test_file(
             unit, scenarios, signatures, interfaces, declarations, shim_names, aggregates,
-            unit_includes=unit_includes)
+            unit_includes=unit_includes, typedefs=typedefs, refused_mocks=refused_mocks)
         path = test_dir / f"test_{Path(unit.path).stem}.c"
         path.write_text(code, encoding="utf-8")
         out.files[f"{TEST_DIRNAME}/{path.name}"] = "test"
@@ -1038,9 +1448,17 @@ def generate_suite(bench_root: Path, plan: Plan, inventory: Inventory,
         out.limitations.extend(skipped)
 
     # 5. The Ceedling project file.
-    (revision / "project.yml").write_text(_project_yml(), encoding="utf-8")
+    (revision / "project.yml").write_text(
+        _project_yml(context, bench_root=Path(bench_root),
+                     mock_headers=[src_dir / x for x in copied if x.endswith(".h")]),
+        encoding="utf-8")
     out.files["project.yml"] = "project"
 
+    # Provenance of each mock declaration (AP-08): which authority supplied it, so
+    # a reviewer can see that the real selected context won over any LLM text.
+    out.types["declaration_sources"] = {
+        symbol: source for symbol, source in sorted(declaration_sources.items())
+    }
     out.test_functions = test_names
     return out
 
@@ -1105,7 +1523,10 @@ def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -
     """Deterministically derive a dependency's prototype from the selected headers.
 
     Directory scopes are expanded first, so a header selected through a directory
-    contributes its prototypes just as a directly-selected header does.
+    contributes its prototypes just as a directly-selected header does. This is a
+    **text** fallback below clang (see :func:`_authoritative_declaration`): it only
+    supplies a declaration when the clang resolution of the effective compilation
+    context did not yield the symbol.
     """
     from .cscan import scan_prototypes
 
@@ -1117,42 +1538,358 @@ def _prototype_for_symbol(bench_root: Path, inventory: Inventory, symbol: str) -
     return ""
 
 
-def _project_yml() -> str:
-    """The Ceedling project file for a generated suite.
+#: Provenance of a mocked symbol's authoritative declaration, in priority order.
+DECL_FROM_CLANG = "clang"
+DECL_FROM_HEADER = "selected-header"
+DECL_FROM_LLM = "llm"
+DECL_NONE = "none"
 
-    ``:enforce_strict_ordering: FALSE`` keeps a scenario's expectations in the
-    order written without demanding global ordering across mocks; the mock
-    plugins provide the expressiveness the plan uses (return values, out
-    parameters, unlimited coverage calls for UNDETERMINED cases).
+#: One ordinary function declarator, matched against a single ``;``-terminated
+#: statement of model-supplied text: a return type, the name, a flat parameter
+#: list. Used only to *locate* the prototype a ``mock_declarations`` field states
+#: (never a type claim — the type semantics come from clang).
+_PROTO_STMT_RE = re.compile(
+    r"^(?P<ret>[A-Za-z_][\w \t\*]*?)\b(?P<name>[A-Za-z_]\w*)"
+    r"[ \t]*\((?P<params>[^;{}()]*)\)$"
+)
+
+
+def _declaration_from_fact(fact: Any) -> str:
+    """Reconstruct a function's declaration **text** from clang facts (I1/AP-08).
+
+    The declaration is rebuilt from the authoritative source-level type spellings
+    (``return_type.spelling``, each parameter's ``spelling`` and own ``name``), so
+    a ``typedef`` alias or a qualifier is preserved exactly as the selected build
+    context spells it — the mock interface header then matches what the SUT's own
+    translation unit compiles against. Returns ``""`` when the fact cannot be
+    rendered (a missing spelling), so the caller falls to a lower authority rather
+    than emit a guessed declaration.
     """
-    return (
-        ":project:\n"
-        "  :use_exceptions: FALSE\n"
-        "  :use_mocks: TRUE\n"
-        "  :use_test_preprocessor: :none\n"
-        "  :build_root: build\n"
-        "  :test_file_prefix: test_\n"
-        "  :which_ceedling: gem\n"
-        ":paths:\n"
-        "  :source:\n"
-        f"    - {SOURCE_DIRNAME}/**\n"
-        "  :include:\n"
-        f"    - {SHIM_DIRNAME}/**\n"
-        f"    - {INTERFACE_DIRNAME}/**\n"
-        f"    - {SOURCE_DIRNAME}/**\n"
-        "  :test:\n"
-        f"    - {TEST_DIRNAME}/**\n"
-        ":cmock:\n"
-        "  :mock_prefix: mock_\n"
-        "  :when_no_prototypes: :warn\n"
-        "  :enforce_strict_ordering: FALSE\n"
-        "  :plugins:\n"
-        "    - :ignore\n"
-        "    - :expect_any_args\n"
-        "    - :return_thru_ptr\n"
-        "    - :ignore_arg\n"
-        "    - :callback\n"
+    ret = str(getattr(fact.return_type, "spelling", "") or "").strip()
+    if not ret:
+        return ""
+    params: list[str] = []
+    for param in fact.params:
+        spelling = str(getattr(param, "spelling", "") or "").strip()
+        if not spelling:
+            return ""
+        name = str(getattr(param, "name", "") or "").strip()
+        # A pointer/array spelling already carries its `*`/`[]`; attach the name
+        # directly (`uint16_t *reading`, not `uint16_t * reading`) so the
+        # reconstructed declarator matches the source-level prototype.
+        if name and spelling.endswith("*"):
+            params.append(f"{spelling}{name}")
+        else:
+            params.append(f"{spelling} {name}" if name else spelling)
+    if getattr(fact, "variadic", False):
+        params.append("...")
+    param_text = ", ".join(params) if params else "void"
+    return f"{ret} {fact.name}({param_text});"
+
+
+def _prototype_from_llm_text(raw: str, symbol: str) -> str:
+    """A single usable prototype for *symbol* in model-supplied C text, or ``""``.
+
+    The plan's ``mock_declarations`` field is **not** guaranteed to be one clean
+    prototype: IMP-18 recorded a field carrying a ``typedef`` *and* a prototype.
+    This strips comments and walks the ``;``-terminated statements, ignoring
+    ``typedef``/``struct``/``enum`` statements and any unrelated declaration, and
+    returns the one statement that is an ordinary declaration of *symbol*. Two
+    candidate declarations for the symbol are ambiguous and yield ``""`` so the
+    caller records a precise limitation instead of inventing a signature. Lexical
+    only (no type claim) and used **only** when no real declaration was resolved
+    from the selected build context.
+    """
+    if not raw:
+        return ""
+    clean = _strip_c_comments(raw)
+    candidates: list[str] = []
+    for statement in clean.split(";"):
+        text = " ".join(statement.split())
+        if not text or text.startswith("typedef"):
+            continue
+        m = _PROTO_STMT_RE.match(text)
+        if not m or m.group("name") != symbol:
+            continue
+        ret = m.group("ret").strip()
+        if not ret:
+            continue
+        params = " ".join(m.group("params").split()) or "void"
+        candidates.append(f"{ret} {symbol}({params});")
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _llm_field_aliases(raw: str) -> dict[str, str]:
+    """The ``typedef`` statements a ``mock_declarations`` field itself carries.
+
+    A plan field like ``typedef unsigned short Q;\\nint dep_write(Q q);`` pairs an
+    alias with the prototype that uses it. `_prototype_from_llm_text` keeps only
+    the prototype, so the alias's defining statement must travel with it or the
+    emitted declaration names an undefined type (I1/AP-06). This harvests those
+    statements with the **same** lexical helper the `.c`-carried fallback uses
+    (``cscan.typedef_statement_map``) — no parallel typedef parser (R20/AP-08) —
+    keyed by alias name. Lexical text only; it makes no type claim.
+    """
+    if not raw:
+        return {}
+    return cscan.typedef_statement_map(raw)
+
+
+def _authoritative_declaration(
+    facts: Any, symbol: str, llm_text: str,
+    bench_root: Path, inventory: Inventory,
+) -> tuple[str, str, dict[str, str]]:
+    """The mocked symbol's declaration, its provenance, and any carried aliases.
+
+    Owner contract (AP-08, IMP-18): **a real declaration resolved from the
+    selected build context is authoritative and is never overridden by an LLM
+    proposal.** The order is therefore:
+
+    1. :data:`DECL_FROM_CLANG` — the declaration libclang resolved for *symbol* in
+       the effective compilation context (the selected inputs, plus any private
+       shim on the include path). This is independent of what the LLM prompt
+       contained, and of whether the model restated the interface at all.
+    2. :data:`DECL_FROM_HEADER` — a prototype textually present in a selected
+       header (still a real declaration, subordinate to clang's typed facts but
+       superior to the model). Reached when clang did not attribute the symbol
+       (e.g. it is declared only in a ``.c``), when the resolver is the offline
+       test double, or when clang's facts cannot be rendered into a usable
+       declarator (an unnamed parameter the mock surface cannot key on).
+    3. :data:`DECL_FROM_LLM` — extracted from the plan's ``mock_declarations``
+       **only when no real declaration exists** (verifiably), and only when one
+       unambiguous prototype is present.
+    4. :data:`DECL_NONE` — nothing usable; the caller records a precise per-symbol
+       limitation and never invents a signature.
+
+    The third element is the ``typedef`` statements the **LLM field itself**
+    carries (empty for the clang/header authorities, whose aliases come from the
+    selected build context). A fallback prototype may name an alias the field also
+    defines — ``typedef unsigned short Q; int dep_write(Q q);`` — so the caller
+    must carry those statements into the interface header exactly as the base did;
+    discarding them left the alias undefined (I1/AP-06).
+    """
+    if getattr(facts, "status", "") == ctypes_clang.RESOLVED:
+        fact = facts.by_name(symbol)
+        if fact is not None:
+            decl = _declaration_from_fact(fact)
+            # Only a declaration this generator can actually materialise counts as
+            # the authoritative one: a reconstruction whose parameters have no
+            # names (a partial fact set) is not usable for a CMock mock, so fall
+            # through to the real selected header rather than emit it.
+            if decl and split_declaration(decl) is not None:
+                return decl, DECL_FROM_CLANG, {}
+    # A successful *real* Clang parse with no declaration is authoritative
+    # negative evidence. Text scanning cannot override preprocessor branches
+    # (#if 0, conditional macros) that Clang deliberately excluded. Offline
+    # resolver doubles advertise their provenance explicitly and retain the
+    # legacy header seam for syntax/generation unit tests only.
+    if (getattr(facts, "status", "") != ctypes_clang.RESOLVED
+            or getattr(facts, "clang_version", "") == "test-double"):
+        real = _prototype_for_symbol(bench_root, inventory, symbol)
+        if real:
+            return real, DECL_FROM_HEADER, {}
+    llm = _prototype_from_llm_text(llm_text, symbol)
+    if llm:
+        return llm, DECL_FROM_LLM, _llm_field_aliases(llm_text)
+    return "", DECL_NONE, {}
+
+
+def _decl_alias_tokens(decl: str, known: dict[str, Any]) -> list[str]:
+    """Aliases a declaration references, transitively, in first-seen order.
+
+    A lexically cheap walk over the aliases clang resolved (``known``): an alias's
+    own clang ``base`` may name further aliases (``typedef int *P; typedef P *Q;``),
+    so the walk runs to a fixpoint. It selects *which* aliases a declaration needs;
+    the type facts themselves remain clang's.
+    """
+    if not known:
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    tokens = set(re.findall(r"[A-Za-z_]\w*", decl))
+    changed = True
+    while changed:
+        changed = False
+        for token in list(tokens):
+            if token in seen or token not in known:
+                continue
+            seen.add(token)
+            ordered.append(token)
+            base = getattr(known[token], "base", "") or ""
+            tokens |= set(re.findall(r"[A-Za-z_]\w*", base))
+            changed = True
+    return ordered
+
+
+@dataclass(frozen=True)
+class _FieldAliasFact:
+    """Tombstone for a ``typedef`` **only** the plan's ``mock_declarations`` text
+    defines.
+
+    Nothing in the selected build context defines it, so it is not clang-resolved:
+    it has no includable defining header and no clang type identity. It exists so
+    :func:`_decl_alias_tokens` recognises the name as an alias the declaration uses
+    (selecting it for the verbatim carry below); the statement itself is carried,
+    not this placeholder. ``base`` is empty because a chained alias inside the same
+    field is carried as a group, needing no per-alias base walk.
+    """
+
+    base: str = ""
+
+
+def _alias_source_for_decl(decl: str, alias_source: dict[str, str],
+                           alias_facts: dict[str, Any],
+                           alias_statements: dict[str, str] | None = None,
+                           unsafe_headers: set[str] | None = None,
+                           field_aliases: dict[str, str] | None = None
+                           ) -> tuple[str, str, str]:
+    """The ``#include`` / verbatim ``typedef`` lines a declaration needs.
+
+    The private CMock interface header is compiled standalone (CMock generates the
+    mock from it, and the test includes it before the unit header), so an alias
+    named anywhere in the declaration — a parameter *or* the return type — needs
+    its definition in the same TU. Transitive aliases are pulled in to a fixpoint.
+
+    Returns ``(includes, statements, unduplicable)``. For each alias whose defining
+    file is a copied header that clang proved double-includable (``alias_source``,
+    minus ``unsafe_headers``), that header is ``#include``-d — one shared
+    definition per TU, validated by the real compiler, no guard analysis. For an
+    alias whose defining header is *not* safe to re-include (clang: a redefinition
+    diagnostic), the defining statement is carried verbatim when that is safe (no
+    inline ``{…}`` body); when its defining statement *does* have an inline body
+    (``inline_body`` from clang) it cannot be duplicated, so the alias name is
+    returned as ``unduplicable`` for a named limitation.
+
+    *field_aliases* are the ``typedef`` statements the plan's own
+    ``mock_declarations`` text carries (`_llm_field_aliases`). An alias one of
+    those defines is not clang-resolved (nothing selected defines it), so its
+    verbatim statement is carried — the pre-IMP-18 behavior that kept a fallback
+    prototype and its companion ``typedef`` together (I1/AP-06). An alias clang
+    *did* resolve is left to the clang-driven decision above, so a real defining
+    header is included rather than duplicated.
+    """
+    unsafe_headers = unsafe_headers or set()
+    field_aliases = field_aliases or {}
+    known: dict[str, Any] = dict(alias_facts)
+    # An alias the plan's own field text defines but nothing in the selected build
+    # context does: not clang-resolved, so it is carried verbatim (below) instead
+    # of being included from a defining header.
+    field_only = {name: statement for name, statement in field_aliases.items()
+                  if name not in alias_facts}
+    for name in field_only:
+        known[name] = _FieldAliasFact()
+    include_names: list[str] = []
+    wanted: list[str] = []
+    tokens = _decl_alias_tokens(decl, known)
+    for token in tokens:
+        header = alias_source.get(token)
+        fact = alias_facts.get(token)
+        if header is not None and header not in unsafe_headers:
+            if header not in include_names:
+                include_names.append(header)
+            continue
+        # A field-only alias is not clang-resolved: no other file in the build
+        # defines it, so its verbatim statement cannot collide — carried below as
+        # a group (a chained alias inside one field is not reachable through
+        # clang's `base` walk, and the whole field was emitted verbatim before
+        # IMP-18).
+        if token in field_only:
+            continue
+        # The alias is defined in a header clang proved double-include-unsafe, or
+        # has no includable header at all. Carrying its defining statement verbatim
+        # is only safe when that statement is self-contained: an inline `{…}` body,
+        # or an alias whose ultimate base is a record/enum whose body lives in that
+        # same unshareable file, cannot be repeated — record it as a named
+        # limitation instead of emitting uncompilable C.
+        if getattr(fact, "inline_body", False) or getattr(fact, "record", None):
+            return ("".join(f'#include "{n}"\n' for n in include_names), "", token)
+        statement = (alias_statements or {}).get(token)
+        if statement:
+            wanted.append(statement)
+    # Carry the field's own statements (source order) when the prototype uses any
+    # of them, so an alias only that text defines is never left undefined.
+    if any(token in field_only for token in tokens):
+        for statement in field_only.values():
+            if statement not in wanted:
+                wanted.append(statement)
+    includes = "".join(f'#include "{name}"\n' for name in include_names)
+    statements = "".join(f"{statement}\n" for statement in wanted)
+    if statements:
+        statements += "\n"
+    return includes, statements, ""
+
+
+def _project_yml(context=None, *, bench_root: Path | None = None,
+                 mock_headers: list[Path] | None = None) -> str:
+    """One Ceedling compiler context shared with the Clang resolution pass.
+
+    Native :mocks header preprocessing is selected automatically when a copied
+    real header contains conditionals; callers may explicitly opt in/out. This
+    heuristic *only* chooses a build mode, never asserts C type/preprocessor
+    semantics (libclang and native Ceedling still decide those).
+    """
+    from .build_context import BuildContext
+
+    context = context or BuildContext()
+    headers = mock_headers or []
+    conditional = any(
+        re.search(r"(?m)^\s*#\s*(?:if|ifdef|ifndef|elif|else)\b",
+                  _safe_read(header))
+        for header in headers if header.is_file()
     )
+    use_mocks = (context.mock_preprocessor == "mocks"
+                 or (context.mock_preprocessor == "auto" and conditional))
+    lines = [
+        ":project:",
+        "  :use_exceptions: FALSE",
+        "  :use_mocks: TRUE",
+        f"  :use_test_preprocessor: {':mocks' if use_mocks else ':none'}",
+        "  :build_root: build",
+        "  :test_file_prefix: test_",
+        "  :which_ceedling: gem",
+        ":paths:",
+        "  :source:",
+        f"    - {SOURCE_DIRNAME}/**",
+        "  :include:",
+        f"    - {SHIM_DIRNAME}/**",
+        f"    - {INTERFACE_DIRNAME}/**",
+        f"    - {SOURCE_DIRNAME}/**",
+    ]
+    if bench_root is not None:
+        for folder in context.include_dirs:
+            rel = folder.relative_to(bench_root.resolve()).as_posix()
+            lines.append(f"    - ../../{rel}/**")
+    lines.extend([
+        "  :test:",
+        f"    - {TEST_DIRNAME}/**",
+    ])
+    if context.defines:
+        lines.extend([":defines:", "  :test:"])
+        lines += [f"    - {value}" for value in context.defines]
+        lines.append("  :preprocess:")
+        lines += [f"    - {value}" for value in context.defines]
+    if context.args:
+        lines.extend([":flags:", "  :test:", "    :compile:", "      :*:"])
+        lines += [f"        - {arg}" for arg in context.args]
+        lines.extend(["    :preprocess:", "      :*:"])
+        lines += [f"        - {arg}" for arg in context.args]
+        link_args = [arg for arg in context.args if arg in ("-m32", "-m64")]
+        if link_args:
+            lines.extend(["    :link:", "      :*:"])
+            lines += [f"        - {arg}" for arg in link_args]
+    lines.extend([
+        ":cmock:",
+        "  :mock_prefix: mock_",
+        "  :when_no_prototypes: :warn",
+        "  :enforce_strict_ordering: FALSE",
+        "  :plugins:",
+        "    - :ignore",
+        "    - :expect_any_args",
+        "    - :return_thru_ptr",
+        "    - :ignore_arg",
+        "    - :callback",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 # --- test emission ----------------------------------------------------------
@@ -1221,7 +1958,10 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                     interfaces: dict[str, str], declarations: dict[str, str],
                     shim_names: list[str] | None = None,
                     aggregates: set[str] | None = None,
-                    unit_includes: list[str] | None = None) -> tuple[str, list[str], list[str]]:
+                    unit_includes: list[str] | None = None,
+                    typedefs: dict[str, Any] | None = None,
+                    refused_mocks: dict[str, str] | None = None) -> tuple[str, list[str], list[str]]:
+    refused_mocks = refused_mocks or {}
     unit_includes = list(unit_includes or [])
     lines: list[str] = [
         f"/* Generated Unity tests for {unit.path} — materialised from the plan. */",
@@ -1245,7 +1985,7 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
     for scenario in scenarios:
         fn = scenario.function
         signature = signatures.get(fn, "")
-        params = func_params(signature)
+        params = func_params(signature, typedefs)
         void_ret = return_is_void(signature)
         test_name = test_name_for(scenario.unit_id, scenario.id)
         controls: dict[str, dict[str, Any]] = {}
@@ -1259,11 +1999,15 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                 "so it would exercise no C behaviour")
             continue
         for symbol in scenario.mocks:
-            control = mock_controls(declarations.get(symbol, ""), symbol, aggregates)
+            if symbol in refused_mocks:
+                problem = f"{refused_mocks[symbol]}; the scenario is not executed"
+                break
+            control = mock_controls(declarations.get(symbol, ""), symbol, aggregates,
+                                    typedefs)
             if control is None:
                 problem = f"mock {symbol!r} has no usable declaration"
                 break
-            split = split_declaration(declarations.get(symbol, ""))
+            split = split_declaration(declarations.get(symbol, ""), typedefs)
             control["out_types"] = {p.name: _base_type(p) for p in split[1]} if split else {}
             controls[symbol] = control
         if problem is None:
@@ -1273,7 +2017,8 @@ def _emit_test_file(unit, scenarios: list[Scenario], signatures: dict[str, str],
                 problem = _case_problem(case, {s: {k: v for k, v in c.items() if k != "out_types"}
                                                for s, c in controls.items()}, params, aggregates,
                                         declared_mocks=declared_mocks,
-                                        determined=scenario_determined)
+                                        determined=scenario_determined,
+                                        typedefs=typedefs)
                 if problem:
                     break
         if problem is not None:
