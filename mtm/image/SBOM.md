@@ -12,8 +12,6 @@ Full licence texts are shipped inside the image under `/usr/share/doc/<component
 | --- | --- | --- | --- | --- |
 | Node.js base image | `node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20` | various (MIT, BSD, GPL for Debian components) | image base | Docker Hub official |
 | Dagu | `v2.20.1`, tar.gz sha256 `0d5c1612cd842931fe6d4e598fc2e43fb912a94122e571c62a8f73691ea49837` | **GPL-3.0-only** | image (separate binary) | github.com/dagu-org/dagu |
-| Claude Code | `2.1.302` (npm `@anthropic-ai/claude-code`) | Anthropic commercial terms (see shipped LICENSE) | image (separate CLI) | registry.npmjs.org |
-| Claude Code Router (CCR) | `3.1.3` (npm `@musistudio/claude-code-router`) | MIT | image (separate CLI) | registry.npmjs.org |
 | Ruby | `3.1` (distro `ruby` + `ruby-dev`) | Ruby / BSD-2-Clause | image (runtime for Ceedling) | debian package |
 | Ceedling | `1.1.10` (gem) | MIT | image (separate CLI; drives the generated functional suite) | rubygems.org |
 | Unity | `2.7.2` (vendored **by Ceedling**, not by this repo) | MIT | image (compiled into the generated suite only) | github.com/ThrowTheSwitch/Unity |
