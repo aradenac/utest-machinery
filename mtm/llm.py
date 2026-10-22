@@ -1,22 +1,9 @@
-"""LLM provider abstraction for generation.
+"""Minimal LLM provider interface for generation.
 
-The product's initial route is **in-image Claude Code + CCR → DeepSeek V4.1
-Flash** (``docs/development/setup.md``, ``worklog/decisions/0004``). Generation
-must therefore run the model *inside the container*, not from the host, and the
-credential is injected only for that operation.
-
-Two providers satisfy the same small interface:
-
-* :class:`ClaudeCodeProvider` — runs the in-image ``claude`` CLI in
-  non-interactive mode. CCR routes it to the configured DeepSeek model. The token
-  is supplied at runtime (a narrowly scoped ``--env-file``); it never appears in
-  an argv, an image layer or a log.
-* :class:`MockProvider` — returns a **recorded** response for a fixture, so the
-  whole pipeline (prompt → plan → generated suite) is reproducible offline with
-  no token. This is what fast PR CI and the unit tests use.
-
-The provider returns *text*; validating and grounding that text against the
-deterministic inventory is :mod:`mtm.plan`'s job, never the model's claim.
+The production model path uses a single in-image Scaleway Chat Completions
+request (no coding agent, CCR gateway, tool loop or model fallback).
+The deterministic recorded provider remains available for offline tests.
+Both implementations return planning JSON text; mtm.plan validates the plan.
 """
 
 from __future__ import annotations
@@ -103,7 +90,7 @@ class MockProvider:
             raise MtmError(
                 code=Code.LLM_CONFIG,
                 message="No recorded mock response matches this input.",
-                action="Use --provider claude-code for a real generation, or add a recording.",
+                action="Use --provider scaleway for a real generation, or add a recording.",
                 stage="llm-complete",
             )
         identity = best.get("identity", {})
@@ -115,50 +102,76 @@ class MockProvider:
         return json.dumps(best["response"])
 
 
-class ClaudeCodeProvider:
-    """Run the in-image Claude Code CLI, routed through CCR to DeepSeek.
+class ScalewayProvider:
+    """Single in-image direct-API completion, with token usage as evidence.
 
-    ``argv`` is the *complete* launcher, e.g.
-    ``["docker", "run", "--rm", "--env-file", creds, image, "claude", "-p"]``.
-    The prompt is written to stdin, so no prompt text ever lands in an argv or a
-    process listing. Any recognised authentication/routing failure is mapped to
-    the LLM error contract; the upstream token is never captured.
+    The untrusted model sees only the inventory prompt through stdin, never
+    project files. The in-image Python worker emits a JSON envelope with the
+    proposed plan text and upstream-reported token counts (when available).
     """
 
-    def __init__(self, argv: list[str], *, model: str, workspace: Path | None = None,
+    def __init__(self, argv: list[str], *, model: str,
+                 workspace: Path | None = None,
                  extra_env: dict[str, str] | None = None, timeout: int = 300):
         self.argv = argv
-        self.model = model
         self.workspace = workspace
         self.extra_env = extra_env or {}
         self.timeout = timeout
-        self.identity = LLMIdentity(provider="claude-code", model=model)
+        self.identity = LLMIdentity(provider="scaleway", model=model)
+        self.usage: dict = {}
+        self.returned_model: str = ""
 
     def complete(self, prompt: str, *, timeout: int | None = None) -> str:
-        env = {**os.environ, **self.extra_env}
+        self.usage = {}
+        self.returned_model = ""
         try:
             proc = subprocess.run(
                 self.argv, input=prompt, capture_output=True, text=True,
-                timeout=timeout or self.timeout, check=False, env=env,
+                timeout=timeout or self.timeout, check=False,
+                env={**os.environ, **self.extra_env},
                 cwd=str(self.workspace) if self.workspace else None,
             )
         except subprocess.TimeoutExpired:
             raise MtmError(
                 code=Code.LLM_NETWORK,
-                message="The LLM call timed out.",
-                action="Retry, or raise the budget if the model is slow.",
+                message="The direct Scaleway completion timed out.",
+                action="Check connectivity or the configured token/time budget.",
                 stage="llm-complete", retryable=True,
-            )
-        except OSError as exc:
+            ) from None
+        except OSError:
             raise MtmError(
                 code=Code.LLM_CONFIG,
-                message=f"Could not start the LLM harness: {exc}",
-                action="Check that the image is built ('mtm install') and the harness is present.",
+                message="Could not launch the in-image direct-API worker.",
+                action="Check Docker availability and run 'mtm install'.",
                 stage="llm-complete",
-            )
-        text = proc.stdout.strip()
-        if proc.returncode != 0 and not text:
-            raise _classify(proc.stderr or proc.stdout)
+            ) from None
+        if proc.returncode != 0:
+            raise _classify(proc.stderr)
+        try:
+            result = json.loads(proc.stdout)
+            text = result["content"]
+            usage = result.get("usage", {})
+            model = result.get("returned_model", "")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("empty response")
+            if not isinstance(usage, dict):
+                raise ValueError("invalid token usage")
+            if not isinstance(model, str):
+                raise ValueError("invalid model")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise MtmError(
+                code=Code.LLM_CONFIG,
+                message="The direct Scaleway worker returned an invalid envelope.",
+                action="Inspect the provider implementation; no plan was accepted.",
+                stage="llm-complete",
+            ) from None
+        # The worker sanitizes metadata; do not store request contents or token.
+        self.usage = {key: value for key, value in usage.items()
+                      if key in ("prompt_tokens", "completion_tokens",
+                                 "total_tokens", "reasoning_tokens",
+                                 "cached_prompt_tokens")
+                      and type(value) is int and value >= 0}
+        self.returned_model = model
         return text
 
 
@@ -170,7 +183,7 @@ def make_provider(name: str, *, image_ref: str, credentials_file: Path | None = 
     ``mock`` returns a **recorded** response (offline, token-free) — used by fast
     PR CI and the unit tests, and only ever on an **explicit** request: a recorded
     fixture response must never be silently substituted for a real model call
-    (B6). ``claude-code`` runs the in-image harness. ``auto`` prefers the real
+    (B6). ``scaleway`` runs the in-image harness. ``auto`` prefers the real
     harness and, when it is unavailable, **fails with a clear action** instead of
     quietly returning recorded answers, so a user can never see a suite that
     looks model-generated but came from a canned fixture.
@@ -181,7 +194,7 @@ def make_provider(name: str, *, image_ref: str, credentials_file: Path | None = 
 
     if name == "mock":
         return MockProvider(recordings_dir)
-    if name in ("auto", "claude-code"):
+    if name in ("auto", "scaleway"):
         if not image_exists(image_ref):
             raise MtmError(
                 code=Code.LLM_CONFIG,
@@ -203,24 +216,29 @@ def make_provider(name: str, *, image_ref: str, credentials_file: Path | None = 
     raise MtmError(
         code=Code.CONFIG_INVALID,
         message=f"Unknown LLM provider {name!r}.",
-        action="Use one of: auto, mock, claude-code.",
+        action="Use one of: auto, mock, scaleway.",
         stage="llm-init",
     )
 
 
-def _docker_provider(image_ref: str, credentials_file: Path, model: str) -> "ClaudeCodeProvider":
-    """The in-image Claude Code harness, run with a scoped --env-file mount.
+def _docker_provider(image_ref: str, credentials_file: Path,
+                     model: str) -> ScalewayProvider:
+    """Run one direct HTTP completion in a transient, credential-scoped image.
 
-    The bench is deliberately NOT mounted: the LLM step only turns the inventory
-    text into a plan and needs no filesystem access, so it cannot write to inputs.
+    No project filesystem is mounted, and all non-secret runtime options are
+    passed explicitly. The image itself contains no provider credentials.
     """
-    # ``-i`` keeps stdin open: the prompt is piped in, never passed as an argv.
     argv = ["docker", "run", "--rm", "-i", "--entrypoint", "mtm-llm"]
     user = _invoking_user()
     if user:
         argv += ["--user", user]
-    argv += ["--env-file", str(credentials_file), image_ref]
-    return ClaudeCodeProvider(argv, model=model)
+    argv += ["--env-file", str(credentials_file),
+             "--env", f"MTM_LLM_MODEL={model}"]
+    for option in ("MTM_LLM_REASONING_EFFORT", "MTM_LLM_MAX_TOKENS"):
+        if option in os.environ:
+            argv += ["--env", f"{option}={os.environ[option]}"]
+    argv.append(image_ref)
+    return ScalewayProvider(argv, model=model)
 
 
 def _invoking_user() -> str | None:
@@ -233,25 +251,19 @@ def _invoking_user() -> str | None:
 
 
 def _classify(stderr: str) -> MtmError:
-    """Map a harness failure to the documented LLM error contract (no secrets)."""
-    low = stderr.lower()
-    if "401" in low or "403" in low or "unauthor" in low or "auth" in low:
+    """Translate sanitized in-image error codes without leaking upstream data."""
+    message = stderr.strip()
+    if message.startswith("LLM_AUTH:"):
         return MtmError(
-            code=Code.LLM_AUTH,
-            message="The LLM upstream rejected the credential.",
-            action="Verify SCW_BEARER_TOKEN in the credentials file and that it is current.",
-            stage="llm-complete",
-        )
-    if "timeout" in low or "network" in low or "connect" in low or "resolve" in low:
+            code=Code.LLM_AUTH, message="Scaleway rejected or lacks credentials.",
+            action="Check SCW_BASE_URL and SCW_BEARER_TOKEN.",
+            stage="llm-complete")
+    if message.startswith("LLM_NETWORK:"):
         return MtmError(
-            code=Code.LLM_NETWORK,
-            message="The LLM upstream was unreachable.",
-            action="Check outbound connectivity from the container and retry.",
-            stage="llm-complete", retryable=True,
-        )
+            code=Code.LLM_NETWORK, message="The Scaleway API was unreachable or unavailable.",
+            action="Retry after checking connectivity and provider status.",
+            stage="llm-complete", retryable=True)
     return MtmError(
-        code=Code.LLM_CONFIG,
-        message="The LLM harness failed.",
-        action="Inspect 'mtm doctor' and the LLM logs; the route may be misconfigured.",
-        stage="llm-complete",
-    )
+        code=Code.LLM_CONFIG, message="The direct Scaleway request failed.",
+        action="Check the model route, output budget and provider configuration.",
+        stage="llm-complete")
