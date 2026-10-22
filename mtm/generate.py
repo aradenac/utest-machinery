@@ -152,6 +152,13 @@ def run_generate(
     prompt = build_prompt(inventory)
     response = provider.complete(prompt)
     plan: Plan = parse_plan(response, inventory, provider.identity)
+    # Record actual upstream usage, without estimating absent token counters.
+    usage = getattr(provider, "usage", None)
+    if isinstance(usage, dict) and usage:
+        plan.model["usage"] = dict(usage)
+    returned_model = getattr(provider, "returned_model", "")
+    if isinstance(returned_model, str) and returned_model:
+        plan.model["returned_model"] = returned_model
     from .build_context import context_identity
     plan.build_context_hash = context_identity(bench_root, build_context)
     plan_path = write_json_atomic(state / PLAN_FILE, plan.to_dict())
@@ -239,10 +246,14 @@ def _provider_record(provider: LLMProvider) -> dict[str, Any]:
     identity = provider.identity
     mode = {
         "mock": "recorded fixture (offline, token-free)",
-        "claude-code": "in-image Claude Code + CCR (live model)",
+        "scaleway": "in-image direct Scaleway Chat Completions (live model)",
     }.get(identity.provider, identity.provider)
-    return {"name": identity.provider, "model": identity.model, "mode": mode,
-            "prompt_version": identity.prompt_version, "called": True}
+    result = {"name": identity.provider, "model": identity.model, "mode": mode,
+              "prompt_version": identity.prompt_version, "called": True}
+    usage = getattr(provider, "usage", None)
+    if isinstance(usage, dict) and usage:
+        result["usage"] = dict(usage)
+    return result
 
 
 def _run_and_classify(bench_root: Path, plan: Plan, generated, *,
