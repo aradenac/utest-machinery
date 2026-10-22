@@ -27,7 +27,7 @@ Each numbered milestone is a **substantial feature PR**, not an arbitrary implem
 **Owner-approved provider simplification (22 October 2026).** In this same
 draft PR #35, replace the product's in-Docker Claude Code + CCR pure-completion
 route with a single direct Scaleway Chat Completions request. Preserve the
-existing \`LLMProvider.complete(prompt)\` contract, plan-v2 prompt and
+existing `LLMProvider.complete(prompt)` contract, plan-v2 prompt and
 grounding, stored oracles, C generator, and fully offline verification. Remove
 unneeded agent/router dependencies from the image and its SBOM, retain
 ephemeral credentials, model/provenance identity and error classifications,
