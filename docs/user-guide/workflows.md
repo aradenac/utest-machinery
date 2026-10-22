@@ -76,6 +76,23 @@ flowchart TD
 
 Scope changes never delete historical evidence. Adding an input triggers discovery, impact analysis and proposed tests. Removing an input marks related scenarios out-of-scope or obsolete, shows the impact before applying it, and preserves historical IDs. Regeneration must be incremental; never overwrite previously validated oracles silently. A developer can review proposed edits and explicitly accept or reject them.
 
+### Direct model inference (no agent harness)
+
+\`mtm generate --provider scaleway\` (or \`--provider auto\`) performs one
+bounded direct Chat Completions request inside the product image. It neither
+runs Claude Code/CCR nor mounts source files into the inference container.
+\`--provider mock\` remains an explicit token-free recorded-fixture mode; it
+is never selected silently after a real-provider failure. Use
+\`--model scaleway/deepseek-v4.1-flash\` to select the known model.
+
+Configure \`SCW_BASE_URL\` and \`SCW_BEARER_TOKEN\` in the existing protected
+user credentials file. Optional \`MTM_LLM_REASONING_EFFORT=low\` and
+\`MTM_LLM_MAX_TOKENS=8192\` tune the inference budget. The plan's model
+metadata carries provider-reported token usage when available; none is
+fabricated. Upstream transient failures and truncated responses do not turn
+into passing tests. The ensuing \`mtm verify\` does not use an LLM.
+
+
 ### Selected host compilation context (milestone 3)
 
 When source files depend on selected macros, include roots, or host C ABI flags,
